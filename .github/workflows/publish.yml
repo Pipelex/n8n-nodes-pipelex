@@ -33,3 +33,19 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      - name: Wait for npm registry
+        run: |
+          echo "⏳ Waiting 30 seconds for npm registry to update..."
+          sleep 30
+
+      - name: Verify published package
+        id: verify-published
+        run: make check-published
+        continue-on-error: true
+
+      - name: Report verification results
+        if: steps.verify-published.outcome == 'failure'
+        run: |
+          echo "⚠️ Published package verification failed"
+          echo "Please check the n8n scanner output above"
+

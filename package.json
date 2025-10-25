@@ -17,7 +17,8 @@
 		"build": "n8n-node build",
 		"lint": "eslint .",
 		"format": "prettier --write .",
-		"prepublishOnly": "pnpm run build"
+		"prepublishOnly": "pnpm run build",
+		"postpublish": "sleep 10 && make check-published"
 	},
 	"files": [
 		"dist"
