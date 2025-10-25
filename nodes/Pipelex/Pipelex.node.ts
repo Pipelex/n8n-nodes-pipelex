@@ -134,16 +134,16 @@ export class Pipelex implements INodeType {
 
 			const url = `${baseUrl.replace(/\/$/, '')}/api/v1/pipeline/execute`;
 
-				const response = await this.helpers.requestWithAuthentication.call(
-					this,
-					'piplexApi',
-					{
-						method: 'POST',
-						url,
-						body,
-						json: true,
-					},
-				);
+			const response = await this.helpers.httpRequestWithAuthentication.call(
+				this,
+				'piplexApi',
+				{
+					method: 'POST',
+					url,
+					body,
+					json: true,
+				},
+			);
 
 				returnData.push({
 					json: response,
