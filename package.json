@@ -6,7 +6,7 @@
 	"keywords": ["n8n-community-node-package"],
 	"author": {
 		"name": "Evotis S.A.S.",
-		"email": "n8n@pipelex.com"
+		"email": "oss@pipelex.com"
 	},
 	"repository": {
 		"type": "git",

@@ -2,7 +2,7 @@
 
 ## [v0.0.3] - 2025-10-25
 
-- Update the support email to `n8n@pipelex.com`
+- Update the support email to `oss@pipelex.com`
 
 ## [v0.0.2] - 2025-10-25
 
