@@ -60,9 +60,14 @@ check:
 	@echo "$(BLUE)Running quality checks...$(NC)"
 	@pnpm run lint
 	@pnpm run build
-	@echo "$(YELLOW)Running n8n scanner...$(NC)"
-	@npx --yes @n8n/scan-community-package n8n-nodes-pipelex || echo "$(YELLOW)Note: Scanner requires published package$(NC)"
+	@echo "$(YELLOW)Checking built package with ESLint...$(NC)"
+	@pnpm exec eslint --no-ignore dist/ || (echo "$(RED)✗ ESLint errors in dist/$(NC)" && exit 1)
 	@echo "$(GREEN)✓ All checks passed$(NC)"
+
+check-published:
+	@echo "$(BLUE)Running quality checks on published package...$(NC)"
+	@echo "$(YELLOW)Running n8n scanner on published version...$(NC)"
+	@npx --yes @n8n/scan-community-package n8n-nodes-pipelex || echo "$(YELLOW)Note: Scanner checks the published npm package$(NC)"
 
 help:
 	@echo "$(BLUE)━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━$(NC)"
@@ -71,7 +76,8 @@ help:
 	@echo ""
 	@echo "$(YELLOW)Quick Start:$(NC)"
 	@echo "  $(GREEN)make install$(NC)        Install pnpm (10.18.1) and dependencies"
-	@echo "  $(GREEN)make check$(NC)          Run all quality checks (lint, build, validate)"
+	@echo "  $(GREEN)make check$(NC)          Run quality checks on local code (for PRs)"
+	@echo "  $(GREEN)make check-published$(NC) Check published npm package (auto-runs after publish)"
 	@echo "  $(GREEN)make setup$(NC)          Build and link the node for local testing"
 	@echo "  $(GREEN)make run$(NC)            Rebuild and start n8n (interactive mode)"
 	@echo "  $(GREEN)make restart$(NC)        Rebuild and start n8n in background"
@@ -98,14 +104,17 @@ help:
 	@echo "  $(GREEN)make docs-deploy$(NC)    Deploy documentation to GitHub Pages"
 	@echo "  $(GREEN)make clean-env$(NC)      Remove Python virtual environment"
 	@echo ""
+	@echo "$(YELLOW)Publishing:$(NC)"
+	@echo "  npm version patch    Bump patch version (0.0.x)"
+	@echo "  npm version minor    Bump minor version (0.x.0)"
+	@echo "  npm version major    Bump major version (x.0.0)"
+	@echo "  npm publish          Publish to npm (auto-runs check-published after)"
+	@echo ""
 	@echo "$(YELLOW)Direct Commands:$(NC)"
 	@echo "  pnpm install         Install dependencies"
 	@echo "  pnpm run build       Build the project"
 	@echo "  pnpm run lint        Run ESLint"
 	@echo "  pnpm run format      Format code with Prettier"
-	@echo "  npm version patch    Bump patch version (0.0.x)"
-	@echo "  npm version minor    Bump minor version (0.x.0)"
-	@echo "  npm version major    Bump major version (x.0.0)"
 	@echo ""
 	@echo "$(BLUE)━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━$(NC)"
 	@echo "$(YELLOW)Tip:$(NC) Run $(GREEN)make <command>$(NC) to execute any command above"

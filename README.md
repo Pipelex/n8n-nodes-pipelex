@@ -11,6 +11,10 @@
   </p>
 
   <p>
+    📦 <a href="https://www.npmjs.com/package/n8n-nodes-pipelex">npm install n8n-nodes-pipelex</a>
+  </p>
+
+  <p>
     <a href="#installation">Installation</a> •
     <a href="#what-is-pipelex">What is Pipelex?</a> •
     <a href="#usage">Usage</a> •
