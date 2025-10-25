@@ -1,0 +1,46 @@
+# Source files - only dist should be published
+nodes/**/*.ts
+credentials/**/*.ts
+!dist/**/*
+
+# Development files
+.github/
+.vscode/
+*.log
+*.tsbuildinfo
+.env.n8n
+n8n.log
+
+# Documentation (keep README.md for npm)
+TESTING.md
+START_HERE.md
+MAKEFILE_GUIDE.md
+PROJECT_STATUS.md
+SETUP_SUMMARY.md
+CHECKLIST.md
+
+# Git files
+.git/
+.gitignore
+
+# Config files
+.eslintrc*
+eslint.config.mjs
+.prettierrc*
+tsconfig.json
+Makefile
+
+# Dependencies
+node_modules/
+pnpm-lock.yaml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.idea/
+

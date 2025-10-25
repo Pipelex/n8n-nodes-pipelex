@@ -1,0 +1,49 @@
+{
+	"name": "n8n-nodes-pipelex",
+	"version": "0.0.1",
+	"description": "Pipelex n8n node package",
+	"license": "MIT",
+	"keywords": ["n8n-community-node-package"],
+	"author": {
+		"name": "Evotis S.A.S.",
+		"email": "contact@pipelex.com"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/pipelex/n8n-nodes-pipelex.git"
+	},
+	"scripts": {
+		"dev": "n8n-node dev",
+		"build": "n8n-node build",
+		"lint": "eslint .",
+		"format": "prettier --write .",
+		"prepublishOnly": "pnpm run build"
+	},
+	"files": [
+		"dist"
+	],
+	"n8n": {
+		"n8nNodesApiVersion": 1,
+		"credentials": [
+			"dist/credentials/PiplexApi.credentials.js"
+		],
+		"nodes": [
+			"dist/nodes/Pipelex/Pipelex.node.js"
+		]
+	},
+	"devDependencies": {
+		"@n8n/node-cli": "*",
+		"typescript": "~5.6",
+		"typescript-eslint": "^8.0.0",
+		"eslint": "^9.0.0"
+	},
+	"peerDependencies": {
+		"n8n-workflow": "*"
+	},
+	"pnpm": {
+		"overrides": {
+			"change-case": "4.1.2"
+		}
+	},
+	"packageManager": "pnpm@10.18.1+sha512.77a884a165cbba2d8d1c19e3b4880eee6d2fcabd0d879121e282196b80042351d5eb3ca0935fa599da1dc51265cc68816ad2bddd2a2de5ea9fdf92adbec7cd34"
+}
