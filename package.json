@@ -1,12 +1,12 @@
 {
 	"name": "n8n-nodes-pipelex",
-	"version": "0.0.2",
+	"version": "0.0.3",
 	"description": "Pipelex n8n node package",
 	"license": "MIT",
 	"keywords": ["n8n-community-node-package"],
 	"author": {
 		"name": "Evotis S.A.S.",
-		"email": "contact@pipelex.com"
+		"email": "n8n@pipelex.com"
 	},
 	"repository": {
 		"type": "git",
