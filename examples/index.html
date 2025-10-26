@@ -1,0 +1,1836 @@
+<!DOCTYPE html><html lang="en" class="no-js"><head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Official n8n community node for Pipelex - Execute Pipelex pipelines in your n8n workflows">
+      
+      
+      
+        <link rel="canonical" href="https://pipelex.github.io/n8n-nodes-pipelex/examples/">
+      
+      
+        <link rel="prev" href="../usage/">
+      
+      
+      
+      <link rel="icon" href="https://pipelex-web.s3.amazonaws.com/logo/pipelex-favicon-32.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.6.22">
+    
+    
+      
+        <title>Examples - Pipelex Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.84d31ad4.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.06af60db.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+    
+  <link href="../assets/stylesheets/glightbox.min.css" rel="stylesheet"><script src="../assets/javascripts/glightbox.min.js"></script><style id="glightbox-style">
+            html.glightbox-open { overflow: initial; height: 100%; }
+            .gslide-title { margin-top: 0px; user-select: text; }
+            .gslide-desc { color: #666; user-select: text; }
+            .gslide-image img { background: white; }
+            .gscrollbar-fixer { padding-right: 15px; }
+            .gdesc-inner { font-size: 0.75rem; }
+            body[data-md-color-scheme="slate"] .gdesc-inner { background: var(--md-default-bg-color); }
+            body[data-md-color-scheme="slate"] .gslide-title { color: var(--md-default-fg-color); }
+            body[data-md-color-scheme="slate"] .gslide-desc { color: var(--md-default-fg-color); }
+        </style></head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="deep-purple">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#pipelex-n8n-node-examples" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="Pipelex Docs" class="md-header__button md-logo" aria-label="Pipelex Docs" data-md-component="logo">
+      
+  <img src="https://pipelex-web.s3.amazonaws.com/logo/Pipelex-logo-wot-mono-560x176.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"></path></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Pipelex Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Examples
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="deep-purple" aria-label="Switch to dark mode" type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"></path></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="purple" aria-label="Switch to light mode" type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"></path></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"></path></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"></path></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"></path></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"></path></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/Pipelex/pipelex" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"></path></svg>
+  </div>
+  <div class="md-source__repository">
+    Pipelex on GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="https://docs.pipelex.com/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="https://docs.pipelex.com/pages/api/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  API Reference
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href=".." class="md-tabs__link">
+          
+  
+  
+  n8n Node
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="https://docs.pipelex.com/pages/configuration/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Configuration
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="https://docs.pipelex.com/pages/tools/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Development
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation">
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="Pipelex Docs" class="md-nav__button md-logo" aria-label="Pipelex Docs" data-md-component="logo">
+      
+  <img src="https://pipelex-web.s3.amazonaws.com/logo/Pipelex-logo-wot-mono-560x176.png" alt="logo">
+
+    </a>
+    Pipelex Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/Pipelex/pipelex" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"></path></svg>
+  </div>
+  <div class="md-source__repository">
+    Pipelex on GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://docs.pipelex.com/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Home
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://docs.pipelex.com/pages/api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    API Reference
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    n8n Node
+    
+  </span>
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            n8n Node
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Getting Started
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../usage/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Usage Guide
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    Examples
+    
+  </span>
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    Examples
+    
+  </span>
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#example-1-cv-job-matching-interview-question-generation" class="md-nav__link">
+    <span class="md-ellipsis">
+      Example 1: CV-Job Matching &amp; Interview Question Generation
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Example 1: CV-Job Matching &amp; Interview Question Generation">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      Overview
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#node-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      Node Configuration
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Node Configuration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#base-url" class="md-nav__link">
+    <span class="md-ellipsis">
+      Base URL
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pipe-code" class="md-nav__link">
+    <span class="md-ellipsis">
+      Pipe Code
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pipelex-bundle-plx_content" class="md-nav__link">
+    <span class="md-ellipsis">
+      Pipelex Bundle (plx_content)
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#inputs" class="md-nav__link">
+    <span class="md-ellipsis">
+      Inputs
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#output-name" class="md-nav__link">
+    <span class="md-ellipsis">
+      Output Name
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#output-multiplicity" class="md-nav__link">
+    <span class="md-ellipsis">
+      Output Multiplicity
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#screenshot-node-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      Screenshot: Node Configuration
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#expected-output" class="md-nav__link">
+    <span class="md-ellipsis">
+      Expected Output
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#processing-the-results" class="md-nav__link">
+    <span class="md-ellipsis">
+      Processing the Results
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#example-2-interview-feedback-consolidation" class="md-nav__link">
+    <span class="md-ellipsis">
+      Example 2: Interview Feedback Consolidation
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Example 2: Interview Feedback Consolidation">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#overview_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Overview
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#node-configuration_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Node Configuration
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Node Configuration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#base-url_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Base URL
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pipe-code_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Pipe Code
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pipelex-bundle-plx_content_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Pipelex Bundle (plx_content)
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#inputs_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Inputs
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#output-name_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Output Name
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#output-multiplicity_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Output Multiplicity
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#screenshot-node-configuration_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Screenshot: Node Configuration
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#expected-output_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Expected Output
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#processing-the-results_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Processing the Results
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#more-examples-coming-soon" class="md-nav__link">
+    <span class="md-ellipsis">
+      More Examples Coming Soon
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://docs.pipelex.com/pages/configuration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Configuration
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://docs.pipelex.com/pages/tools/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    Development
+    
+  </span>
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc">
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#example-1-cv-job-matching-interview-question-generation" class="md-nav__link">
+    <span class="md-ellipsis">
+      Example 1: CV-Job Matching &amp; Interview Question Generation
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Example 1: CV-Job Matching &amp; Interview Question Generation">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      Overview
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#node-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      Node Configuration
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Node Configuration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#base-url" class="md-nav__link">
+    <span class="md-ellipsis">
+      Base URL
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pipe-code" class="md-nav__link">
+    <span class="md-ellipsis">
+      Pipe Code
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pipelex-bundle-plx_content" class="md-nav__link">
+    <span class="md-ellipsis">
+      Pipelex Bundle (plx_content)
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#inputs" class="md-nav__link">
+    <span class="md-ellipsis">
+      Inputs
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#output-name" class="md-nav__link">
+    <span class="md-ellipsis">
+      Output Name
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#output-multiplicity" class="md-nav__link">
+    <span class="md-ellipsis">
+      Output Multiplicity
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#screenshot-node-configuration" class="md-nav__link">
+    <span class="md-ellipsis">
+      Screenshot: Node Configuration
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#expected-output" class="md-nav__link">
+    <span class="md-ellipsis">
+      Expected Output
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#processing-the-results" class="md-nav__link">
+    <span class="md-ellipsis">
+      Processing the Results
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#example-2-interview-feedback-consolidation" class="md-nav__link">
+    <span class="md-ellipsis">
+      Example 2: Interview Feedback Consolidation
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Example 2: Interview Feedback Consolidation">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#overview_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Overview
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#node-configuration_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Node Configuration
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Node Configuration">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#base-url_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Base URL
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pipe-code_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Pipe Code
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pipelex-bundle-plx_content_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Pipelex Bundle (plx_content)
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#inputs_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Inputs
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#output-name_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Output Name
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#output-multiplicity_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Output Multiplicity
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#screenshot-node-configuration_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Screenshot: Node Configuration
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#expected-output_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Expected Output
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#processing-the-results_1" class="md-nav__link">
+    <span class="md-ellipsis">
+      Processing the Results
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#more-examples-coming-soon" class="md-nav__link">
+    <span class="md-ellipsis">
+      More Examples Coming Soon
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="pipelex-n8n-node-examples">Pipelex n8n Node Examples</h1>
+<p>This page provides real-world examples of using the Pipelex n8n node in workflows.</p>
+<hr>
+<h2 id="example-1-cv-job-matching-interview-question-generation">Example 1: CV-Job Matching &amp; Interview Question Generation</h2>
+<p><strong>Use Case:</strong> Automatically analyze how well a candidate's CV matches a job offer and generate relevant interview questions.</p>
+<h3 id="overview">Overview</h3>
+<p>This pipeline:
+1. Extracts text from a CV PDF
+2. Analyzes alignment between CV and job requirements
+3. Generates targeted interview questions based on gaps and strengths
+4. Compiles everything into a comprehensive interview preparation document</p>
+<h3 id="node-configuration">Node Configuration</h3>
+<h4 id="base-url">Base URL</h4>
+<p></p><div class="highlight"><pre><span></span><code>http://localhost:8081
+</code></pre></div>
+(or your Pipelex API server URL)<p></p>
+<h4 id="pipe-code">Pipe Code</h4>
+<p>Leave empty (we'll use inline PLX content)</p>
+<h4 id="pipelex-bundle-plx_content">Pipelex Bundle (plx_content)</h4>
+<details>
+<summary>Click to expand full PLX pipeline definition</summary>
+
+<div class="highlight"><pre><span></span><code>domain = "cv_job_matching"
+description = "Analyzing CV-job offer alignment and generating interview questions"
+main_pipe = "analyze_cv_job_match_and_questions"
+
+[concept.MatchAnalysis]
+description = "Structured evaluation of how well a candidate's CV aligns with a job offer."
+
+[concept.MatchAnalysis.structure]
+overall_match_score = { type = "number", description = "Numerical score representing overall fit between candidate and job (0-100)", required = true }
+qualifications_alignment = { type = "text", description = "Assessment of how candidate's education and certifications match job requirements", required = true }
+experience_alignment = { type = "text", description = "Evaluation of how candidate's work history aligns with required experience", required = true }
+skills_match = { type = "text", description = "Analysis of technical and soft skills match between CV and job requirements", required = true }
+identified_gaps = { type = "text", description = "List of requirements from job offer not clearly met by candidate's CV", required = true }
+strengths = { type = "text", description = "Key strengths and advantages the candidate brings relative to the position", required = true }
+
+[concept.InterviewQuestion]
+description = "A single question to be asked during an interview."
+
+[concept.InterviewQuestion.structure]
+question_text = { type = "text", description = "The actual question to ask the candidate", required = true }
+purpose = { type = "text", description = "Why this question is being asked (e.g., verify skill, explore gap, assess cultural fit)", required = true }
+category = { type = "text", description = "Type of question (e.g., technical, behavioral, experience-based, gap-exploration)", required = true }
+
+[concept.InterviewPreparation]
+description = "Complete document containing match analysis and recommended interview questions."
+refines = "Text"
+
+[pipe.analyze_cv_job_match_and_questions]
+type = "PipeSequence"
+description = """
+Main pipeline that orchestrates the complete CV-job matching analysis and interview preparation workflow. Takes a CV PDF file and job offer text as inputs, extracts text from the CV, performs comprehensive match analysis, generates targeted interview questions, and compiles everything into a final interview preparation document. This is the entry point for the entire pipeline.
+"""
+inputs = { cv_pdf = "PDF", job_offer_text = "Text" }
+output = "InterviewPreparation"
+steps = [
+    { pipe = "extract_cv_text", result = "cv_pages" },
+    { pipe = "analyze_match", result = "match_analysis" },
+    { pipe = "generate_interview_questions", result = "interview_questions" },
+    { pipe = "compile_results", result = "interview_preparation" },
+]
+
+[pipe.extract_cv_text]
+type = "PipeExtract"
+description = """
+Extracts text content from the CV PDF document, converting it into a list of pages that can be analyzed. This pipe processes the PDF file and outputs structured page content with text extracted from each page of the CV.
+"""
+inputs = { cv_pdf = "PDF" }
+output = "Page[]"
+model = "extract_text_from_pdf"
+
+[pipe.analyze_match]
+type = "PipeLLM"
+description = """
+Analyzes the match between the candidate's CV and the job offer by evaluating qualifications alignment, experience alignment, skills match, and identifying gaps. Produces a structured MatchAnalysis object with an overall match score (0-100), detailed assessments of how the candidate's education, certifications, work history, and skills align with job requirements, identified gaps where requirements are not clearly met, and key strengths the candidate brings to the position.
+"""
+inputs = { cv_pages = "Page[]", job_offer_text = "Text" }
+output = "MatchAnalysis"
+model = "llm_to_answer_hard_questions"
+system_prompt = """
+You are an expert HR analyst and recruiter specializing in candidate evaluation. Your task is to produce a structured MatchAnalysis that comprehensively evaluates how well a candidate's CV aligns with a job offer.
+"""
+prompt = """
+Analyze how well the candidate's CV matches the job offer requirements.
+
+@cv_pages
+
+@job_offer_text
+
+Perform a comprehensive evaluation covering:
+- Overall match score (0-100)
+- How qualifications (education, certifications) align with requirements
+- How work experience aligns with required experience
+- Technical and soft skills match
+- Gaps where requirements are not clearly met
+- Key strengths the candidate brings
+
+Be thorough and objective in your assessment.
+"""
+
+[pipe.generate_interview_questions]
+type = "PipeLLM"
+description = """
+Generates a comprehensive list of relevant interview questions based on the match analysis and job offer. Questions are designed to explore identified gaps, verify claimed strengths and skills, assess experience depth, and clarify areas requiring further investigation. Each question includes the question text, its purpose, and category (technical, behavioral, experience-based, or gap-exploration).
+"""
+inputs = { match_analysis = "MatchAnalysis", job_offer_text = "Text" }
+output = "InterviewQuestion[]"
+model = "llm_to_write_questions"
+system_prompt = """
+You are an expert HR professional and interviewer. Your task is to generate structured InterviewQuestion objects based on the match analysis and job requirements.
+"""
+prompt = """
+Based on the match analysis and job offer, generate a comprehensive list of interview questions.
+
+@match_analysis
+
+@job_offer_text
+
+Generate interview questions that:
+- Explore identified gaps and missing qualifications
+- Verify claimed strengths and skills from the CV
+- Assess depth of relevant experience
+- Clarify areas requiring further investigation
+- Include a mix of technical, behavioral, experience-based, and gap-exploration questions
+
+Ensure each question is purposeful and directly tied to evaluating the candidate's fit for this specific role.
+"""
+
+[pipe.compile_results]
+type = "PipeLLM"
+description = """
+Compiles the match analysis and generated interview questions into a final comprehensive interview preparation document. This document provides a complete overview for interviewers, combining the structured match analysis with the recommended questions to facilitate an effective interview process.
+"""
+inputs = { match_analysis = "MatchAnalysis", interview_questions = "InterviewQuestion[]" }
+output = "InterviewPreparation"
+model = "llm_to_answer_easy_questions"
+system_prompt = """
+You are compiling a comprehensive interview preparation document. Your task is to synthesize the match analysis and interview questions into a well-structured, professional document that will guide interviewers through an effective interview process.
+"""
+prompt = """
+Create a comprehensive interview preparation document that combines the following match analysis and interview questions.
+
+@match_analysis
+
+@interview_questions
+
+Compile these elements into a cohesive interview preparation document that provides interviewers with a complete overview of the candidate's fit and the recommended questions to explore during the interview.
+"""
+</code></pre></div>
+
+</details>
+
+<h4 id="inputs">Inputs</h4>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"cv_pdf"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">"concept"</span><span class="p">:</span><span class="w"> </span><span class="s2">"native.PDF"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"content"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">"url"</span><span class="p">:</span><span class="w"> </span><span class="s2">"https://upload.wikimedia.org/wikipedia/commons/c/cc/Resume.pdf"</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">"job_offer_text"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">"concept"</span><span class="p">:</span><span class="w"> </span><span class="s2">"native.Text"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"content"</span><span class="p">:</span><span class="w"> </span><span class="s2">"GenAI Engineer - Pipelex (Paris)\n\nWe're growing our team of AI engineers in Paris, to build our Agentic Knowledge Framework.\n\n[Full job description: https://pipelex.notion.site/genai-engineer-job-startup-paris]\n\nKey requirements:\n- Strong Python skills\n- Experience with LLMs and AI frameworks\n- Ability to ship fast and iterate\n- Knowledge of software architecture\n- Passion for building developer tools\n\n..."</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<blockquote>
+<p>Here is the full job offer <a href="https://pipelex.notion.site/genai-engineer-job-startup-paris">link</a>.</p>
+</blockquote>
+<h4 id="output-name">Output Name</h4>
+<p>Leave empty (we'll use the default output name)</p>
+<h4 id="output-multiplicity">Output Multiplicity</h4>
+<p>Leave empty</p>
+<h3 id="screenshot-node-configuration">Screenshot: Node Configuration</h3>
+<p>Here's what the configured Pipelex node looks like in n8n:</p>
+<p><a class="glightbox" data-type="image" data-width="100%" data-height="auto" href="../images/example_1.png" data-desc-position="bottom"><img alt="CV-Job Matching Node Configuration" src="../images/example_1.png"></a></p>
+<p>The screenshot shows:
+- <strong>Credential</strong>: Pipelex Bearer Token account selected
+- <strong>Base URL</strong>: <code>http://127.0.0.1:8081</code> (local API server)
+- <strong>Pipelex Bundle</strong>: Full pipeline definition in the text area
+- <strong>Inputs</strong>: JSON object with <code>cv_pdf</code> and <code>job_offer_text</code> properly formatted
+- <strong>Output</strong>: Successful execution showing the interview preparation document</p>
+<h3 id="expected-output">Expected Output</h3>
+<p>The pipeline returns an <code>InterviewPreparation</code> document containing:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"interview_preparation"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">"concept"</span><span class="p">:</span><span class="w"> </span><span class="s2">"cv_job_matching.InterviewPreparation"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"content"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">"text"</span><span class="p">:</span><span class="w"> </span><span class="s2">"INTERVIEW PREPARATION DOCUMENT\n\n=== MATCH ANALYSIS ===\n\nOverall Match Score: 78/100\n\nQualifications Alignment:\n- Strong computer science background...\n\nExperience Alignment:\n- 5 years of software development experience...\n\nSkills Match:\n- Python: Excellent match\n- LLM frameworks: Demonstrated experience...\n\nIdentified Gaps:\n- Limited mention of specific AI agent architectures\n- No explicit mention of Paris location preference\n\nStrengths:\n- Strong technical foundation in Python and ML\n- Proven track record of shipping products...\n\n=== RECOMMENDED INTERVIEW QUESTIONS ===\n\n1. [Technical] Can you describe your experience building production LLM systems?\n   Purpose: Verify claimed LLM experience\n   Category: technical\n\n2. [Behavioral] Tell us about a time you had to ship a feature quickly. How did you balance speed with quality?\n   Purpose: Assess alignment with 'ship, ship, ship' value\n   Category: behavioral\n\n3. [Gap Exploration] We see you have strong Python experience, but could you elaborate on your exposure to AI agent architectures?\n   Purpose: Explore identified gap in agent architecture knowledge\n   Category: gap-exploration\n\n..."</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3 id="processing-the-results">Processing the Results</h3>
+<p>After the Pipelex node, you can:</p>
+<ol>
+<li>
+<p><strong>Send to HR team:</strong>
+   </p><div class="highlight"><pre><span></span><code>Pipelex → Email node (send interview doc to hiring manager)
+</code></pre></div><p></p>
+</li>
+<li>
+<p><strong>Store in database:</strong>
+   </p><div class="highlight"><pre><span></span><code>Pipelex → Set node (extract fields) → Database node (save)
+</code></pre></div><p></p>
+</li>
+<li>
+<p><strong>Send an email</strong> 
+You would need to templatise the email using a <code>PipeCompose</code>. Look at Example #2 for a more detailed example.</p>
+</li>
+</ol>
+<hr>
+<h2 id="example-2-interview-feedback-consolidation">Example 2: Interview Feedback Consolidation</h2>
+<p><strong>Use Case:</strong> Consolidate multiple interview feedback emails into a single structured HR report with ratings, red flags, and recommendations.</p>
+<h3 id="overview_1">Overview</h3>
+<p>This pipeline:
+1. Processes multiple interview feedback emails from different interviewers
+2. Evaluates feedback against HR criteria and identifies red flags
+3. Generates structured ratings and recommendations
+4. Formats everything into a professional HR feedback form</p>
+<h3 id="node-configuration_1">Node Configuration</h3>
+<h4 id="base-url_1">Base URL</h4>
+<div class="highlight"><pre><span></span><code>http://localhost:8081
+</code></pre></div>
+<h4 id="pipe-code_1">Pipe Code</h4>
+<p></p><div class="highlight"><pre><span></span><code>process_interview_feedback
+</code></pre></div>
+(or leave empty to use inline PLX content)<p></p>
+<h4 id="pipelex-bundle-plx_content_1">Pipelex Bundle (plx_content)</h4>
+<details>
+<summary>Click to expand full PLX pipeline definition</summary>
+
+<div class="highlight"><pre><span></span><code>domain = "interview_feedback"
+description = "Process multiple interview feedback emails and generate a consolidated HR feedback form"
+
+[concept]
+InterviewFeedbackEmail = "An email containing feedback from an interviewer about a candidate"
+HRCriteria = "HR requirements and red flags to evaluate candidates against"
+
+[concept.ConsolidatedFeedback]
+description = "Structured feedback form consolidating all interviewer inputs"
+
+[concept.ConsolidatedFeedback.structure]
+candidate_name = "The name of the candidate"
+position = "The position the candidate is interviewing for"
+interview_date = { type = "date", description = "Date of the interview process" }
+overall_recommendation = { type = "text", description = "Overall hiring recommendation: Strongly Recommend, Recommend, Neutral, Do Not Recommend", choices = ["Strongly Recommend", "Recommend", "Neutral", "Do Not Recommend"] }
+technical_skills_rating = { type = "integer", description = "Technical skills rating from 1-5" }
+communication_skills_rating = { type = "integer", description = "Communication skills rating from 1-5" }
+cultural_fit_rating = { type = "integer", description = "Cultural fit rating from 1-5" }
+strengths = { type = "list", item_type = "text", description = "List of candidate strengths identified across all interviews" }
+weaknesses = { type = "list", item_type = "text", description = "List of candidate weaknesses identified across all interviews" }
+red_flags = { type = "list", item_type = "text", description = "List of red flags identified based on HR criteria", required = false }
+interviewer_consensus = "Summary of consensus or disagreements among interviewers"
+key_feedback_points = { type = "list", item_type = "text", description = "Key feedback points from all interviewers" }
+next_steps = "Recommended next steps in the hiring process"
+additional_notes = { type = "text", description = "Any additional notes or context", required = false }
+
+[pipe]
+[pipe.process_interview_feedback]
+type = "PipeSequence"
+description = "Main pipeline to process interview feedback emails and generate formatted HR form"
+inputs = { feedback_emails = "InterviewFeedbackEmail[]", hr_criteria = "HRCriteria" }
+output = "Text"
+steps = [
+    { pipe = "consolidate_interview_feedback", result = "consolidated_feedback" },
+    { pipe = "format_feedback_form", result = "formatted_form" }
+]
+
+[pipe.consolidate_interview_feedback]
+type = "PipeLLM"
+description = "Consolidate multiple interview feedback emails and evaluate against HR criteria"
+inputs = { feedback_emails = "InterviewFeedbackEmail[]", hr_criteria = "HRCriteria" }
+output = "ConsolidatedFeedback"
+model = { model = "base-claude", temperature = 0.3, max_tokens = "auto" }
+prompt = """
+You are an HR professional tasked with consolidating multiple interview feedback emails for a candidate.
+
+Your goal is to:
+1. Extract key information from all interviewer feedbacks
+2. Identify common themes, strengths, and weaknesses
+3. Check for red flags based on the HR criteria provided
+4. Provide a clear overall recommendation
+5. Rate the candidate on technical skills, communication, and cultural fit
+
+HR Criteria and Red Flags to consider:
+
+@hr_criteria
+
+Interview Feedback Emails:
+
+@feedback_emails
+
+Please analyze all the feedback carefully and create a comprehensive consolidated feedback form.
+Ensure you identify any red flags that match the HR criteria.
+Provide balanced ratings and clear next steps.
+"""
+
+[pipe.format_feedback_form]
+type = "PipeCompose"
+description = "Format the consolidated feedback into a professional HR feedback form"
+inputs = { consolidated_feedback = "ConsolidatedFeedback" }
+output = "Text"
+template = """
+================================================================================
+                        INTERVIEW FEEDBACK REPORT
+================================================================================
+
+CANDIDATE INFORMATION
+---------------------
+Candidate:        $consolidated_feedback.candidate_name
+Position:         $consolidated_feedback.position
+Interview Date:   $consolidated_feedback.interview_date
+
+================================================================================
+OVERALL RECOMMENDATION
+================================================================================
+
+$consolidated_feedback.overall_recommendation
+
+================================================================================
+RATINGS
+================================================================================
+
+Technical Skills:      $consolidated_feedback.technical_skills_rating/5
+Communication Skills:  $consolidated_feedback.communication_skills_rating/5
+Cultural Fit:          $consolidated_feedback.cultural_fit_rating/5
+
+================================================================================
+STRENGTHS
+================================================================================
+
+{% for strength in consolidated_feedback.strengths -%}
+• {{ strength }}
+{% endfor %}
+
+================================================================================
+WEAKNESSES
+================================================================================
+
+{% for weakness in consolidated_feedback.weaknesses -%}
+• {{ weakness }}
+{% endfor %}
+
+{% if consolidated_feedback.red_flags -%}
+================================================================================
+⚠️  RED FLAGS
+================================================================================
+
+{% for flag in consolidated_feedback.red_flags -%}
+⚠️  {{ flag }}
+{% endfor %}
+
+{% endif -%}
+================================================================================
+KEY FEEDBACK POINTS
+================================================================================
+
+{% for point in consolidated_feedback.key_feedback_points -%}
+• {{ point }}
+{% endfor %}
+
+================================================================================
+INTERVIEWER CONSENSUS
+================================================================================
+
+$consolidated_feedback.interviewer_consensus
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+$consolidated_feedback.next_steps
+
+{% if consolidated_feedback.additional_notes -%}
+================================================================================
+ADDITIONAL NOTES
+================================================================================
+
+$consolidated_feedback.additional_notes
+
+{% endif -%}
+================================================================================
+Confidential - HR Internal Use Only
+================================================================================
+"""
+</code></pre></div>
+
+</details>
+
+<h4 id="inputs_1">Inputs</h4>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"feedback_emails"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="s2">"From: John Smith, Technical Lead\nDate: January 15, 2025\nSubject: Interview Feedback - Sarah Johnson - Senior Software Engineer\n\nI had the pleasure of interviewing Sarah Johnson for the Senior Software Engineer position.\n\nTechnical Skills: Sarah demonstrated excellent knowledge of Python and distributed systems. She quickly solved the coding challenge and explained her approach clearly. Her understanding of system design patterns was impressive.\n\nCommunication: Very clear communicator. Articulated her thoughts well and asked insightful questions about our tech stack.\n\nCultural Fit: Seems like a great team player. She emphasized collaboration and mentioned enjoying mentoring junior developers.\n\nConcerns: None significant. She mentioned she's interviewing with other companies and expects to decide within 2 weeks.\n\nRecommendation: Strong hire"</span><span class="p">,</span>
+
+<span class="w">    </span><span class="s2">"From: Maria Garcia, Product Manager\nDate: January 15, 2025\nSubject: Re: Sarah Johnson Interview\n\nHi HR Team,\n\nI met with Sarah to discuss product collaboration and her experience working with PMs.\n\nStrengths:\n- Great at understanding product requirements\n- Proactive in suggesting technical solutions\n- Experience working in agile environments\n\nAreas of concern:\n- She mentioned some frustration with her current company's management style\n- Seemed eager to leave quickly - mentioned a 1-week notice period\n\nOverall: I think she'd be a good fit, but we should understand better why she's leaving so quickly.\n\nRecommendation: Recommend with some reservations"</span><span class="p">,</span>
+
+<span class="w">    </span><span class="s2">"From: David Chen, Engineering Manager\nDate: January 16, 2025\nSubject: Interview Feedback - Sarah Johnson\n\nTeam,\n\nI conducted the behavioral interview with Sarah.\n\nStrong points:\n- 8 years of relevant experience\n- Led several successful projects\n- Good problem-solving examples\n- References check out positively\n\nRed flags:\n- When asked about conflicts, she spoke negatively about her current manager\n- Mentioned salary expectations that are 40% above our range\n- Seemed distracted during the interview, checked her phone twice\n\nCultural fit: Mixed signals. She talks about teamwork but her examples focused heavily on individual contributions.\n\nDecision: I'm on the fence. The technical skills are there, but the attitude concerns me."</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">"hr_criteria"</span><span class="p">:</span><span class="w"> </span><span class="s2">"HR Evaluation Criteria:\n\nRED FLAGS TO WATCH FOR:\n- Negative talk about previous employers or managers\n- Unrealistic salary expectations (&gt;20% above budget)\n- Short tenure at previous companies (&lt; 1 year)\n- Unprofessional behavior during interviews\n- Eagerness to leave current position without proper notice\n- Inconsistent information across interviews\n\nPOSITIVE INDICATORS:\n- Strong technical skills matching job requirements\n- Good cultural fit with team values\n- Professional communication\n- Collaborative mindset\n- Reasonable salary expectations\n- Proper notice period at current employer\n\nSALARY BUDGET: $120,000 - $145,000\nPOSITION: Senior Software Engineer\nREQUIRED SKILLS: Python, Distributed Systems, Team Leadership"</span>
+<span class="p">}</span>
+</code></pre></div>
+<blockquote>
+<p><strong>💡 Tip:</strong> In a real n8n workflow, you could fetch these emails from Gmail/Outlook using their respective nodes, or from a database where feedback forms are stored.</p>
+</blockquote>
+<h4 id="output-name_1">Output Name</h4>
+<p>Leave empty (uses default <code>formatted_form</code>)</p>
+<h4 id="output-multiplicity_1">Output Multiplicity</h4>
+<p>Leave empty (single document output)</p>
+<h3 id="screenshot-node-configuration_1">Screenshot: Node Configuration</h3>
+<p>Here's what the configured Pipelex node looks like in n8n:</p>
+<p><a class="glightbox" data-type="image" data-width="100%" data-height="auto" href="../images/example_2.png" data-desc-position="bottom"><img alt="Interview Feedback Consolidation Node Configuration" src="../images/example_2.png"></a></p>
+<p>The screenshot shows:
+- <strong>Credential</strong>: Pipelex Bearer Token account configured
+- <strong>Base URL</strong>: <code>http://127.0.0.1:8081</code> (local API server)
+- <strong>Pipe Code</strong>: <code>process_interview_feedback</code> (using pre-registered pipeline)
+- <strong>Inputs</strong>: JSON array with three feedback emails and HR criteria
+- <strong>Output</strong>: Successfully formatted HR interview feedback report</p>
+<h3 id="expected-output_1">Expected Output</h3>
+<div class="highlight"><pre><span></span><code>================================================================================
+                        INTERVIEW FEEDBACK REPORT
+================================================================================
+
+CANDIDATE INFORMATION
+---------------------
+Candidate:        Sarah Johnson
+Position:         Senior Software Engineer
+Interview Date:   2025-01-15 00:00:00
+
+================================================================================
+OVERALL RECOMMENDATION
+================================================================================
+
+Neutral
+
+================================================================================
+RATINGS
+================================================================================
+
+Technical Skills:      5/5
+Communication Skills:  4/5
+Cultural Fit:          2/5
+
+================================================================================
+STRENGTHS
+================================================================================
+
+• Excellent knowledge of Python and distributed systems
+• Strong system design understanding
+• Clear communicator and articulates thoughts well
+• 8 years of relevant experience
+• Led several successful projects
+• Good at understanding product requirements
+• Proactive in suggesting technical solutions
+• Experience mentoring junior developers
+• Positive references
+
+
+================================================================================
+WEAKNESSES
+================================================================================
+
+• Expressed frustration with current company's management
+• Examples focused heavily on individual contributions rather than teamwork
+• Appeared distracted during interview (checked phone twice)
+• Eager to leave current position quickly
+
+
+================================================================================
+⚠️  RED FLAGS
+================================================================================
+
+⚠️  Negative talk about current manager when discussing conflicts
+⚠️  Unrealistic salary expectations - 40% above budget range ($120k-$145k)
+⚠️  Eagerness to leave current position with only 1-week notice period
+⚠️  Unprofessional behavior - checked phone twice during interview
+
+
+================================================================================
+KEY FEEDBACK POINTS
+================================================================================
+
+• Demonstrated excellent technical skills in Python and distributed systems
+• Solved coding challenge quickly with clear explanations
+• Strong understanding of product requirements and agile environments
+• Mentioned frustration with current management style
+• Spoke negatively about current manager during behavioral interview
+• Salary expectations are 40% above the budgeted range
+• Willing to provide only 1-week notice to current employer
+• Checked phone twice during interview showing lack of focus
+• Interviewing with other companies with 2-week decision timeline
+• Mixed signals on cultural fit - talks about teamwork but examples show individual focus
+
+
+================================================================================
+INTERVIEWER CONSENSUS
+================================================================================
+
+Significant disagreement among interviewers. Technical Lead (John Smith) gave strong positive recommendation with no concerns. Product Manager (Maria Garcia) recommended with reservations about quick departure timeline. Engineering Manager (David Chen) is on the fence due to attitude and professionalism concerns despite strong technical skills. All agree on technical competence, but behavioral and cultural fit assessments vary considerably.
+
+================================================================================
+NEXT STEPS
+================================================================================
+
+Schedule follow-up conversation with HR to address red flags: 1) Clarify salary expectations and discuss budget constraints ($120k-$145k range), 2) Understand reasons for leaving current position and negative comments about management, 3) Discuss appropriate notice period expectations, 4) Assess cultural fit more thoroughly regarding teamwork vs individual contribution preferences. If candidate can address these concerns satisfactorily, consider moving forward with reference checks focused on professionalism and teamwork. Otherwise, recommend not proceeding with offer.
+
+================================================================================
+ADDITIONAL NOTES
+================================================================================
+
+While Sarah demonstrates strong technical capabilities that match job requirements, multiple red flags align with HR criteria that warrant serious consideration. The combination of unrealistic salary expectations (significantly exceeding budget), negative talk about current management, inadequate notice period, and unprofessional interview behavior present substantial concerns. The discrepancy between stated collaborative values and actual examples of individual-focused work also raises questions about cultural alignment. Decision timeline is tight (2 weeks) due to other opportunities candidate is pursuing.
+
+================================================================================
+Confidential - HR Internal Use Only
+====================================================
+</code></pre></div>
+<h3 id="processing-the-results_1">Processing the Results</h3>
+<p><strong>Workflow options:</strong></p>
+<ol>
+<li>
+<p><strong>Email to hiring committee:</strong>
+   </p><div class="highlight"><pre><span></span><code>Pipelex → Email node → Send to HR team + hiring managers
+</code></pre></div><p></p>
+</li>
+<li>
+<p><strong>Store in HR system:</strong>
+   </p><div class="highlight"><pre><span></span><code>Pipelex → Parse JSON → Database node → Store in candidate records
+</code></pre></div><p></p>
+</li>
+<li>
+<p><strong>Notify on Slack:</strong>
+   </p><div class="highlight"><pre><span></span><code>Pipelex → Slack node → Post summary in #hiring-decisions channel
+</code></pre></div><p></p>
+</li>
+<li>
+<p><strong>Generate PDF report:</strong>
+   </p><div class="highlight"><pre><span></span><code>Pipelex → HTTP Request node (HTML to PDF API) → Save to Google Drive
+</code></pre></div><p></p>
+</li>
+</ol>
+<hr>
+<h2 id="more-examples-coming-soon">More Examples Coming Soon</h2>
+<ul>
+<li>Document extraction and classification</li>
+<li>Batch invoice processing</li>
+<li>Content generation with multiple variations</li>
+<li>Real-time data enrichment</li>
+</ul>
+<p>For more pipeline examples, visit the <a href="https://docs.pipelex.com/pages/cookbook-examples/">Pipelex Cookbook</a>.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"></path></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer">
+        
+          
+          <a href="../usage/" class="md-footer__link md-footer__link--prev" aria-label="Previous: Usage Guide">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"></path></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Usage Guide
+              </div>
+            </div>
+          </a>
+        
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      © 2025 Evotis S.A.S. <br>Pipelex is a trademark of Evotis S.A.S.
+    </div>
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/Pipelex/pipelex" target="_blank" rel="noopener" title="Pipelex on GitHub" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"></path></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://pypi.org/project/pipelex/" target="_blank" rel="noopener" title="pipelex on PyPI" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.8 200.5c-7.7-30.9-22.3-54.2-53.4-54.2h-40.1v47.4c0 36.8-31.2 67.8-66.8 67.8H172.7c-29.2 0-53.4 25-53.4 54.3v101.8c0 29 25.2 46 53.4 54.3 33.8 9.9 66.3 11.7 106.8 0 26.9-7.8 53.4-23.5 53.4-54.3v-40.7H226.2v-13.6h160.2c31.1 0 42.6-21.7 53.4-54.2 11.2-33.5 10.7-65.7 0-108.6M286.2 444.7a20.4 20.4 0 1 1 0-40.7 20.4 20.4 0 1 1 0 40.7M167.8 248.1h106.8c29.7 0 53.4-24.5 53.4-54.3V91.9c0-29-24.4-50.7-53.4-55.6-35.8-5.9-74.7-5.6-106.8.1-45.2 8-53.4 24.7-53.4 55.6v40.7h106.9v13.6h-147c-31.1 0-58.3 18.7-66.8 54.2-9.8 40.7-10.2 66.1 0 108.6 7.6 31.6 25.7 54.2 56.8 54.2H101v-48.8c0-35.3 30.5-66.4 66.8-66.4m-6.6-183.4a20.4 20.4 0 1 1 0 40.8 20.4 20.4 0 1 1 0-40.8"></path></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://x.com/PipelexAI" target="_blank" rel="noopener" title="Pipelex on X" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M459.4 151.7c.3 4.5.3 9.1.3 13.6 0 138.7-105.6 298.6-298.6 298.6-59.5 0-114.7-17.2-161.1-47.1 8.4 1 16.6 1.3 25.3 1.3 49.1 0 94.2-16.6 130.3-44.8-46.1-1-84.8-31.2-98.1-72.8 6.5 1 13 1.6 19.8 1.6 9.4 0 18.8-1.3 27.6-3.6-48.1-9.7-84.1-52-84.1-103v-1.3c14 7.8 30.2 12.7 47.4 13.3-28.3-18.8-46.8-51-46.8-87.4 0-19.5 5.2-37.4 14.3-53C87.4 130.8 165 172.4 252.1 176.9c-1.6-7.8-2.6-15.9-2.6-24C249.5 95.1 296.3 48 354.4 48c30.2 0 57.5 12.7 76.7 33.1 23.7-4.5 46.5-13.3 66.6-25.3-7.8 24.4-24.4 44.8-46.1 57.8 21.1-2.3 41.6-8.1 60.4-16.2-14.3 20.8-32.2 39.3-52.6 54.3"></path></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://go.pipelex.com/discord" target="_blank" rel="noopener" title="Pipelex on Discord" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M492.5 69.8c-.2-.3-.4-.6-.8-.7-38.1-17.5-78.4-30-119.7-37.1-.4-.1-.8 0-1.1.1s-.6.4-.8.8c-5.5 9.9-10.5 20.2-14.9 30.6-44.6-6.8-89.9-6.8-134.4 0-4.5-10.5-9.5-20.7-15.1-30.6-.2-.3-.5-.6-.8-.8s-.7-.2-1.1-.2C162.5 39 122.2 51.5 84.1 69c-.3.1-.6.4-.8.7C7.1 183.5-13.8 294.6-3.6 404.2c0 .3.1.5.2.8s.3.4.5.6c44.4 32.9 94 58 146.8 74.2.4.1.8.1 1.1 0s.7-.4.9-.7c11.3-15.4 21.4-31.8 30-48.8.1-.2.2-.5.2-.8s0-.5-.1-.8-.2-.5-.4-.6-.4-.3-.7-.4c-15.8-6.1-31.2-13.4-45.9-21.9-.3-.2-.5-.4-.7-.6s-.3-.6-.3-.9 0-.6.2-.9.3-.5.6-.7c3.1-2.3 6.2-4.7 9.1-7.1.3-.2.6-.4.9-.4s.7 0 1 .1c96.2 43.9 200.4 43.9 295.5 0 .3-.1.7-.2 1-.2s.7.2.9.4c2.9 2.4 6 4.9 9.1 7.2.2.2.4.4.6.7s.2.6.2.9-.1.6-.3.9-.4.5-.6.6c-14.7 8.6-30 15.9-45.9 21.8-.2.1-.5.2-.7.4s-.3.4-.4.7-.1.5-.1.8.1.5.2.8c8.8 17 18.8 33.3 30 48.8.2.3.6.6.9.7s.8.1 1.1 0c52.9-16.2 102.6-41.3 147.1-74.2.2-.2.4-.4.5-.6s.2-.5.2-.8c12.3-126.8-20.5-236.9-86.9-334.5zm-302 267.7c-29 0-52.8-26.6-52.8-59.2s23.4-59.2 52.8-59.2c29.7 0 53.3 26.8 52.8 59.2 0 32.7-23.4 59.2-52.8 59.2m195.4 0c-29 0-52.8-26.6-52.8-59.2s23.4-59.2 52.8-59.2c29.7 0 53.3 26.8 52.8 59.2 0 32.7-23.2 59.2-52.8 59.2"></path></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      <script id="__config" type="application/json">{"base": "..", "features": ["navigation.footer", "navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.top"], "search": "../assets/javascripts/workers/search.973d3a69.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.f55a23d4.min.js"></script>
+      
+    
+  
+<script id="init-glightbox">const lightbox = GLightbox({"touchNavigation": true, "loop": false, "zoomable": true, "draggable": true, "openEffect": "zoom", "closeEffect": "zoom", "slideEffect": "slide"});
+document$.subscribe(()=>{ lightbox.reload(); });
+</script></body></html>
