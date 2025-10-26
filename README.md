@@ -103,7 +103,7 @@ The Pipelex node supports the following parameters:
 
 | Parameter | API Field | Description |
 |-----------|-----------|-------------|
-| **Base URL** | - | The base URL of your Pipelex API server (e.g., `http://localhost:8081`) (Soon the public API) |
+| **Base URL** | - | The base URL of your Pipelex API server (e.g., `http://localhost:8081`, `http://host.docker.internal:8081`...) (Soon the public API) |
 | **Inputs** | `inputs` | JSON object containing the inputs for your pipeline (must match your pipeline's expected inputs) |
 | **Pipe Code** | `pipe_code` | The code of a pre-registered pipeline to execute |
 | **Pipelex Bundle** | `plx_content` | Inline PLX code to execute (if not using a pre-registered pipeline) |
@@ -126,7 +126,7 @@ The Pipelex node supports the following parameters:
 
 1. **Add the Pipelex node** to your n8n workflow
 2. **Configure credentials** (Bearer Token)
-3. **Set the Base URL** (e.g., `http://localhost:8081` for local Docker)
+3. **Set the Base URL** (e.g., `http://localhost:8081` or `http://host.docker.internal:8081` local Docker)
 4. **Choose execution mode:**
    - **Option A**: Provide `Pipe Code` (for pre-registered pipelines)
    - **Option B**: Provide inline `Pipelex Bundle` (PLX syntax)

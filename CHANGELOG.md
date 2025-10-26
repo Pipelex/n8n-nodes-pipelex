@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.4] - 2025-10-26
+
+- Update README and docs
+
 ## [v0.0.3] - 2025-10-25
 
 - Update the support email to `oss@pipelex.com`

@@ -37,7 +37,7 @@ Get a free PIPELEX_INFERENCE_API_KEY ($20 free credits) in the [Discord # ðŸ”‘ãƒ
    - Enter your API Bearer Token
 
 3. **Configure the node**:
-   - Base URL: `http://localhost:8081` (or your Pipelex server endpoint)
+   - Base URL: Your Pipelex API server URL, e.g. `http://localhost:8081` or `http://host.docker.internal:8081` (local Docker)
    - Inputs: Your pipeline inputs as JSON
    - Either provide Pipe Code OR Pipelex Bundle
 
