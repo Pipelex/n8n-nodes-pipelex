@@ -7,7 +7,7 @@ The URL of your Pipelex API server.
 
 **Examples:**
 
-- Local Docker: `http://localhost:8081`
+- Local Docker: `http://localhost:8081` or `http://host.docker.internal:8081`
 - Remote server: `https://api.yourserver.com`
 - Public Pipelex API: (Coming Soon, join the waitlist [here](https://go.pipelex.com/waitlist))
 
