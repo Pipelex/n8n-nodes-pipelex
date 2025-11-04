@@ -71,16 +71,23 @@ markdown_extensions:
   - pymdownx.emoji:
       emoji_index: !!python/name:material.extensions.emoji.twemoji
       emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.snippets:
+      base_path: .
 
 nav:
   - Home: https://docs.pipelex.com/
-  - API Reference: https://pipelex.github.io/pipelex-api/
+  - API Reference: http://127.0.0.1:8001/pipelex-api/
   - Integrations:
-    - MCP Server: https://pipelex.github.io/pipelex-mcp/
+    - MCP Server: http://127.0.0.1:8003/pipelex-mcp/
     - n8n Node:
       - Getting Started: index.md
       - Usage Guide: usage.md
       - Examples: examples.md
+      - Contribute:
+        - Contributing: contributing.md
+        - Code of Conduct: CODE_OF_CONDUCT.md
+        - License: license.md
+      - Changelog: changelog.md
   - Contribute: https://docs.pipelex.com/contributing/
   - Changelog: https://docs.pipelex.com/changelog/
 
