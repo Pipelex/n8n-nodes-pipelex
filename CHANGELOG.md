@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.5] - 2025-11-04
+
+- Updated the documentation.
+
 ## [v0.0.4] - 2025-10-26
 
 - Update README and docs
