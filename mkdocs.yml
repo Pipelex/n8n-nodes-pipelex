@@ -74,7 +74,7 @@ markdown_extensions:
 
 nav:
   - Home: https://docs.pipelex.com/
-  - API Reference: https://docs.pipelex.com/pages/api/
+  - API Reference: https://pipelex.github.io/pipelex-api/
   - Integrations:
     - n8n Node:
       - Getting Started: index.md
