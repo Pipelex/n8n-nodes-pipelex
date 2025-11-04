@@ -75,10 +75,11 @@ markdown_extensions:
 nav:
   - Home: https://docs.pipelex.com/
   - API Reference: https://docs.pipelex.com/pages/api/
-  - n8n Node:
-    - Getting Started: index.md
-    - Usage Guide: usage.md
-    - Examples: examples.md
-  - Configuration: https://docs.pipelex.com/pages/configuration/
-  - Development: https://docs.pipelex.com/pages/tools/
+  - Integrations:
+    - n8n Node:
+      - Getting Started: index.md
+      - Usage Guide: usage.md
+      - Examples: examples.md
+  - Contribute: https://docs.pipelex.com/contributing/
+  - Changelog: https://docs.pipelex.com/changelog/
 
