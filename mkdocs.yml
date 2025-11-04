@@ -76,9 +76,9 @@ markdown_extensions:
 
 nav:
   - Home: https://docs.pipelex.com/
-  - API Reference: http://127.0.0.1:8001/pipelex-api/
+  - API Reference: https://pipelex.github.io/pipelex-api/
   - Integrations:
-    - MCP Server: http://127.0.0.1:8003/pipelex-mcp/
+    - MCP Server: https://pipelex.github.io/pipelex-mcp/
     - n8n Node:
       - Getting Started: index.md
       - Usage Guide: usage.md
