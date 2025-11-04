@@ -213,7 +213,7 @@ clean-env:
 
 docs: env
 	$(call PRINT_TITLE,"Serving documentation locally")
-	@$(VENV_MKDOCS) serve --watch docs
+	@$(VENV_MKDOCS) serve -a 127.0.0.1:8002 --watch docs
 
 docs-check: env
 	$(call PRINT_TITLE,"Checking documentation build")
