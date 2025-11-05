@@ -74,6 +74,10 @@ markdown_extensions:
   - pymdownx.snippets:
       base_path: .
 
+extra_css:
+  - stylesheets/mermaid.css
+  - stylesheets/general.css
+  
 nav:
   - Home: https://docs.pipelex.com/
   - API: https://pipelex.github.io/pipelex-api/
