@@ -18,21 +18,21 @@ This pipeline:
 
 ### Node Configuration
 
-#### Base URL
-```
-http://localhost:8081
-```
-(or your Pipelex API server URL)
+#### Credential
+Use a **Pipelex Bearer Token** credential. While the hosted API (`https://api.pipelex.com`) is in waitlist, point the **Base URL** at your self-hosted Pipelex API — e.g. `http://localhost:8081` for self-hosted n8n on the same machine, or a public URL of your Docker deployment if you're on n8n Cloud.
+
+#### Resource / Operation
+`Pipeline` → `Execute`
 
 #### Pipe Code
-Leave empty (we'll use inline PLX content)
+Leave empty (we'll use an inline MTHDS bundle in Additional Fields)
 
-#### Pipelex Bundle (plx_content)
+#### Additional Fields → MTHDS Bundle (`mthds_contents`)
 
 <details>
-<summary>Click to expand full PLX pipeline definition</summary>
+<summary>Click to expand full MTHDS pipeline definition</summary>
 
-```plx
+```toml
 domain = "cv_job_matching"
 description = "Analyzing CV-job offer alignment and generating interview questions"
 main_pipe = "analyze_cv_job_match_and_questions"
@@ -183,10 +183,10 @@ Compile these elements into a cohesive interview preparation document that provi
 
 > Here is the full job offer [link](https://pipelex.notion.site/genai-engineer-job-startup-paris).
 
-#### Output Name
+#### Additional Fields → Output Name
 Leave empty (we'll use the default output name)
 
-#### Output Multiplicity
+#### Additional Fields → Output Multiplicity
 Leave empty
 
 ### Screenshot: Node Configuration
@@ -196,9 +196,9 @@ Here's what the configured Pipelex node looks like in n8n:
 ![CV-Job Matching Node Configuration](images/example_1.png)
 
 The screenshot shows:
-- **Credential**: Pipelex Bearer Token account selected
-- **Base URL**: `http://127.0.0.1:8081` (local API server)
-- **Pipelex Bundle**: Full pipeline definition in the text area
+- **Credential**: Pipelex Bearer Token account selected (Base URL set on the credential — point it at your self-hosted Pipelex API, e.g. `http://127.0.0.1:8081` for local n8n, or a public URL when n8n runs on the cloud)
+- **Resource / Operation**: `Pipeline` / `Execute`
+- **MTHDS Bundle**: Full pipeline definition pasted under Additional Fields
 - **Inputs**: JSON object with `cv_pdf` and `job_offer_text` properly formatted
 - **Output**: Successful execution showing the interview preparation document
 
@@ -250,23 +250,24 @@ This pipeline:
 
 ### Node Configuration
 
-#### Base URL
-```
-http://localhost:8081
-```
+#### Credential
+Use a **Pipelex Bearer Token** credential pointing at `https://api.pipelex.com` (or your self-hosted server URL).
+
+#### Resource / Operation
+`Pipeline` → `Execute`
 
 #### Pipe Code
 ```
 process_interview_feedback
 ```
-(or leave empty to use inline PLX content)
+(or leave empty and use an inline MTHDS bundle in Additional Fields)
 
-#### Pipelex Bundle (plx_content)
+#### Additional Fields → MTHDS Bundle (`mthds_contents`)
 
 <details>
-<summary>Click to expand full PLX pipeline definition</summary>
+<summary>Click to expand full MTHDS pipeline definition</summary>
 
-```plx
+```toml
 domain = "interview_feedback"
 description = "Process multiple interview feedback emails and generate a consolidated HR feedback form"
 
@@ -442,10 +443,10 @@ Confidential - HR Internal Use Only
 
 > **💡 Tip:** In a real n8n workflow, you could fetch these emails from Gmail/Outlook using their respective nodes, or from a database where feedback forms are stored.
 
-#### Output Name
+#### Additional Fields → Output Name
 Leave empty (uses default `formatted_form`)
 
-#### Output Multiplicity
+#### Additional Fields → Output Multiplicity
 Leave empty (single document output)
 
 ### Screenshot: Node Configuration
@@ -455,8 +456,8 @@ Here's what the configured Pipelex node looks like in n8n:
 ![Interview Feedback Consolidation Node Configuration](images/example_2.png)
 
 The screenshot shows:
-- **Credential**: Pipelex Bearer Token account configured
-- **Base URL**: `http://127.0.0.1:8081` (local API server)
+- **Credential**: Pipelex Bearer Token account configured (Base URL set on the credential — point it at your self-hosted Pipelex API, e.g. `http://127.0.0.1:8081` for local n8n, or a public URL when n8n runs on the cloud)
+- **Resource / Operation**: `Pipeline` / `Execute`
 - **Pipe Code**: `process_interview_feedback` (using pre-registered pipeline)
 - **Inputs**: JSON array with three feedback emails and HR criteria
 - **Output**: Successfully formatted HR interview feedback report

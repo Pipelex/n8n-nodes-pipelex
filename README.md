@@ -31,9 +31,9 @@ This is an [n8n](https://n8n.io/) community node that lets you execute [Pipelex]
 
 ## What is Pipelex?
 
-**[Pipelex](https://github.com/Pipelex/pipelex)** is an open-source language for AI Agents to create and run repeatable AI workflows **with modular, composable pipelines**.
+**[Pipelex](https://github.com/Pipelex/pipelex)** is an open-source runtime to **build and run AI methods**. A *method* is a reusable, typed AI procedure declared in a `.mthds` file and executed by Pipelex — each step is explicit, every output is structured, and every run is repeatable.
 
-Build modular "pipes" where each uses different LLMs and guarantees structured outputs. Connect them like LEGO blocks — sequentially, in parallel, or conditionally — to build complex knowledge transformations from simple, reusable components.
+Compose "pipes" that route across 60+ models, return structured outputs, and orchestrate sequentially, in parallel, or conditionally — sharing methods with the community via [mthds.sh](https://mthds.sh).
 
 Learn more about Pipelex:
 
@@ -48,28 +48,29 @@ Learn more about Pipelex:
 
 ### Prerequisites
 
-Before installing this node, you'll need a **Pipelex API server** running. Choose one option:
+Before installing this node, you'll need access to a **Pipelex API server**. Choose one option:
 
-#### Option A: Use Pipelex Cloud API (Coming Soon)
-The hosted Pipelex API will be available soon. Join the [waitlist](https://go.pipelex.com/waitlist).
+#### Option A: Use the hosted Pipelex API (Coming Soon)
 
-#### Option B: Self-host with Docker (Recommended)
-Run your own Pipelex API server using Docker (See more here [Pipelex-api](https://github.com/Pipelex/pipelex-api))
+The hosted API will live at **`https://api.pipelex.com`** — it's the default Base URL on the credential. Public access isn't open yet; join the [waitlist](https://go.pipelex.com/waitlist) to be notified when it launches.
+
+#### Option B: Self-host with Docker (Recommended for now)
+
+Run your own Pipelex API server using the official image (see the [pipelex-api repo](https://github.com/Pipelex/pipelex-api) for full configuration):
 
 ```bash
 # Pull the official Docker image
-% docker pull pipelex/pipelex-api
+docker pull pipelex/pipelex-api
 
-# Run with your API key and LLM provider key
-% docker run --name pipelex-api -p 8081:8081 \
-  -e API_KEY=your-bearer-token-here \
-  -e PIPELEX_INFERENCE_API_KEY=your-pipelex-inference-key \
+# Run with a Pipelex Gateway API key (get one at https://app.pipelex.com)
+docker run --name pipelex-api -p 8081:8081 \
+  -e PIPELEX_GATEWAY_API_KEY=your-pipelex-gateway-api-key \
   pipelex/pipelex-api:latest
 ```
 
-Get a free PIPELEX_INFERENCE_API_KEY ($20 free credits) in our [Discord # 🔑・free-api-key channel](https://go.pipelex.com/discord) or by filling this [form](https://go.pipelex.com/discord/1418228010431025233).
+To require authentication on a self-hosted server, add `-e AUTH_MODE=api_key -e API_KEY=your-secret`. See the [pipelex-api `.env.example`](https://github.com/Pipelex/pipelex-api/blob/main/.env.example) and the [Pipelex API documentation](https://docs.pipelex.com/pages/api/) for full setup details.
 
-For detailed setup instructions, see the [Pipelex API documentation](https://docs.pipelex.com/pages/api/).
+> ⚠️ **Running on n8n Cloud or a deployed n8n instance?** `http://localhost:8081` is only reachable from the same machine as the API. Host the Docker image somewhere n8n can reach it — a small VM, a managed host like Render/Fly.io/Railway, or expose it via a tunnel such as ngrok — and use that public URL as the credential's **Base URL**. Only self-hosted n8n on the same machine can use `localhost`/`host.docker.internal`.
 
 ### Install the n8n Community Node
 
@@ -79,44 +80,48 @@ Follow the [installation guide](https://docs.n8n.io/integrations/community-nodes
 
 ## Credentials
 
-This node requires **Pipelex API credentials** to authenticate with your Pipelex API server.
+This node requires a **Pipelex API credential** to authenticate with your Pipelex API server. The credential carries both the **Base URL** and the **Bearer Token**.
 
 ### Setting up credentials:
 
 1. In your n8n workflow, add a Pipelex node
-2. Click on **Credential to connect with**
-3. Select **Create New Credential**
-4. Enter your **Bearer Token** (the `API_KEY` you configured in your Pipelex API server)
-5. (Optional) Test the credential to verify the connection
+2. Click on **Credential to connect with** → **Create New Credential**
+3. Fill in:
+   - **Base URL** — defaults to `https://api.pipelex.com` (hosted API, coming soon). For now use `http://localhost:8081` (or `http://host.docker.internal:8081` from Docker) pointing at your self-hosted server.
+   - **Bearer Token** — your Pipelex API token (sent as `Authorization: Bearer <token>`)
+4. (Optional) Click **Test** — the credential is verified against `GET /api/v1/api_version` on your base URL.
 
-**Where to get your API key:**
-- If self-hosting: Use the `API_KEY` you set when starting your Pipelex API Docker container
-- If using Pipelex Cloud (coming soon): Get it from your Pipelex dashboard
+**Where to get your Bearer Token:**
+- Hosted API (coming soon at `https://api.pipelex.com`): join the [waitlist](https://go.pipelex.com/waitlist)
+- Self-hosting with `AUTH_MODE=api_key`: use the `API_KEY` you set when starting the container
 
 ---
 
 ## Node Configuration
 
-The Pipelex node supports the following parameters:
+The Pipelex node exposes a **Pipeline** resource with a single **Execute** operation.
 
 ### Required Parameters
 
 | Parameter | API Field | Description |
 |-----------|-----------|-------------|
-| **Base URL** | - | The base URL of your Pipelex API server (e.g., `http://localhost:8081`, `http://host.docker.internal:8081`...) (Soon the public API) |
-| **Inputs** | `inputs` | JSON object containing the inputs for your pipeline (must match your pipeline's expected inputs) |
-| **Pipe Code** | `pipe_code` | The code of a pre-registered pipeline to execute |
-| **Pipelex Bundle** | `plx_content` | Inline PLX code to execute (if not using a pre-registered pipeline) |
+| **Resource** | – | `Pipeline` (only resource for now) |
+| **Operation** | – | `Execute` — runs the pipeline and waits for the result |
+| **Pipe Code** | `pipe_code` | The code of a pre-registered pipeline to execute. Required unless you provide an `MTHDS Bundle` under Additional Fields. |
+| **Inputs** | `inputs` | JSON object whose keys match your pipeline's expected inputs |
 
-**Note:** You must provide **either** Pipe Code **or** Pipelex Bundle (or both). Learn more about the Pipelex API [here](https://docs.pipelex.com/pages/api/).
+### Additional Fields (optional)
 
-### Optional Parameters
+All optional inputs are grouped under the **Additional Fields** collection:
 
 | Parameter | API Field | Description |
 |-----------|-----------|-------------|
-| **Output Name** | `output_name` | Specify a particular output name to retrieve |
+| **MTHDS Bundle** | `mthds_contents` | Inline MTHDS bundle content (sent as a single-element `mthds_contents` array). Provide this if you don't use a pre-registered Pipe Code. |
+| **Output Name** | `output_name` | Name of the output variable to surface |
 | **Output Multiplicity** | `output_multiplicity` | Control the multiplicity of outputs |
-| **Dynamic Output Concept Code** | `dynamic_output_concept_code` | Code for dynamic output concepts |
+| **Dynamic Output Concept Code** | `dynamic_output_concept_code` | Override the output concept dynamically |
+
+**Note:** You must provide **either** `Pipe Code` **or** `MTHDS Bundle` (or both). Learn more about the Pipelex API [here](https://docs.pipelex.com/pages/api/).
 
 ---
 
@@ -125,11 +130,11 @@ The Pipelex node supports the following parameters:
 ### Quick Start
 
 1. **Add the Pipelex node** to your n8n workflow
-2. **Configure credentials** (Bearer Token)
-3. **Set the Base URL** (e.g., `http://localhost:8081` or `http://host.docker.internal:8081` local Docker)
+2. **Configure the credential** (Base URL + Bearer Token) — defaults to the upcoming hosted API at `https://api.pipelex.com`; point it at your self-hosted server for now
+3. **Pick the operation:** Resource `Pipeline` → Operation `Execute`
 4. **Choose execution mode:**
    - **Option A**: Provide `Pipe Code` (for pre-registered pipelines)
-   - **Option B**: Provide inline `Pipelex Bundle` (PLX syntax)
+   - **Option B**: Open **Additional Fields** and paste inline MTHDS code into `MTHDS Bundle`
 5. **Set Inputs** as a JSON object matching your pipeline's expected inputs
 6. **Execute** the workflow
 

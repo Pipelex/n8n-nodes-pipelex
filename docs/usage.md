@@ -1,21 +1,30 @@
 # Usage Guide
 
-## Node Parameters
+## Resource & Operation
 
-### Base URL
-The URL of your Pipelex API server.
+The Pipelex node exposes a single **Pipeline** resource with an **Execute** operation. It calls `POST /api/v1/pipeline/execute` on your Pipelex API server and waits for the result.
+
+## Credential: Base URL
+
+The Pipelex API base URL is configured on the credential, not on the node. Open your **Pipelex Bearer Token** credential and set:
 
 **Examples:**
 
-- Local Docker: `http://localhost:8081` or `http://host.docker.internal:8081`
-- Remote server: `https://api.yourserver.com`
-- Public Pipelex API: (Coming Soon, join the waitlist [here](https://go.pipelex.com/waitlist))
+- Hosted API (default, **Coming Soon**): `https://api.pipelex.com` — join the [waitlist](https://go.pipelex.com/waitlist) for access.
+- Local Docker (self-hosted n8n only): `http://localhost:8081` or `http://host.docker.internal:8081`
+- Remote self-hosted server: `https://your-pipelex-host.example.com`
+
+> ⚠️ **Running on n8n Cloud or any deployed n8n instance?** `localhost`/`127.0.0.1` URLs won't be reachable. Deploy the [pipelex-api Docker image](https://hub.docker.com/r/pipelex/pipelex-api) somewhere n8n can reach (a small VM, Render/Fly.io/Railway, or a tunnel like ngrok) and use that public URL.
+
+The credential test hits `GET <Base URL>/api/v1/api_version` to verify both reachability and the Bearer Token.
 
 ---
 
-## Understanding `pipe_code` and `plx_content`
+## Understanding `pipe_code` and `mthds_contents`
 
-The Pipelex node offers flexibility in how you define and execute pipelines. You can either reference a pre-registered pipeline, provide inline PLX code, or combine both approaches.
+The Pipelex node offers flexibility in how you define and execute pipelines. You can either reference a pre-registered pipeline, provide an inline MTHDS bundle, or combine both approaches.
+
+The inline bundle is set under **Additional Fields → MTHDS Bundle** and is sent to the API as `mthds_contents` (a JSON array — the node wraps your single bundle as `[mthds_content]`).
 
 ### Case 1: Only `pipe_code` (Pipeline Library)
 
@@ -23,7 +32,7 @@ Use this when your pipeline is already registered in your Pipelex API server's l
 
 **n8n Node Configuration:**
 - **Pipe Code:** `invoice_extractor`
-- **Pipelex Bundle:** _(leave empty)_
+- **Additional Fields → MTHDS Bundle:** _(leave empty)_
 - **Inputs:** `{ "invoice_text": "..." }`
 
 **What happens:**
@@ -46,14 +55,14 @@ The API will look for a pipeline named `invoice_extractor` in your server's libr
 
 ---
 
-### Case 2: Only `plx_content` (Inline Pipeline)
+### Case 2: Only `mthds_contents` (Inline Pipeline)
 
 Use this when you want to define the pipeline directly in the n8n node.
 
 **n8n Node Configuration:**
 - **Pipe Code:** _(leave empty)_
-- **Pipelex Bundle:**
-```plx
+- **Additional Fields → MTHDS Bundle:**
+```toml
 domain = "invoice_processing"
 main_pipe = "extract_invoice"
 
@@ -74,19 +83,19 @@ Extract structured data from:
 - **Inputs:** `{ "text": "..." }`
 
 **What happens:**
-The API will parse your inline PLX code and execute the pipeline specified in `main_pipe`.
+The API will parse your inline MTHDS bundle and execute the pipeline specified in `main_pipe`.
 
 **API Request:**
 ```json
 {
-  "plx_content": "domain = \"invoice_processing\"\nmain_pipe = \"extract_invoice\"...",
+  "mthds_contents": ["domain = \"invoice_processing\"\nmain_pipe = \"extract_invoice\"..."],
   "inputs": {
     "text": "INVOICE #123..."
   }
 }
 ```
 
-**Important:** You **must** specify `main_pipe` in your PLX content when not providing a `pipe_code`.
+**Important:** You **must** specify `main_pipe` in your MTHDS bundle when not providing a `pipe_code`.
 
 **Use this when:**
 - You're prototyping or testing pipelines
@@ -95,14 +104,14 @@ The API will parse your inline PLX code and execute the pipeline specified in `m
 
 ---
 
-### Case 3: Both `pipe_code` AND `plx_content` (Inline with Specific Pipe)
+### Case 3: Both `pipe_code` AND `mthds_contents` (Inline with Specific Pipe)
 
-Use this when you have multiple pipes in your inline PLX code and want to execute a specific one.
+Use this when you have multiple pipes in your inline MTHDS bundle and want to execute a specific one.
 
 **n8n Node Configuration:**
 - **Pipe Code:** `extract_invoice`
-- **Pipelex Bundle:**
-```plx
+- **Additional Fields → MTHDS Bundle:**
+```toml
 domain = "document_processing"
 main_pipe = "analyze_document"
 
@@ -128,13 +137,13 @@ prompt = "Analyze: @text"
 - **Inputs:** `{ "text": "..." }`
 
 **What happens:**
-The API will execute the `extract_invoice` pipe from your inline code, **ignoring** the `main_pipe` setting.
+The API will execute the `extract_invoice` pipe from your inline bundle, **ignoring** the `main_pipe` setting.
 
 **API Request:**
 ```json
 {
   "pipe_code": "extract_invoice",
-  "plx_content": "domain = \"document_processing\"...",
+  "mthds_contents": ["domain = \"document_processing\"..."],
   "inputs": {
     "text": "INVOICE #123..."
   }
@@ -142,9 +151,9 @@ The API will execute the `extract_invoice` pipe from your inline code, **ignorin
 ```
 
 **Use this when:**
-- You have a PLX file with multiple pipes
+- You have an MTHDS bundle with multiple pipes
 - You want to choose which pipe to execute dynamically
-- You want flexibility without modifying the PLX content
+- You want flexibility without modifying the bundle
 
 ---
 
@@ -186,10 +195,15 @@ Pass data from previous nodes:
 
 ---
 
-## Optional Parameters
+## Additional Fields (optional)
+
+All optional parameters live under the **Additional Fields** collection on the node.
+
+### MTHDS Bundle (`mthds_contents`)
+Inline MTHDS bundle content. The node sends it as a one-element `mthds_contents` array. Provide this if you don't use a pre-registered Pipe Code.
 
 ### Output Name (`output_name`)
-Specify the name you want to give to the main pipe
+Specify the name you want to give to the main pipe.
 
 **Example:** `extracted_data`
 
@@ -198,10 +212,10 @@ Controls whether the pipeline returns a single item or multiple items (array).
 
 > **📚 For comprehensive multiplicity documentation**, see **[Understanding Multiplicity](https://docs.pipelex.com/pages/build-reliable-ai-workflows-with-pipelex/understanding-multiplicity/)**.
 
-**Example:** If your pipeline extracts keywords from text and is configured with `output = "Keyword[]"` in the PLX definition, set `output_multiplicity` to `true` to receive an array of all extracted keywords, `n` for a specific number of items.
+**Example:** If your pipeline extracts keywords from text and is configured with `output = "Keyword[]"` in the MTHDS bundle, set `output_multiplicity` to `true` to receive an array of all extracted keywords, `n` for a specific number of items.
 
 ### Dynamic Output Concept Code (`dynamic_output_concept_code`)
- - `dynamic_output_concept_code` (string, optional): Override output concept. See more [here](https://docs.pipelex.com/pages/build-reliable-ai-workflows-with-pipelex/define_your_concepts/#dynamiccontent).
+Override the output concept. See more [here](https://docs.pipelex.com/pages/build-reliable-ai-workflows-with-pipelex/define_your_concepts/#dynamiccontent).
 
 ---
 

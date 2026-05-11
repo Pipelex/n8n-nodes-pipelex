@@ -11,6 +11,15 @@ export class PiplexApi implements ICredentialType {
 	documentationUrl = 'https://docs.pipelex.com/pages/api/';
 	properties: INodeProperties[] = [
 		{
+			displayName: 'Base URL',
+			name: 'baseUrl',
+			type: 'string',
+			default: 'https://api.pipelex.com',
+			required: true,
+			placeholder: 'https://api.pipelex.com',
+			description: 'The base URL of your Pipelex API server',
+		},
+		{
 			displayName: 'Bearer Token',
 			name: 'apiKey',
 			type: 'string',
@@ -35,10 +44,9 @@ export class PiplexApi implements ICredentialType {
 
 	test: ICredentialTestRequest = {
 		request: {
-			baseURL: 'http://127.0.0.1:8081/api/v1',
-			url: '/health',
+			baseURL: '={{$credentials.baseUrl}}',
+			url: '/api/v1/api_version',
 			method: 'GET',
 		},
 	};
 }
-

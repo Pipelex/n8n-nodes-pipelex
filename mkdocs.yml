@@ -74,20 +74,23 @@ markdown_extensions:
   - pymdownx.snippets:
       base_path: .
 
+extra_css:
+  - stylesheets/mermaid.css
+  - stylesheets/general.css
+  
 nav:
   - Home: https://docs.pipelex.com/
-  - API Reference: https://pipelex.github.io/pipelex-api/
-  - Integrations:
-    - MCP Server: https://pipelex.github.io/pipelex-mcp/
-    - n8n Node:
-      - Getting Started: index.md
-      - Usage Guide: usage.md
-      - Examples: examples.md
-      - Contribute:
-        - Contributing: contributing.md
-        - Code of Conduct: CODE_OF_CONDUCT.md
-        - License: license.md
-      - Changelog: changelog.md
+  - API: https://pipelex.github.io/pipelex-api/
+  - MCP: https://pipelex.github.io/pipelex-mcp/
+  - n8n:
+    - Getting Started: index.md
+    - Usage Guide: usage.md
+    - Examples: examples.md
+    - Contribute:
+      - Contributing: contributing.md
+      - Code of Conduct: CODE_OF_CONDUCT.md
+      - License: license.md
+    - Changelog: changelog.md
   - Contribute: https://docs.pipelex.com/contributing/
   - Changelog: https://docs.pipelex.com/changelog/
 
