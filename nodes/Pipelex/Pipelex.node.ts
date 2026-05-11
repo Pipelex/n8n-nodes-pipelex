@@ -1,14 +1,16 @@
-import type {
-	IExecuteFunctions,
-	INodeExecutionData,
-	INodeType,
-	INodeTypeDescription,
+import {
+	NodeConnectionTypes,
+	NodeOperationError,
+	type IExecuteFunctions,
+	type INodeExecutionData,
+	type INodeType,
+	type INodeTypeDescription,
 } from 'n8n-workflow';
 
 interface PipelexExecuteBody {
 	inputs: Record<string, unknown>;
 	pipe_code?: string;
-	plx_content?: string;
+	mthds_contents?: string[];
 	output_name?: string;
 	output_multiplicity?: string;
 	dynamic_output_concept_code?: string;
@@ -21,13 +23,13 @@ export class Pipelex implements INodeType {
 		icon: 'file:pipelex.png',
 		group: ['transform'],
 		version: 1,
-		subtitle: '={{$parameter["operation"]}}',
+		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
 		description: 'Execute Pipelex pipelines',
 		defaults: {
 			name: 'Pipelex',
 		},
-		inputs: ['main'],
-		outputs: ['main'],
+		inputs: [NodeConnectionTypes.Main],
+		outputs: [NodeConnectionTypes.Main],
 		credentials: [
 			{
 				name: 'piplexApi',
@@ -36,63 +38,115 @@ export class Pipelex implements INodeType {
 		],
 		properties: [
 			{
-				displayName: 'Base URL',
-				name: 'baseUrl',
-				type: 'string',
-				default: 'http://localhost:8081',
-				required: true,
-				placeholder: 'http://localhost:8081',
-				description: 'The base URL of your Pipelex API server',
+				displayName: 'Resource',
+				name: 'resource',
+				type: 'options',
+				noDataExpression: true,
+				options: [
+					{
+						name: 'Pipeline',
+						value: 'pipeline',
+					},
+				],
+				default: 'pipeline',
 			},
 			{
-				displayName: 'Pipe Code (pipe_code)',
+				displayName: 'Operation',
+				name: 'operation',
+				type: 'options',
+				noDataExpression: true,
+				displayOptions: {
+					show: {
+						resource: ['pipeline'],
+					},
+				},
+				options: [
+					{
+						name: 'Execute',
+						value: 'execute',
+						description: 'Execute a pipeline and wait for the result',
+						action: 'Execute a pipeline',
+					},
+				],
+				default: 'execute',
+			},
+			{
+				displayName: 'Pipe Code',
 				name: 'pipeCode',
 				type: 'string',
 				default: '',
-				required: false,
 				placeholder: 'e.g., my-pipeline-code',
-				description: 'API: pipe_code - The pipeline code to execute (optional if Pipelex Bundle is provided)',
-			},
-			{
-				displayName: 'Pipelex Bundle (plx_content)',
-				name: 'plxContent',
-				type: 'string',
-				typeOptions: {
-					rows: 10,
+				description:
+					'The code of the pipe to execute. Required unless an MTHDS Bundle is provided in Additional Fields.',
+				displayOptions: {
+					show: {
+						resource: ['pipeline'],
+						operation: ['execute'],
+					},
 				},
-				default: '',
-				required: false,
-				placeholder: 'Enter your Pipelex code here...',
-				description: 'API: plx_content - The Pipelex bundle content (optional if Pipe Code is provided). At least one of Pipe Code or Pipelex Bundle must be provided.',
 			},
 			{
-				displayName: 'inputs',
+				displayName: 'Inputs',
 				name: 'inputs',
 				type: 'json',
 				default: '{}',
 				required: true,
-				description: 'API: inputs - The inputs for the pipeline. Learn more about the inputs format <a href="https://docs.pipelex.com/pages/api/" target="_blank">Pipelex doc</a>',
+				description:
+					'The inputs for the pipeline. See <a href="https://docs.pipelex.com/pages/api/" target="_blank">Pipelex API docs</a> for the expected format.',
+				displayOptions: {
+					show: {
+						resource: ['pipeline'],
+						operation: ['execute'],
+					},
+				},
 			},
 			{
-				displayName: 'output_name',
-				name: 'outputName',
-				type: 'string',
-				default: '',
-				description: 'API: output_name - Optional output name',
-			},
-			{
-				displayName: 'output_multiplicity',
-				name: 'outputMultiplicity',
-				type: 'string',
-				default: '',
-				description: 'API: output_multiplicity - Optional output multiplicity',
-			},
-			{
-				displayName: 'dynamic_output_concept_code',
-				name: 'dynamicOutputConceptCode',
-				type: 'string',
-				default: '',
-				description: 'API: dynamic_output_concept_code - Optional dynamic output concept code',
+				displayName: 'Additional Fields',
+				name: 'additionalFields',
+				type: 'collection',
+				placeholder: 'Add Field',
+				default: {},
+				displayOptions: {
+					show: {
+						resource: ['pipeline'],
+						operation: ['execute'],
+					},
+				},
+				options: [
+					{
+						displayName: 'MTHDS Bundle',
+						name: 'mthdsContent',
+						type: 'string',
+						typeOptions: {
+							rows: 10,
+						},
+						default: '',
+						placeholder: 'Enter your MTHDS bundle content here...',
+						description:
+							'The MTHDS bundle content (sent as mthds_contents). Provide this if you do not pass a Pipe Code.',
+					},
+					{
+						displayName: 'Output Name',
+						name: 'outputName',
+						type: 'string',
+						default: '',
+						description: 'Optional name of the output variable',
+					},
+					{
+						displayName: 'Output Multiplicity',
+						name: 'outputMultiplicity',
+						type: 'string',
+						default: '',
+						description: 'Optional output multiplicity',
+					},
+					{
+						displayName: 'Dynamic Output Concept Code',
+						name: 'dynamicOutputConceptCode',
+						type: 'string',
+						default: '',
+						description: 'Optional dynamic output concept code',
+					},
+				],
 			},
 		],
 	};
@@ -101,49 +155,65 @@ export class Pipelex implements INodeType {
 		const items = this.getInputData();
 		const returnData: INodeExecutionData[] = [];
 
+		const credentials = await this.getCredentials('piplexApi');
+		const baseUrl = (credentials.baseUrl as string).replace(/\/$/, '');
+
 		for (let i = 0; i < items.length; i++) {
 			try {
-				const baseUrl = this.getNodeParameter('baseUrl', i) as string;
 				const pipeCode = this.getNodeParameter('pipeCode', i, '') as string;
-				const plxContent = this.getNodeParameter('plxContent', i, '') as string;
 				const inputsString = this.getNodeParameter('inputs', i) as string;
-				const outputName = this.getNodeParameter('outputName', i, null) as string | null;
-				const outputMultiplicity = this.getNodeParameter('outputMultiplicity', i, null) as string | null;
-				const dynamicOutputConceptCode = this.getNodeParameter('dynamicOutputConceptCode', i, null) as string | null;
+				const additionalFields = this.getNodeParameter('additionalFields', i, {}) as {
+					mthdsContent?: string;
+					outputName?: string;
+					outputMultiplicity?: string;
+					dynamicOutputConceptCode?: string;
+				};
 
-				if (!pipeCode && !plxContent) {
-					throw new Error('At least one of "Pipe Code" or "Pipelex Bundle" must be provided');
+				const mthdsContent = additionalFields.mthdsContent ?? '';
+
+				if (!pipeCode && !mthdsContent) {
+					throw new NodeOperationError(
+						this.getNode(),
+						'At least one of "Pipe Code" or "MTHDS Bundle" must be provided',
+						{ itemIndex: i },
+					);
 				}
 
-				let inputs;
+				let inputs: Record<string, unknown>;
 				try {
 					inputs = JSON.parse(inputsString);
 				} catch (error) {
-					throw new Error(`Invalid JSON in inputs field: ${error.message}`);
+					throw new NodeOperationError(
+						this.getNode(),
+						`Invalid JSON in inputs field: ${(error as Error).message}`,
+						{ itemIndex: i },
+					);
 				}
 
-			const body: PipelexExecuteBody = {
-				inputs,
-			};
-			
-			if (pipeCode) body.pipe_code = pipeCode;
-			if (plxContent) body.plx_content = plxContent;
-			if (outputName) body.output_name = outputName;
-			if (outputMultiplicity) body.output_multiplicity = outputMultiplicity;
-			if (dynamicOutputConceptCode) body.dynamic_output_concept_code = dynamicOutputConceptCode;
+				const body: PipelexExecuteBody = {
+					inputs,
+				};
 
-			const url = `${baseUrl.replace(/\/$/, '')}/api/v1/pipeline/execute`;
+				if (pipeCode) body.pipe_code = pipeCode;
+				if (mthdsContent) body.mthds_contents = [mthdsContent];
+				if (additionalFields.outputName) body.output_name = additionalFields.outputName;
+				if (additionalFields.outputMultiplicity)
+					body.output_multiplicity = additionalFields.outputMultiplicity;
+				if (additionalFields.dynamicOutputConceptCode)
+					body.dynamic_output_concept_code = additionalFields.dynamicOutputConceptCode;
 
-			const response = await this.helpers.httpRequestWithAuthentication.call(
-				this,
-				'piplexApi',
-				{
-					method: 'POST',
-					url,
-					body,
-					json: true,
-				},
-			);
+				const url = `${baseUrl}/api/v1/pipeline/execute`;
+
+				const response = await this.helpers.httpRequestWithAuthentication.call(
+					this,
+					'piplexApi',
+					{
+						method: 'POST',
+						url,
+						body,
+						json: true,
+					},
+				);
 
 				returnData.push({
 					json: response,
@@ -153,17 +223,19 @@ export class Pipelex implements INodeType {
 				if (this.continueOnFail()) {
 					returnData.push({
 						json: {
-							error: error.message,
+							error: (error as Error).message,
 						},
 						pairedItem: { item: i },
 					});
 					continue;
 				}
-				throw error;
+				if (error instanceof NodeOperationError) {
+					throw error;
+				}
+				throw new NodeOperationError(this.getNode(), error as Error, { itemIndex: i });
 			}
 		}
 
 		return [returnData];
 	}
 }
-
