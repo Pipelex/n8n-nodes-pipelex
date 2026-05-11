@@ -10,7 +10,7 @@
 	},
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/pipelex/n8n-nodes-pipelex.git"
+		"url": "https://github.com/Pipelex/n8n-nodes-pipelex.git"
 	},
 	"scripts": {
 		"dev": "n8n-node dev",
