@@ -8,7 +8,10 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    
+    permissions:
+      contents: read
+      id-token: write # required for npm Trusted Publisher (OIDC)
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -29,9 +32,7 @@ jobs:
         run: pnpm run build
 
       - name: Publish to npm
-        run: pnpm publish --no-git-checks --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: pnpm publish --no-git-checks --access public --provenance
 
       - name: Wait for npm registry
         run: |
