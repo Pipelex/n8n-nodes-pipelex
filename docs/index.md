@@ -12,9 +12,9 @@ Execute Pipelex AI pipelines directly in your n8n workflows.
 
 ## What You'll Need
 
-1. **A running Pipelex API server**
-   - Public Pipelex API: (Coming Soon, join the waitlist [here](https://go.pipelex.com/waitlist))
-   - Self-hosted: [Pipelex API Docker Image](https://hub.docker.com/r/pipelex/pipelex-api)
+1. **Access to a Pipelex API server**
+   - Hosted Pipelex API (Coming Soon): will live at `https://api.pipelex.com` — join the [waitlist](https://go.pipelex.com/waitlist)
+   - Self-hosted (available now): [Pipelex API Docker Image](https://hub.docker.com/r/pipelex/pipelex-api)
 
 ## Installation
 
@@ -22,24 +22,25 @@ Here is some n8n documentation about [installing community nodes](https://docs.n
 
 ## Quick Start
 
-1. **Set up Pipelex API** (more information [here](https://docs.pipelex.com/pages/api/)):
+1. **Get API access** — until the hosted API (`https://api.pipelex.com`) opens up, you self-host with Docker (see the [pipelex-api repo](https://github.com/Pipelex/pipelex-api)):
    ```bash
    docker run -p 8081:8081 \
-     -e API_KEY=your-token-here \
-     -e PIPELEX_INFERENCE_API_KEY=your-key-here \
+     -e PIPELEX_GATEWAY_API_KEY=your-pipelex-gateway-api-key \
      pipelex/pipelex-api
    ```
+   Add `-e AUTH_MODE=api_key -e API_KEY=your-token` if you want the server to require a Bearer Token.
 
-Get a free PIPELEX_INFERENCE_API_KEY ($20 free credits) in the [Discord # 🔑・free-api-key channel](https://go.pipelex.com/discord) or by filling this [form](https://go.pipelex.com/discord/1418228010431025233).
+   > ⚠️ **Using n8n Cloud or a deployed n8n instance?** `http://localhost:8081` only works from the same machine as the API. Deploy the Docker image on a host that's reachable from n8n (e.g. a small VM, Render/Fly.io/Railway, or expose it via a tunnel like ngrok) and point the credential's **Base URL** at that public URL.
 
 2. **Add credentials in n8n**:
    - Node → **Credential to connect with** → **Create New**
-   - Enter your API Bearer Token
+   - Set **Base URL** (defaults to `https://api.pipelex.com`; for self-hosting use the URL where your Docker image is reachable from n8n — `http://localhost:8081` only works for self-hosted n8n on the same machine)
+   - Paste your **Bearer Token**
 
 3. **Configure the node**:
-   - Base URL: Your Pipelex API server URL, e.g. `http://localhost:8081` or `http://host.docker.internal:8081` (local Docker)
-   - Inputs: Your pipeline inputs as JSON
-   - Either provide Pipe Code OR Pipelex Bundle
+   - Resource: `Pipeline`, Operation: `Execute`
+   - Provide either a `Pipe Code` **or** an inline `MTHDS Bundle` (under **Additional Fields**)
+   - Set `Inputs` as a JSON object matching your pipeline's expected inputs
 
 4. **Copy paste an example from the [Examples](./examples.md) page**
 
