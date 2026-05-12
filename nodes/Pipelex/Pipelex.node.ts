@@ -1,10 +1,12 @@
 import {
+	NodeApiError,
 	NodeConnectionTypes,
 	NodeOperationError,
 	type IExecuteFunctions,
 	type INodeExecutionData,
 	type INodeType,
 	type INodeTypeDescription,
+	type JsonObject,
 } from 'n8n-workflow';
 
 interface PipelexExecuteBody {
@@ -229,10 +231,10 @@ export class Pipelex implements INodeType {
 					});
 					continue;
 				}
-				if (error instanceof NodeOperationError) {
+				if (error instanceof NodeOperationError || error instanceof NodeApiError) {
 					throw error;
 				}
-				throw new NodeOperationError(this.getNode(), error as Error, { itemIndex: i });
+				throw new NodeApiError(this.getNode(), error as JsonObject, { itemIndex: i });
 			}
 		}
 

@@ -12,6 +12,7 @@
 		"type": "git",
 		"url": "https://github.com/Pipelex/n8n-nodes-pipelex.git"
 	},
+	"homepage": "https://github.com/Pipelex/n8n-nodes-pipelex#readme",
 	"scripts": {
 		"dev": "n8n-node dev",
 		"build": "n8n-node build",
