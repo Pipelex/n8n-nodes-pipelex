@@ -1,6 +1,6 @@
 {
 	"name": "n8n-nodes-pipelex",
-	"version": "0.0.6",
+	"version": "0.0.7",
 	"description": "Pipelex n8n node package",
 	"license": "MIT",
 	"keywords": ["n8n-community-node-package"],
@@ -12,6 +12,7 @@
 		"type": "git",
 		"url": "https://github.com/Pipelex/n8n-nodes-pipelex.git"
 	},
+	"homepage": "https://github.com/Pipelex/n8n-nodes-pipelex#readme",
 	"scripts": {
 		"dev": "n8n-node dev",
 		"build": "n8n-node build",

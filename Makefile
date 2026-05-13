@@ -60,9 +60,15 @@ check:
 	@echo "$(BLUE)Running quality checks...$(NC)"
 	@pnpm run lint
 	@pnpm run build
-	@echo "$(YELLOW)Checking built package with ESLint...$(NC)"
-	@pnpm exec eslint --no-ignore dist/ || (echo "$(RED)✗ ESLint errors in dist/$(NC)" && exit 1)
 	@echo "$(GREEN)✓ All checks passed$(NC)"
+
+# Lint the built JS output. Skipped from `check` because the recommended
+# typescript-eslint config flags `require()` calls that tsc always emits
+# for CommonJS targets — there's no way to satisfy the rule without
+# rewriting how the package is compiled. Source ESLint (above) is the
+# real gate.
+check-dist:
+	@pnpm exec eslint --no-ignore dist/ || (echo "$(RED)✗ ESLint errors in dist/$(NC)" && exit 1)
 
 check-published:
 	@echo "$(BLUE)Running quality checks on published package...$(NC)"

@@ -45,7 +45,12 @@ export class PiplexApi implements ICredentialType {
 	test: ICredentialTestRequest = {
 		request: {
 			baseURL: '={{$credentials.baseUrl}}',
-			url: '/api/v1/api_version',
+			// `/me` is the canonical "is this token live?" endpoint — accessible to any
+			// authenticated user via JWT or API key, no role gate. `/api/v1/api_version`
+			// (the previous test path) sits behind the admin-only `/api/*` route gate,
+			// so non-admin users with perfectly valid tokens see the credential test
+			// fail with a 403 "Forbidden". `/me` returns 200 + the user's profile.
+			url: '/me',
 			method: 'GET',
 		},
 	};

@@ -1,5 +1,15 @@
 # Changelog
 
+## [v0.0.7] - 2026-05-13
+
+- Credential test now pings `/me` (any authenticated user) instead of `/api/v1/api_version` (admin-only) — non-admin users with valid tokens were seeing the credential check fail with a 403.
+- Updated for the new Pipelex API key format (80-char tokens with CRC32 checksum, `plx_sk_..._xxxxxxxx`). The credential field accepts the new format end-to-end.
+- Flattened the Pipeline → Execute UI: dropped the `Resource` and `Operation` dropdowns (one option each), removed the `Additional Fields` collection, and surfaced every pipeline-execute field at the top level. New order: `MTHDS Bundles` → `Inputs` → `Pipe Code` → `Output Name` → `Output Multiplicity` → `Dynamic Output Concept Ref`.
+- `MTHDS Bundles` is now a true `string[]` (multiple bundles per request) via `multipleValues: true`, matching the API's `list[str]` contract; previously a single textarea was wrapped in `[content]`.
+- Fixed the silent-typo bug: the body field is now `dynamic_output_concept_ref` (matches the upstream `PipelineRequest` model). Previously the node sent `dynamic_output_concept_code` which the API silently discarded.
+- `Inputs` is no longer marked required — the API defaults it to `{}` server-side.
+- CI: removed the dist re-lint step from `make check` (it flagged `tsc`-emitted `require()` calls, structurally unfixable). Source ESLint remains the gate; `make check-dist` is available for manual inspection.
+
 ## [v0.0.6] - 2026-05-11
 
 - Applied n8n review feedback: moved `Base URL` to a credential field, added required `Resource`/`Operation` selectors, grouped optional properties under `Additional Fields`, switched inputs/outputs to `NodeConnectionTypes.Main`, replaced raw `Error` throws with `NodeOperationError`, and pointed the credential test at the production API instead of `127.0.0.1`.
