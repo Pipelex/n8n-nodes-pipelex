@@ -15,7 +15,11 @@ interface PipelexExecuteBody {
 	mthds_contents?: string[];
 	output_name?: string;
 	output_multiplicity?: string;
-	dynamic_output_concept_code?: string;
+	// API field name is `dynamic_output_concept_ref` (matches the upstream
+	// `mthds.client.pipeline.PipelineRequest` model). The FastAPI route
+	// silently ignores unrecognized keys, so a typo here = a silent no-op
+	// override.
+	dynamic_output_concept_ref?: string;
 }
 
 export class Pipelex implements INodeType {
@@ -25,7 +29,11 @@ export class Pipelex implements INodeType {
 		icon: 'file:pipelex.png',
 		group: ['transform'],
 		version: 1,
-		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
+		// Subtitle previously read $parameter.operation + $parameter.resource, but
+		// this node only does one thing ("Execute Pipeline"). When more operations
+		// land (e.g., /pipeline/start, run-status lookups), reintroduce a Resource
+		// + Operation switcher and a dynamic subtitle.
+		subtitle: 'Execute Pipeline',
 		description: 'Execute Pipelex pipelines',
 		defaults: {
 			name: 'Pipelex',
@@ -39,38 +47,35 @@ export class Pipelex implements INodeType {
 			},
 		],
 		properties: [
+			// Field order: MTHDS Bundles (the big payload) → Inputs → Pipe Code →
+			// optional overrides. Pipe Code lives below Inputs because in the most
+			// common flow the user pastes/edits a bundle, fills the inputs, then
+			// picks which pipe inside the bundle to run. Pipe Code and MTHDS Bundles
+			// are mutually-exclusive but one is REQUIRED; XOR enforced at runtime.
 			{
-				displayName: 'Resource',
-				name: 'resource',
-				type: 'options',
-				noDataExpression: true,
-				options: [
-					{
-						name: 'Pipeline',
-						value: 'pipeline',
-					},
-				],
-				default: 'pipeline',
+				displayName: 'MTHDS Bundles',
+				name: 'mthdsContents',
+				type: 'string',
+				typeOptions: {
+					// API accepts `list[str]`. `multipleValues: true` renders a "+ Add
+					// Bundle" button so users can pass multiple bundles in one request.
+					// Each entry is still a multi-line textarea via `rows: 10`.
+					multipleValues: true,
+					multipleValueButtonText: 'Add Bundle',
+					rows: 10,
+				},
+				default: [],
+				placeholder: 'Enter MTHDS bundle content...',
+				description:
+					'One or more MTHDS bundle contents (sent as mthds_contents). Provide at least one OR a Pipe Code.',
 			},
 			{
-				displayName: 'Operation',
-				name: 'operation',
-				type: 'options',
-				noDataExpression: true,
-				displayOptions: {
-					show: {
-						resource: ['pipeline'],
-					},
-				},
-				options: [
-					{
-						name: 'Execute',
-						value: 'execute',
-						description: 'Execute a pipeline and wait for the result',
-						action: 'Execute a pipeline',
-					},
-				],
-				default: 'execute',
+				displayName: 'Inputs',
+				name: 'inputs',
+				type: 'json',
+				default: '{}',
+				description:
+					'The inputs for the pipeline. Defaults to {} server-side if omitted. See <a href="https://docs.pipelex.com/pages/api/" target="_blank">Pipelex API docs</a> for the expected format.',
 			},
 			{
 				displayName: 'Pipe Code',
@@ -79,76 +84,29 @@ export class Pipelex implements INodeType {
 				default: '',
 				placeholder: 'e.g., my-pipeline-code',
 				description:
-					'The code of the pipe to execute. Required unless an MTHDS Bundle is provided in Additional Fields.',
-				displayOptions: {
-					show: {
-						resource: ['pipeline'],
-						operation: ['execute'],
-					},
-				},
+					'The code of the pipe to execute. Provide this OR MTHDS Bundles (one is required).',
 			},
 			{
-				displayName: 'Inputs',
-				name: 'inputs',
-				type: 'json',
-				default: '{}',
-				required: true,
+				displayName: 'Output Name',
+				name: 'outputName',
+				type: 'string',
+				default: '',
+				description: 'Optional name of the output variable',
+			},
+			{
+				displayName: 'Output Multiplicity',
+				name: 'outputMultiplicity',
+				type: 'string',
+				default: '',
+				description: 'Optional output multiplicity',
+			},
+			{
+				displayName: 'Dynamic Output Concept Ref',
+				name: 'dynamicOutputConceptRef',
+				type: 'string',
+				default: '',
 				description:
-					'The inputs for the pipeline. See <a href="https://docs.pipelex.com/pages/api/" target="_blank">Pipelex API docs</a> for the expected format.',
-				displayOptions: {
-					show: {
-						resource: ['pipeline'],
-						operation: ['execute'],
-					},
-				},
-			},
-			{
-				displayName: 'Additional Fields',
-				name: 'additionalFields',
-				type: 'collection',
-				placeholder: 'Add Field',
-				default: {},
-				displayOptions: {
-					show: {
-						resource: ['pipeline'],
-						operation: ['execute'],
-					},
-				},
-				options: [
-					{
-						displayName: 'MTHDS Bundle',
-						name: 'mthdsContent',
-						type: 'string',
-						typeOptions: {
-							rows: 10,
-						},
-						default: '',
-						placeholder: 'Enter your MTHDS bundle content here...',
-						description:
-							'The MTHDS bundle content (sent as mthds_contents). Provide this if you do not pass a Pipe Code.',
-					},
-					{
-						displayName: 'Output Name',
-						name: 'outputName',
-						type: 'string',
-						default: '',
-						description: 'Optional name of the output variable',
-					},
-					{
-						displayName: 'Output Multiplicity',
-						name: 'outputMultiplicity',
-						type: 'string',
-						default: '',
-						description: 'Optional output multiplicity',
-					},
-					{
-						displayName: 'Dynamic Output Concept Code',
-						name: 'dynamicOutputConceptCode',
-						type: 'string',
-						default: '',
-						description: 'Optional dynamic output concept code',
-					},
-				],
+					'Optional override for the dynamic output concept ref (sent as dynamic_output_concept_ref)',
 			},
 		],
 	};
@@ -163,20 +121,27 @@ export class Pipelex implements INodeType {
 		for (let i = 0; i < items.length; i++) {
 			try {
 				const pipeCode = this.getNodeParameter('pipeCode', i, '') as string;
+				const mthdsContentsRaw = this.getNodeParameter('mthdsContents', i, []) as unknown;
 				const inputsString = this.getNodeParameter('inputs', i) as string;
-				const additionalFields = this.getNodeParameter('additionalFields', i, {}) as {
-					mthdsContent?: string;
-					outputName?: string;
-					outputMultiplicity?: string;
-					dynamicOutputConceptCode?: string;
-				};
+				const outputName = this.getNodeParameter('outputName', i, '') as string;
+				const outputMultiplicity = this.getNodeParameter('outputMultiplicity', i, '') as string;
+				const dynamicOutputConceptRef = this.getNodeParameter(
+					'dynamicOutputConceptRef',
+					i,
+					'',
+				) as string;
 
-				const mthdsContent = additionalFields.mthdsContent ?? '';
+				// `multipleValues: true` on a string field yields a `string[]`. Filter
+				// out empty entries — the n8n UI persists a default empty string when
+				// users click "Add Bundle" without typing anything.
+				const mthdsContents: string[] = Array.isArray(mthdsContentsRaw)
+					? (mthdsContentsRaw as string[]).filter((entry) => typeof entry === 'string' && entry.length > 0)
+					: [];
 
-				if (!pipeCode && !mthdsContent) {
+				if (!pipeCode && mthdsContents.length === 0) {
 					throw new NodeOperationError(
 						this.getNode(),
-						'At least one of "Pipe Code" or "MTHDS Bundle" must be provided',
+						'At least one of "Pipe Code" or "MTHDS Bundles" must be provided',
 						{ itemIndex: i },
 					);
 				}
@@ -197,12 +162,10 @@ export class Pipelex implements INodeType {
 				};
 
 				if (pipeCode) body.pipe_code = pipeCode;
-				if (mthdsContent) body.mthds_contents = [mthdsContent];
-				if (additionalFields.outputName) body.output_name = additionalFields.outputName;
-				if (additionalFields.outputMultiplicity)
-					body.output_multiplicity = additionalFields.outputMultiplicity;
-				if (additionalFields.dynamicOutputConceptCode)
-					body.dynamic_output_concept_code = additionalFields.dynamicOutputConceptCode;
+				if (mthdsContents.length > 0) body.mthds_contents = mthdsContents;
+				if (outputName) body.output_name = outputName;
+				if (outputMultiplicity) body.output_multiplicity = outputMultiplicity;
+				if (dynamicOutputConceptRef) body.dynamic_output_concept_ref = dynamicOutputConceptRef;
 
 				const url = `${baseUrl}/api/v1/pipeline/execute`;
 
