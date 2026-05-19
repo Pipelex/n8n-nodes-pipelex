@@ -2,10 +2,11 @@
 
 ## [v0.0.9] - 2026-05-19
 
-- Adopt official `@n8n/node-cli` ESLint config (enforces `n8n-nodes-base` + `@n8n/eslint-plugin-community-nodes` rules in CI).
+- Adopt official `@n8n/node-cli` ESLint config (enforces `n8n-nodes-base` + `@n8n/eslint-plugin-community-nodes` rules in CI). CI now runs the TypeScript lint, the n8n compliance lint, and the build as three separate workflows so failures are clearly attributed.
 - Switch node and credentials icon from PNG to SVG.
 - Mark `Pipelex` node as `usableAsTool: true` — node is now exposed to n8n AI Agent workflows.
 - Append "API" to `PiplexApi` credential `displayName` per n8n convention.
+- Drop the re-throw guard in the `execute()` catch block; all caught errors are now uniformly wrapped in `NodeApiError`, per the `@n8n/community-nodes/require-node-api-error` rule.
 
 ## [v0.0.8] - 2026-05-19
 

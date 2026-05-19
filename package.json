@@ -3,7 +3,9 @@
 	"version": "0.0.9",
 	"description": "Pipelex n8n node package",
 	"license": "MIT",
-	"keywords": ["n8n-community-node-package"],
+	"keywords": [
+		"n8n-community-node-package"
+	],
 	"author": {
 		"name": "Evotis S.A.S.",
 		"email": "oss@pipelex.com"
@@ -17,6 +19,8 @@
 		"dev": "n8n-node dev",
 		"build": "n8n-node build",
 		"lint": "eslint .",
+		"lint:ts": "eslint --config eslint.config.ts.mjs .",
+		"lint:n8n": "eslint --config eslint.config.n8n.mjs .",
 		"format": "prettier --write .",
 		"prepublishOnly": "pnpm run build",
 		"postpublish": "sleep 10 && make check-published"
@@ -34,10 +38,15 @@
 		]
 	},
 	"devDependencies": {
+		"@eslint/js": "^10.0.1",
+		"@n8n/eslint-plugin-community-nodes": "^0.16.0",
 		"@n8n/node-cli": "*",
+		"eslint": "^9.0.0",
+		"eslint-import-resolver-typescript": "^4.4.4",
+		"eslint-plugin-import-x": "^4.16.2",
+		"eslint-plugin-n8n-nodes-base": "^1.16.6",
 		"typescript": "~5.6",
-		"typescript-eslint": "^8.0.0",
-		"eslint": "^9.0.0"
+		"typescript-eslint": "^8.0.0"
 	},
 	"peerDependencies": {
 		"n8n-workflow": "*"
