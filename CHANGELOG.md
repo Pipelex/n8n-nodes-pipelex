@@ -1,5 +1,12 @@
 # Changelog
 
+## [v0.0.9] - 2026-05-19
+
+- Adopt official `@n8n/node-cli` ESLint config (enforces `n8n-nodes-base` + `@n8n/eslint-plugin-community-nodes` rules in CI).
+- Switch node and credentials icon from PNG to SVG.
+- Mark `Pipelex` node as `usableAsTool: true` — node is now exposed to n8n AI Agent workflows.
+- Append "API" to `PiplexApi` credential `displayName` per n8n convention.
+
 ## [v0.0.8] - 2026-05-19
 
 - Updated Pipelex API paths from `/api/v1/...` to `/runner/v1/...` (the `pipeline/execute` endpoint and the doc references for the credential test path).

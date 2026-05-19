@@ -1,14 +1,8 @@
-import tseslint from 'typescript-eslint';
+import { config } from '@n8n/node-cli/eslint';
 
-export default tseslint.config(
+export default [
 	{
 		ignores: ['dist/**', 'node_modules/**', '.venv/**', 'site/**'],
 	},
-	...tseslint.configs.recommended,
-	{
-		rules: {
-			'@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
-			'@typescript-eslint/no-explicit-any': 'warn',
-		},
-	}
-);
+	...config,
+];

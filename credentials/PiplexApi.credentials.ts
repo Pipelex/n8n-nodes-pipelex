@@ -1,5 +1,6 @@
 import type {
 	IAuthenticateGeneric,
+	Icon,
 	ICredentialTestRequest,
 	ICredentialType,
 	INodeProperties,
@@ -7,8 +8,9 @@ import type {
 
 export class PiplexApi implements ICredentialType {
 	name = 'piplexApi';
-	displayName = 'Pipelex Bearer Token';
+	displayName = 'Pipelex Bearer Token API';
 	documentationUrl = 'https://docs.pipelex.com/pages/api/';
+	icon: Icon = 'file:icons/pipelex.svg';
 	properties: INodeProperties[] = [
 		{
 			displayName: 'Base URL',
