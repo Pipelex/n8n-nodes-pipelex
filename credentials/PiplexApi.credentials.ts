@@ -28,7 +28,7 @@ export class PiplexApi implements ICredentialType {
 			},
 			default: '',
 			required: true,
-			description: 'Your Pipelex API Bearer Token (will be sent as Authorization: Bearer YOUR_TOKEN)',
+			description: 'The API key to the Pipelex API. Create one at https://app.pipelex.com/',
 			placeholder: 'your-bearer-token-here',
 		},
 	];
@@ -46,8 +46,8 @@ export class PiplexApi implements ICredentialType {
 		request: {
 			baseURL: '={{$credentials.baseUrl}}',
 			// `/me` is the canonical "is this token live?" endpoint — accessible to any
-			// authenticated user via JWT or API key, no role gate. `/api/v1/api_version`
-			// (the previous test path) sits behind the admin-only `/api/*` route gate,
+			// authenticated user via JWT or API key, no role gate. `/runner/v1/api_version`
+			// (the previous test path) sits behind the admin-only `/runner/v1/*` route gate,
 			// so non-admin users with perfectly valid tokens see the credential test
 			// fail with a 403 "Forbidden". `/me` returns 200 + the user's profile.
 			url: '/me',

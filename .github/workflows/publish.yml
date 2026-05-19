@@ -143,10 +143,17 @@ jobs:
       - name: Upload artifacts to GitHub Release
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        # Upload to GitHub Release using the `gh` CLI.
-        # `dist/` contains the built packages
-        run: >-
-          gh release upload
-          "v$VERSION" dist/**
-          --repo "$GITHUB_REPOSITORY"
+        # `dist/**` previously expanded to include both files AND subdirectories
+        # (dist/nodes, dist/credentials, dist/docs, ...). `gh release upload`
+        # rejects directories with "is a directory", so the asset list ended
+        # up partial (whichever top-level files got uploaded before the first
+        # directory was hit). Zip the dist into a single canonical asset
+        # instead — easier to download, no glob gymnastics, no partial state.
+        # The real package distribution is npm (above); this asset is the
+        # offline mirror.
+        run: |
+          ZIP_NAME="n8n-nodes-pipelex-v$VERSION-dist.zip"
+          (cd dist && zip -rq "../$ZIP_NAME" .)
+          gh release upload "v$VERSION" "$ZIP_NAME" \
+            --repo "$GITHUB_REPOSITORY" --clobber
 

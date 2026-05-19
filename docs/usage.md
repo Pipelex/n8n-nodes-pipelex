@@ -2,7 +2,7 @@
 
 ## Resource & Operation
 
-The Pipelex node exposes a single **Pipeline** resource with an **Execute** operation. It calls `POST /api/v1/pipeline/execute` on your Pipelex API server and waits for the result.
+The Pipelex node exposes a single **Pipeline** resource with an **Execute** operation. It calls `POST /runner/v1/pipeline/execute` on your Pipelex API server and waits for the result.
 
 ## Credential: Base URL
 
@@ -16,7 +16,7 @@ The Pipelex API base URL is configured on the credential, not on the node. Open 
 
 > ⚠️ **Running on n8n Cloud or any deployed n8n instance?** `localhost`/`127.0.0.1` URLs won't be reachable. Deploy the [pipelex-api Docker image](https://hub.docker.com/r/pipelex/pipelex-api) somewhere n8n can reach (a small VM, Render/Fly.io/Railway, or a tunnel like ngrok) and use that public URL.
 
-The credential test hits `GET <Base URL>/api/v1/api_version` to verify both reachability and the Bearer Token.
+The credential test hits `GET <Base URL>/me` to verify both reachability and the Bearer Token.
 
 ---
 

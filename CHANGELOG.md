@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.0.8] - 2026-05-19
+
+- Updated Pipelex API paths from `/api/v1/...` to `/runner/v1/...` (the `pipeline/execute` endpoint and the doc references for the credential test path).
+- Bearer Token credential field description now points users to `https://app.pipelex.com/` to create an API key.
+
 ## [v0.0.7] - 2026-05-13
 
 - Credential test now pings `/me` (any authenticated user) instead of `/api/v1/api_version` (admin-only) — non-admin users with valid tokens were seeing the credential check fail with a 403.
