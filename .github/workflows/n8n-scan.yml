@@ -1,0 +1,34 @@
+name: n8n Scan Simulation
+
+# Pre-publish equivalent of `@n8n/scan-community-package`. The real scanner
+# only runs against a published npm tarball (see publish.yml), so we replicate
+# its ESLint config (`eslint.config.scan.mjs`) against our compiled `dist/`
+# output to catch failures before publishing.
+on:
+  pull_request:
+
+jobs:
+  scan:
+    name: n8n Scan Simulation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install dependencies
+        run: make install
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Run scan simulation
+        run: pnpm run scan:simulate

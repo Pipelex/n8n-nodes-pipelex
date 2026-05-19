@@ -26,9 +26,10 @@ export class Pipelex implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Pipelex',
 		name: 'pipelex',
-		icon: 'file:pipelex.png',
+		icon: 'file:pipelex.svg',
 		group: ['transform'],
 		version: 1,
+		usableAsTool: true,
 		// Subtitle previously read $parameter.operation + $parameter.resource, but
 		// this node only does one thing ("Execute Pipeline"). When more operations
 		// land (e.g., /pipeline/start, run-status lookups), reintroduce a Resource
@@ -193,9 +194,6 @@ export class Pipelex implements INodeType {
 						pairedItem: { item: i },
 					});
 					continue;
-				}
-				if (error instanceof NodeOperationError || error instanceof NodeApiError) {
-					throw error;
 				}
 				throw new NodeApiError(this.getNode(), error as JsonObject, { itemIndex: i });
 			}
