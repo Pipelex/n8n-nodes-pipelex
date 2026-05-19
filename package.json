@@ -21,6 +21,7 @@
 		"lint": "eslint .",
 		"lint:ts": "eslint --config eslint.config.ts.mjs .",
 		"lint:n8n": "eslint --config eslint.config.n8n.mjs .",
+		"scan:simulate": "eslint --config eslint.config.scan.mjs 'dist/**/*.js' 'dist/**/*.json' 'package.json'",
 		"format": "prettier --write .",
 		"prepublishOnly": "pnpm run build",
 		"postpublish": "sleep 10 && make check-published"

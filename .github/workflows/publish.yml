@@ -43,15 +43,13 @@ jobs:
           sleep 30
 
       - name: Verify published package
-        id: verify-published
+        # Runs `@n8n/scan-community-package` against the freshly published
+        # tarball. This is the authoritative n8n verification — provenance +
+        # ESLint on the published artifact. We let a failure fail the run so
+        # the maintainer is alerted immediately (the package is already on
+        # npm at this point, so the only remediation is a follow-up patch
+        # release with the fix).
         run: make check-published
-        continue-on-error: true
-
-      - name: Report verification results
-        if: steps.verify-published.outcome == 'failure'
-        run: |
-          echo "⚠️ Published package verification failed"
-          echo "Please check the n8n scanner output above"
 
       - name: Store the distribution packages
         uses: actions/upload-artifact@v4

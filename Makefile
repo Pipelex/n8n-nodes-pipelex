@@ -60,6 +60,7 @@ check:
 	@echo "$(BLUE)Running quality checks...$(NC)"
 	@pnpm run lint
 	@pnpm run build
+	@pnpm run scan:simulate
 	@echo "$(GREEN)✓ All checks passed$(NC)"
 
 # Lint the built JS output. Skipped from `check` because the recommended
