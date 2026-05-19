@@ -89,7 +89,7 @@ This node requires a **Pipelex API credential** to authenticate with your Pipele
 3. Fill in:
    - **Base URL** — defaults to `https://api.pipelex.com` (hosted API, coming soon). For now use `http://localhost:8081` (or `http://host.docker.internal:8081` from Docker) pointing at your self-hosted server.
    - **Bearer Token** — your Pipelex API token (sent as `Authorization: Bearer <token>`)
-4. (Optional) Click **Test** — the credential is verified against `GET /api/v1/api_version` on your base URL.
+4. (Optional) Click **Test** — the credential is verified against `GET /me` on your base URL.
 
 **Where to get your Bearer Token:**
 - Hosted API (coming soon at `https://api.pipelex.com`): join the [waitlist](https://go.pipelex.com/waitlist)

@@ -167,7 +167,7 @@ export class Pipelex implements INodeType {
 				if (outputMultiplicity) body.output_multiplicity = outputMultiplicity;
 				if (dynamicOutputConceptRef) body.dynamic_output_concept_ref = dynamicOutputConceptRef;
 
-				const url = `${baseUrl}/api/v1/pipeline/execute`;
+				const url = `${baseUrl}/runner/v1/pipeline/execute`;
 
 				const response = await this.helpers.httpRequestWithAuthentication.call(
 					this,
