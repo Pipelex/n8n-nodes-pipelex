@@ -1,5 +1,9 @@
 # Changelog
 
+## [v0.0.10] - 2026-05-21
+
+- Credential test now pings `/platform/v1/auth/verify` (the canonical token-verification endpoint) instead of `/me`.
+
 ## [v0.0.9] - 2026-05-19
 
 - Adopt official `@n8n/node-cli` ESLint config (enforces `n8n-nodes-base` + `@n8n/eslint-plugin-community-nodes` rules in CI). CI now runs the TypeScript lint, the n8n compliance lint, and the build as three separate workflows so failures are clearly attributed.
