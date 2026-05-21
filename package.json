@@ -1,6 +1,6 @@
 {
 	"name": "n8n-nodes-pipelex",
-	"version": "0.0.9",
+	"version": "0.0.10",
 	"description": "Pipelex n8n node package",
 	"license": "MIT",
 	"keywords": [
