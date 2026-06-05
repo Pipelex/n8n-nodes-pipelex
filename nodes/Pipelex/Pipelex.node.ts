@@ -18,6 +18,7 @@ import {
 	requestExecute,
 	requestResult,
 	requestStart,
+	SERVICE_UNAVAILABLE_MESSAGE,
 	type PipelexStartBody,
 } from './GenericFunctions';
 
@@ -30,6 +31,28 @@ const DEFAULT_POLL_INTERVAL_SECONDS = 2;
 // Floor on the sleep between polls — guards against a hot loop if the user sets
 // poll interval to 0 and the server sends no Retry-After.
 const MIN_POLL_SLEEP_MS = 250;
+// How many CONSECUTIVE gateway 5xx (transient) responses the poll loop tolerates
+// before failing. Bounds an outage so an unbounded (Max Wait = 0) poll can't hang
+// forever on a dead backend; a recovered backend resets the counter.
+const MAX_CONSECUTIVE_TRANSIENT = 5;
+
+/**
+ * Re-throw an error from an op helper. The helpers already raise
+ * `NodeApiError` / `NodeOperationError` with the response body, HTTP code, and
+ * item context — re-throw those UNCHANGED so n8n keeps the full metadata. Only a
+ * genuinely-unknown error is wrapped. (Lives outside the `catch` so it doesn't
+ * trip the `require-node-api-error` lint rule, which only inspects throws made
+ * directly inside a catch clause.)
+ */
+function rethrowOpError(ctx: IExecuteFunctions, error: unknown, itemIndex: number): never {
+	if (error instanceof NodeApiError || error instanceof NodeOperationError) {
+		throw error;
+	}
+	throw new NodeApiError(ctx.getNode(), error as JsonObject, {
+		message: (error as Error).message,
+		itemIndex,
+	});
+}
 
 /**
  * Collect + validate the pipeline-definition fields shared by Execute, Start,
@@ -57,9 +80,12 @@ function readRunDefinition(
 		: '';
 
 	// `multipleValues: true` on a string field yields a `string[]`; drop the empty
-	// entries the UI persists when "Add Bundle" is clicked without typing.
+	// (and whitespace-only) entries the UI persists when "Add Bundle" is clicked
+	// without typing — a blank bundle must not slip past the guard below.
 	const mthdsContents: string[] = Array.isArray(mthdsContentsRaw)
-		? (mthdsContentsRaw as string[]).filter((entry) => typeof entry === 'string' && entry.length > 0)
+		? (mthdsContentsRaw as string[]).filter(
+				(entry) => typeof entry === 'string' && entry.trim().length > 0,
+			)
 		: [];
 
 	if (!pipeCode && mthdsContents.length === 0) {
@@ -70,9 +96,9 @@ function readRunDefinition(
 		);
 	}
 
-	let inputs: Record<string, unknown>;
+	let parsedInputs: unknown;
 	try {
-		inputs = JSON.parse(inputsString);
+		parsedInputs = JSON.parse(inputsString);
 	} catch (error) {
 		throw new NodeOperationError(
 			ctx.getNode(),
@@ -80,6 +106,17 @@ function readRunDefinition(
 			{ itemIndex },
 		);
 	}
+	// The API contract expects `inputs` to be a JSON object. `JSON.parse` also
+	// accepts null / arrays / scalars — reject those locally with a clear,
+	// item-scoped error instead of letting the runner fail opaquely later.
+	if (parsedInputs === null || typeof parsedInputs !== 'object' || Array.isArray(parsedInputs)) {
+		throw new NodeOperationError(
+			ctx.getNode(),
+			'The "Inputs" field must be a JSON object, e.g. {"key": "value"}',
+			{ itemIndex },
+		);
+	}
+	const inputs = parsedInputs as Record<string, unknown>;
 
 	return buildStartBody({
 		pipeCode,
@@ -126,6 +163,7 @@ async function pollForResultLoop(
 	const abortSignal = ctx.getExecutionCancelSignal();
 	const unbounded = !maxWaitSeconds || maxWaitSeconds <= 0;
 	const deadline = unbounded ? Number.POSITIVE_INFINITY : Date.now() + maxWaitSeconds * 1000;
+	let consecutiveTransient = 0;
 
 	for (;;) {
 		const response = await requestResult(ctx, baseUrl, runId);
@@ -134,6 +172,11 @@ async function pollForResultLoop(
 			(response.body ?? {}) as IDataObject,
 			response.headers ?? {},
 		);
+
+		// Only a 202 is an in-flight signal; reset the outage counter on anything else.
+		if (outcome.kind !== 'transient') {
+			consecutiveTransient = 0;
+		}
 
 		switch (outcome.kind) {
 			case 'completed':
@@ -156,18 +199,33 @@ async function pollForResultLoop(
 					httpCode: String(outcome.statusCode),
 					itemIndex,
 				});
+			case 'transient': {
+				// Gateway/backend outage — tolerate a few in a row (a blip shouldn't
+				// lose the run), but fail rather than hang an unbounded poll forever.
+				consecutiveTransient += 1;
+				if (consecutiveTransient > MAX_CONSECUTIVE_TRANSIENT) {
+					throw new NodeApiError(ctx.getNode(), {} as JsonObject, {
+						message: SERVICE_UNAVAILABLE_MESSAGE,
+						httpCode: String(outcome.statusCode),
+						itemIndex,
+					});
+				}
+				const remainingMs = deadline - Date.now();
+				if (remainingMs <= 0) {
+					return runStillRunning(runId);
+				}
+				const requestedMs =
+					Math.max(pollIntervalSeconds, outcome.retryAfterSeconds ?? 0) * 1000;
+				const sleepMs = Math.max(Math.min(requestedMs, remainingMs), MIN_POLL_SLEEP_MS);
+				await sleepWithAbort(sleepMs, abortSignal);
+				break;
+			}
 			case 'running': {
 				const remainingMs = deadline - Date.now();
 				if (remainingMs <= 0) {
 					// Graceful degrade — don't lose the run. Fetch it later via the
 					// "Poll for Result" operation with this run ID.
-					return {
-						done: false,
-						status: 'RUNNING',
-						pipeline_run_id: runId,
-						message:
-							'Still running after Max Wait. Fetch it later with the "Poll for Result" operation and this run ID.',
-					};
+					return runStillRunning(runId);
 				}
 				// Honor the server's Retry-After when it asks for a longer wait, but
 				// never sleep past the deadline (which is Infinity when unbounded).
@@ -179,6 +237,17 @@ async function pollForResultLoop(
 			}
 		}
 	}
+}
+
+/** The graceful-degrade payload when a bounded poll exceeds its Max Wait. */
+function runStillRunning(runId: string): IDataObject {
+	return {
+		done: false,
+		status: 'RUNNING',
+		pipeline_run_id: runId,
+		message:
+			'Still running after Max Wait. Fetch it later with the "Poll for Result" operation and this run ID.',
+	};
 }
 
 /** Execute op: blocking, one-shot runner call. */
@@ -198,7 +267,7 @@ async function startRun(
 	itemIndex: number,
 ): Promise<IDataObject> {
 	const body = readRunDefinition(ctx, itemIndex, true);
-	const idempotency = idempotencyKey(ctx.getExecutionId(), itemIndex);
+	const idempotency = idempotencyKey(ctx.getExecutionId(), ctx.getNode().id, itemIndex);
 	return requestStart(ctx, baseUrl, body, idempotency, itemIndex);
 }
 
@@ -247,6 +316,13 @@ async function getResultOnce(
 				pipeline_run_id: runId,
 				message: 'Still running — fetch again later, or use "Poll for Result" to wait for it.',
 			};
+		case 'transient':
+			// A single-shot fetch must not report an outage as "still running".
+			throw new NodeApiError(ctx.getNode(), {} as JsonObject, {
+				message: SERVICE_UNAVAILABLE_MESSAGE,
+				httpCode: String(outcome.statusCode),
+				itemIndex,
+			});
 		case 'failed':
 			throw new NodeApiError(ctx.getNode(), outcome.body as JsonObject, {
 				message: outcome.message,
@@ -275,7 +351,7 @@ async function startAndPoll(
 	itemIndex: number,
 ): Promise<IDataObject> {
 	const body = readRunDefinition(ctx, itemIndex, true);
-	const idempotency = idempotencyKey(ctx.getExecutionId(), itemIndex);
+	const idempotency = idempotencyKey(ctx.getExecutionId(), ctx.getNode().id, itemIndex);
 	const startResponse = await requestStart(ctx, baseUrl, body, idempotency, itemIndex);
 	const runId = startResponse.pipeline_run_id as string | undefined;
 	if (!runId) {
@@ -562,12 +638,9 @@ export class Pipelex implements INodeType {
 					});
 					continue;
 				}
-				// The op helpers already raise NodeApiError / NodeOperationError; re-wrap
-				// (preserving the original message) so the n8n UI keeps full error context.
-				throw new NodeApiError(this.getNode(), error as JsonObject, {
-					message: (error as Error).message,
-					itemIndex: i,
-				});
+				// Re-throw n8n errors unchanged (preserving httpCode / body / context);
+				// only genuinely-unknown errors get wrapped. See rethrowOpError.
+				rethrowOpError(this, error, i);
 			}
 		}
 

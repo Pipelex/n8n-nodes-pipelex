@@ -44,7 +44,7 @@ function makeContext(opts: ContextOptions): {
 		getExecutionId: () => 'exec-1',
 		getExecutionCancelSignal: () => undefined,
 		continueOnFail: () => opts.continueOnFail ?? false,
-		getNode: () => ({ name: 'Pipelex', type: 'pipelex', typeVersion: 1 }),
+		getNode: () => ({ id: 'node-1', name: 'Pipelex', type: 'pipelex', typeVersion: 1 }),
 		helpers: { httpRequestWithAuthentication: httpFn },
 	} as unknown as IExecuteFunctions;
 
@@ -119,7 +119,7 @@ describe('Pipelex node — Start', () => {
 		expect(result[0][0].json.pipeline_run_id).toBe('run-1');
 		expect(httpFn).toHaveBeenCalledTimes(1);
 		expect(httpFn.mock.calls[0][1].url).toBe('https://api.test/platform/v1/runs');
-		expect(httpFn.mock.calls[0][1].headers['Idempotency-Key']).toBe('exec-1:0');
+		expect(httpFn.mock.calls[0][1].headers['Idempotency-Key']).toBe('exec-1:node-1:0');
 	});
 
 	it('raises an actionable NodeApiError on a 403 start', async () => {
@@ -269,7 +269,7 @@ describe('Pipelex node — Start & Poll', () => {
 		const result = await Pipelex.prototype.execute.call(ctx);
 		expect(result[0][0].json.status).toBe('COMPLETED');
 		const startCall = httpFn.mock.calls.find((call) => call[1].method === 'POST');
-		expect(startCall?.[1].headers['Idempotency-Key']).toBe('exec-1:0');
+		expect(startCall?.[1].headers['Idempotency-Key']).toBe('exec-1:node-1:0');
 	});
 
 	it('returns the run id with a "still running" message when Max Wait is exceeded', async () => {
@@ -308,6 +308,83 @@ describe('Pipelex node — Start & Poll', () => {
 		const { ctx, httpFn } = makeContext({
 			operation: 'startAndPoll',
 			params: { pipeCode: '', mthdsContents: [], inputs: '{}' },
+			continueOnFail: true,
+			httpImpl: () => fullResponse(201, { pipeline_run_id: 'run-1' }),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('Pipe Code');
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+});
+
+describe('Pipelex node — outage (5xx) handling', () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	it('Poll tolerates a few transient 503s, then completes when the backend recovers', async () => {
+		let calls = 0;
+		const { ctx } = makeContext({
+			operation: 'poll',
+			params: { runId: 'run-1', maxWaitSeconds: 0, pollIntervalSeconds: 1 },
+			httpImpl: () => {
+				calls += 1;
+				return calls < 3 ? fullResponse(503, {}) : fullResponse(200, COMPLETED_RESULT);
+			},
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(calls).toBe(3);
+		expect(result[0][0].json.status).toBe('COMPLETED');
+	});
+
+	it('Poll fails (does not hang) after too many consecutive 503s', async () => {
+		let calls = 0;
+		const { ctx } = makeContext({
+			operation: 'poll',
+			params: { runId: 'run-1', maxWaitSeconds: 0, pollIntervalSeconds: 1 },
+			httpImpl: () => {
+				calls += 1;
+				return fullResponse(503, {});
+			},
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(/repeatedly unavailable/i);
+		// bounded: MAX_CONSECUTIVE_TRANSIENT (5) tolerated, then the 6th fails.
+		expect(calls).toBe(6);
+	});
+
+	it('Get Result surfaces a 503 as an error, not "still running"', async () => {
+		const { ctx } = makeContext({
+			operation: 'getResult',
+			params: { runId: 'run-1' },
+			httpImpl: () => fullResponse(503, {}),
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(/repeatedly unavailable/i);
+	});
+});
+
+describe('Pipelex node — inputs validation', () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	it('rejects non-object inputs (array / null / scalar) before any call', async () => {
+		for (const badInputs of ['[]', 'null', '"text"', '42']) {
+			const { ctx, httpFn } = makeContext({
+				operation: 'start',
+				params: { pipeCode: 'p', inputs: badInputs },
+				continueOnFail: true,
+				httpImpl: () => fullResponse(201, { pipeline_run_id: 'run-1' }),
+			});
+			const result = await Pipelex.prototype.execute.call(ctx);
+			expect(String(result[0][0].json.error)).toContain('must be a JSON object');
+			expect(httpFn).not.toHaveBeenCalled();
+		}
+	});
+
+	it('treats a whitespace-only bundle as empty (guard fires, no call)', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: { pipeCode: '', mthdsContents: ['   \n  '], inputs: '{}' },
 			continueOnFail: true,
 			httpImpl: () => fullResponse(201, { pipeline_run_id: 'run-1' }),
 		});

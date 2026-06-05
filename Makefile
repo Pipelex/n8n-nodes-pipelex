@@ -87,7 +87,7 @@ help:
 	@echo "  $(GREEN)make check$(NC)          Run quality checks on local code (for PRs)"
 	@echo "  $(GREEN)make check-published$(NC) Check published npm package (auto-runs after publish)"
 	@echo "  $(GREEN)make setup$(NC)          Build and link the node for local testing"
-	@echo "  $(GREEN)make run$(NC)            Rebuild and start n8n (interactive mode)"
+	@echo "  $(GREEN)make run$(NC)            Start the n8n dev server (builds + hot-reloads via tsc --watch)"
 	@echo "  $(GREEN)make restart$(NC)        Rebuild and start n8n in background"
 	@echo ""
 	@echo "$(YELLOW)Development:$(NC)"

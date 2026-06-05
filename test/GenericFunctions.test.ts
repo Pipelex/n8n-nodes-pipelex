@@ -65,9 +65,15 @@ describe('buildStartBody', () => {
 });
 
 describe('idempotencyKey', () => {
-	it('joins execution id and item index', () => {
-		expect(idempotencyKey('exec-abc', 0)).toBe('exec-abc:0');
-		expect(idempotencyKey('exec-abc', 7)).toBe('exec-abc:7');
+	it('joins execution id, node id, and item index', () => {
+		expect(idempotencyKey('exec-abc', 'node-1', 0)).toBe('exec-abc:node-1:0');
+		expect(idempotencyKey('exec-abc', 'node-1', 7)).toBe('exec-abc:node-1:7');
+	});
+
+	it('differs across nodes in the same execution + item (no collision)', () => {
+		expect(idempotencyKey('exec-abc', 'node-1', 0)).not.toBe(
+			idempotencyKey('exec-abc', 'node-2', 0),
+		);
 	});
 });
 
@@ -98,9 +104,18 @@ describe('mapResultResponse', () => {
 		expect(outcome).toEqual({ kind: 'running', retryAfterSeconds: undefined });
 	});
 
-	it('503 → running (defensive, bounded by Max Wait)', () => {
-		const outcome = mapResultResponse(503, {}, { 'retry-after': '10' });
-		expect(outcome).toEqual({ kind: 'running', retryAfterSeconds: 10 });
+	it('502/503/504 → transient (gateway outage, not in-flight)', () => {
+		expect(mapResultResponse(503, {}, { 'retry-after': '10' })).toEqual({
+			kind: 'transient',
+			statusCode: 503,
+			retryAfterSeconds: 10,
+		});
+		expect(mapResultResponse(502, {}, {})).toEqual({
+			kind: 'transient',
+			statusCode: 502,
+			retryAfterSeconds: undefined,
+		});
+		expect(mapResultResponse(504, {}, {})).toMatchObject({ kind: 'transient', statusCode: 504 });
 	});
 
 	it('403 → forbidden with the actionable message', () => {

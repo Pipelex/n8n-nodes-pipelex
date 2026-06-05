@@ -66,9 +66,17 @@ export function buildStartBody(params: BuildStartParams): PipelexStartBody {
  * whole item; a lost response on a created run would otherwise spawn a
  * duplicate paid run. The platform honors `Idempotency-Key` (opt-in via header,
  * `middleware/idempotency.py`) and replays the original run for a repeat key.
+ *
+ * The key is scoped by `nodeId` as well as the execution + item index: two
+ * different Start / Start & Poll nodes in the SAME execution processing the same
+ * item would otherwise share a key and the platform would replay the first
+ * node's run for the second (wrong `pipeline_run_id`, second pipeline never
+ * starts). `nodeId` is unique per node within a workflow and stable across a
+ * retry of the same execution, so it keeps replays correct without causing
+ * cross-node collisions.
  */
-export function idempotencyKey(executionId: string, itemIndex: number): string {
-	return `${executionId}:${itemIndex}`;
+export function idempotencyKey(executionId: string, nodeId: string, itemIndex: number): string {
+	return `${executionId}:${nodeId}:${itemIndex}`;
 }
 
 /** Outcome of mapping a `GET …/result` response. The node turns these into
@@ -77,9 +85,16 @@ export function idempotencyKey(executionId: string, itemIndex: number): string {
 export type ResultOutcome =
 	| { kind: 'completed'; body: IDataObject }
 	| { kind: 'running'; retryAfterSeconds?: number }
+	// A gateway/backend unavailability (502/503/504) — NOT a documented in-flight
+	// signal. The poll loop tolerates a bounded number of these then fails;
+	// single-shot Get Result surfaces it as an error rather than "still running".
+	| { kind: 'transient'; statusCode: number; retryAfterSeconds?: number }
 	| { kind: 'failed'; message: string; body: IDataObject }
 	| { kind: 'forbidden'; message: string; body: IDataObject }
 	| { kind: 'unexpected'; statusCode: number; message: string; body: IDataObject };
+
+export const SERVICE_UNAVAILABLE_MESSAGE =
+	'The Pipelex result endpoint is repeatedly unavailable (gateway 5xx). The run may still be progressing — retry later with "Poll for Result" or "Get Result" using the pipeline_run_id.';
 
 function parseRetryAfter(headers: IDataObject): number | undefined {
 	// n8n/axios lowercases header keys, but tolerate either casing.
@@ -108,10 +123,11 @@ function extractProblemDetail(body: IDataObject): string | undefined {
  *         returns 202 — not 503 — for degraded Temporal reads
  *   403 → unscoped key (actionable; see FORBIDDEN_MESSAGE)
  *   409 → terminal non-COMPLETED (FAILED / CANCELLED / TERMINATED / TIMED_OUT)
- *   503 → treated as running defensively (a transient gateway/ALB blip during a
- *         poll should not lose the run; the Max Wait cap bounds the loop). The
- *         result contract never emits 503 for degraded reads, so this only ever
- *         catches infra hiccups.
+ *   502/503/504 → `transient` (gateway/backend unavailable). The result contract
+ *         signals in-flight ONLY via 202 (degraded Temporal reads included), so a
+ *         5xx is a real outage, never "still running". The poll loop retries a
+ *         bounded number of these before failing (so an outage can't hang an
+ *         unbounded poll forever); Get Result surfaces it as an error.
  *   other → unexpected (→ NodeApiError)
  */
 export function mapResultResponse(
@@ -123,8 +139,11 @@ export function mapResultResponse(
 		case 200:
 			return { kind: 'completed', body };
 		case 202:
-		case 503:
 			return { kind: 'running', retryAfterSeconds: parseRetryAfter(headers) };
+		case 502:
+		case 503:
+		case 504:
+			return { kind: 'transient', statusCode, retryAfterSeconds: parseRetryAfter(headers) };
 		case 403:
 			return { kind: 'forbidden', message: FORBIDDEN_MESSAGE, body };
 		case 409:
