@@ -114,6 +114,25 @@ The Pipelex node has one **Operation** selector with four operations. Pick based
 
 **Note:** You must provide **either** `Pipe Code` **or** `MTHDS Bundles` (or both). Learn more about the Pipelex API [here](https://docs.pipelex.com/pages/api/).
 
+### Input Source: JSON vs Binary File
+
+On Execute / Start / Start & Poll, **Input Source** controls how `inputs` is built:
+
+- **JSON** (default) — type the inputs object in the **Inputs** field.
+- **Binary File** — feed a file straight from an upstream node (Gmail, Google Drive, HTTP Request, S3…) with **no converter nodes**. The node reads the item's binary itself and builds a base64 `data:` URL Document/Image input. Fields:
+  - **Input Name** — the method's input key (e.g. `invoices`)
+  - **Concept** — `Document` or `Image`
+  - **Binary Property** — the binary field on the item (e.g. `attachment_0` from the Gmail node, or `data`)
+  - **Combine All Items Into One Run** — off = one run per item; on = gather the binary from **every** input item into a single run whose `content` list holds one `{ url }` per file
+
+This is why binary mode matters: n8n stores attachments in a separate binary lane (often on disk), which `{{ }}` expressions can't read. The node uses n8n's binary helper to read the bytes and inline them, so **Gmail → Pipelex** works directly.
+
+**Example — extract every invoice PDF from a batch of Gmail emails in one run:**
+1. Gmail → *Get Many Messages* with **Download Attachments** on (invoices arrive as binary `attachment_0`)
+2. Pipelex → Start & Poll, **Input Source = Binary File**, Input Name `invoices`, Concept `Document`, Binary Property `attachment_0`, **Combine All Items Into One Run = on**, with your invoice-extraction method in **MTHDS Bundles**
+
+The node sends one request whose `inputs.invoices.content` is `[ {url:data:…pdf1}, {url:data:…pdf2}, … ]`.
+
 ---
 
 ## Usage

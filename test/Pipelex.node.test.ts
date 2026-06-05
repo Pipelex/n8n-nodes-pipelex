@@ -30,12 +30,22 @@ function makeContext(opts: ContextOptions): {
 	httpFn: ReturnType<typeof vi.fn>;
 } {
 	const params = opts.params ?? {};
+	const items = opts.items ?? [{ json: {} }];
 	const httpFn = vi.fn(async (_credentialsName: string, options: { url: string }) =>
 		opts.httpImpl(options),
 	);
 
+	// Mock the n8n binary helpers: read a fake binary lane off each item where
+	// `bytes` is the raw payload (so the data URL base64 is deterministic).
+	const binaryOf = (i: number, prop: string) => {
+		const b = (items[i] as { binary?: Record<string, { mimeType?: string; bytes?: string }> })
+			.binary?.[prop];
+		if (!b) throw new Error(`No binary data found on property "${prop}"`);
+		return b;
+	};
+
 	const ctx = {
-		getInputData: () => opts.items ?? [{ json: {} }],
+		getInputData: () => items,
 		getCredentials: async () => ({ baseUrl: 'https://api.test' }),
 		getNodeParameter: (name: string, _itemIndex: number, fallback?: unknown) => {
 			if (name === 'operation') return opts.operation;
@@ -45,10 +55,23 @@ function makeContext(opts: ContextOptions): {
 		getExecutionCancelSignal: () => undefined,
 		continueOnFail: () => opts.continueOnFail ?? false,
 		getNode: () => ({ id: 'node-1', name: 'Pipelex', type: 'pipelex', typeVersion: 1 }),
-		helpers: { httpRequestWithAuthentication: httpFn },
+		helpers: {
+			httpRequestWithAuthentication: httpFn,
+			assertBinaryData: (i: number, prop: string) => {
+				const b = binaryOf(i, prop);
+				return { mimeType: b.mimeType };
+			},
+			getBinaryDataBuffer: async (i: number, prop: string) =>
+				Buffer.from(binaryOf(i, prop).bytes ?? '', 'utf8'),
+		},
 	} as unknown as IExecuteFunctions;
 
 	return { ctx, httpFn };
+}
+
+/** Deterministic data URL the node should produce for given bytes + mime. */
+function dataUrl(bytes: string, mime = 'application/pdf'): string {
+	return `data:${mime};base64,${Buffer.from(bytes, 'utf8').toString('base64')}`;
 }
 
 function fullResponse(
@@ -392,5 +415,115 @@ describe('Pipelex node — inputs validation', () => {
 		const result = await Pipelex.prototype.execute.call(ctx);
 		expect(String(result[0][0].json.error)).toContain('Pipe Code');
 		expect(httpFn).not.toHaveBeenCalled();
+	});
+});
+
+describe('Pipelex node — Binary input', () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	const BIN_PARAMS = {
+		inputSource: 'binary',
+		binaryInputName: 'invoices',
+		binaryConcept: 'Document',
+		binaryProperty: 'attachment_0',
+		pipeCode: 'p',
+	};
+
+	function pdfItem(bytes: string) {
+		return {
+			json: {},
+			binary: { attachment_0: { mimeType: 'application/pdf', fileName: `${bytes}.pdf`, bytes } },
+		};
+	}
+
+	it('builds a Document data-URL input from the item attachment (per item)', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: BIN_PARAMS,
+			items: [pdfItem('PDF1')],
+			httpImpl: () => fullResponse(201, { pipeline_run_id: 'run-1' }),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		const body = httpFn.mock.calls[0][1].body as { inputs: Record<string, unknown> };
+		expect(body.inputs).toEqual({
+			invoices: { concept: 'Document', content: [{ url: dataUrl('PDF1') }] },
+		});
+	});
+
+	it('runs once per item by default (3 items → 3 runs)', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: BIN_PARAMS,
+			items: [pdfItem('A'), pdfItem('B'), pdfItem('C')],
+			httpImpl: () => fullResponse(201, { pipeline_run_id: 'run-1' }),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(httpFn).toHaveBeenCalledTimes(3);
+		expect(result[0]).toHaveLength(3);
+	});
+
+	it('Combine: gathers all items into ONE run with one url per file', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: { ...BIN_PARAMS, combineItems: true },
+			items: [pdfItem('A'), pdfItem('B'), pdfItem('C')],
+			httpImpl: () => fullResponse(201, { pipeline_run_id: 'run-1' }),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(httpFn).toHaveBeenCalledTimes(1); // one run
+		const body = httpFn.mock.calls[0][1].body as {
+			inputs: { invoices: { content: Array<{ url: string }> } };
+		};
+		expect(body.inputs.invoices.content).toEqual([
+			{ url: dataUrl('A') },
+			{ url: dataUrl('B') },
+			{ url: dataUrl('C') },
+		]);
+		expect(result[0]).toHaveLength(1); // one output item
+	});
+
+	it('Combine: skips items missing the binary property', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: { ...BIN_PARAMS, combineItems: true },
+			items: [pdfItem('A'), { json: {} }, pdfItem('C')],
+			httpImpl: () => fullResponse(201, { pipeline_run_id: 'run-1' }),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		const body = httpFn.mock.calls[0][1].body as {
+			inputs: { invoices: { content: Array<{ url: string }> } };
+		};
+		expect(body.inputs.invoices.content).toEqual([{ url: dataUrl('A') }, { url: dataUrl('C') }]);
+	});
+
+	it('Combine: errors when no item has the binary property', async () => {
+		const { ctx } = makeContext({
+			operation: 'start',
+			params: { ...BIN_PARAMS, combineItems: true },
+			items: [{ json: {} }, { json: {} }],
+			httpImpl: () => fullResponse(201, { pipeline_run_id: 'run-1' }),
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(/No binary data found/);
+	});
+
+	it('uses the binary MIME type in the data URL (e.g. image/png for Image)', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: { ...BIN_PARAMS, binaryConcept: 'Image' },
+			items: [{ json: {}, binary: { attachment_0: { mimeType: 'image/png', bytes: 'IMG' } } }],
+			httpImpl: () => fullResponse(201, { pipeline_run_id: 'run-1' }),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		const body = httpFn.mock.calls[0][1].body as {
+			inputs: { invoices: { concept: string; content: Array<{ url: string }> } };
+		};
+		expect(body.inputs.invoices.concept).toBe('Image');
+		expect(body.inputs.invoices.content[0].url).toBe(dataUrl('IMG', 'image/png'));
 	});
 });

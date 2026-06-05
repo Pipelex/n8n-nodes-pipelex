@@ -12,6 +12,8 @@ import {
 } from 'n8n-workflow';
 
 import {
+	binaryToDataUrl,
+	buildBinaryInputs,
 	buildStartBody,
 	idempotencyKey,
 	mapResultResponse,
@@ -56,18 +58,19 @@ function rethrowOpError(ctx: IExecuteFunctions, error: unknown, itemIndex: numbe
 
 /**
  * Collect + validate the pipeline-definition fields shared by Execute, Start,
- * and Start & Poll, and map them to the snake_case request body. `methodId` is
- * a platform-only concept, so it is read only when `includeMethodId` is set
- * (the blocking runner execute has no `method_id`).
+ * and Start & Poll, and map them to the snake_case request body. The `inputs`
+ * object is resolved separately (JSON field or binary attachment) and passed in.
+ * `methodId` is a platform-only concept, so it is read only when `includeMethodId`
+ * is set (the blocking runner execute has no `method_id`).
  */
 function readRunDefinition(
 	ctx: IExecuteFunctions,
 	itemIndex: number,
 	includeMethodId: boolean,
+	inputs: Record<string, unknown>,
 ): PipelexStartBody {
 	const pipeCode = ctx.getNodeParameter('pipeCode', itemIndex, '') as string;
 	const mthdsContentsRaw = ctx.getNodeParameter('mthdsContents', itemIndex, []) as unknown;
-	const inputsString = ctx.getNodeParameter('inputs', itemIndex, '{}') as string;
 	const outputName = ctx.getNodeParameter('outputName', itemIndex, '') as string;
 	const outputMultiplicity = ctx.getNodeParameter('outputMultiplicity', itemIndex, '') as string;
 	const dynamicOutputConceptRef = ctx.getNodeParameter(
@@ -96,9 +99,26 @@ function readRunDefinition(
 		);
 	}
 
-	let parsedInputs: unknown;
+	return buildStartBody({
+		pipeCode,
+		methodId,
+		mthdsContents,
+		inputs,
+		outputName,
+		outputMultiplicity,
+		dynamicOutputConceptRef,
+	});
+}
+
+/** Parse + validate the JSON `Inputs` field into an object. */
+function parseJsonInputs(
+	ctx: IExecuteFunctions,
+	inputsString: string,
+	itemIndex: number,
+): Record<string, unknown> {
+	let parsed: unknown;
 	try {
-		parsedInputs = JSON.parse(inputsString);
+		parsed = JSON.parse(inputsString);
 	} catch (error) {
 		throw new NodeOperationError(
 			ctx.getNode(),
@@ -109,24 +129,62 @@ function readRunDefinition(
 	// The API contract expects `inputs` to be a JSON object. `JSON.parse` also
 	// accepts null / arrays / scalars — reject those locally with a clear,
 	// item-scoped error instead of letting the runner fail opaquely later.
-	if (parsedInputs === null || typeof parsedInputs !== 'object' || Array.isArray(parsedInputs)) {
+	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
 		throw new NodeOperationError(
 			ctx.getNode(),
 			'The "Inputs" field must be a JSON object, e.g. {"key": "value"}',
 			{ itemIndex },
 		);
 	}
-	const inputs = parsedInputs as Record<string, unknown>;
+	return parsed as Record<string, unknown>;
+}
 
-	return buildStartBody({
-		pipeCode,
-		methodId,
-		mthdsContents,
-		inputs,
-		outputName,
-		outputMultiplicity,
-		dynamicOutputConceptRef,
-	});
+/**
+ * Resolve the `inputs` object for a single item — from the JSON field, or built
+ * from that item's binary attachment (Document/Image data URL).
+ */
+async function resolveInputs(
+	ctx: IExecuteFunctions,
+	itemIndex: number,
+): Promise<Record<string, unknown>> {
+	const inputSource = ctx.getNodeParameter('inputSource', itemIndex, 'json') as string;
+	if (inputSource === 'binary') {
+		const inputName = ctx.getNodeParameter('binaryInputName', itemIndex, 'documents') as string;
+		const concept = ctx.getNodeParameter('binaryConcept', itemIndex, 'Document') as string;
+		const binaryProperty = ctx.getNodeParameter('binaryProperty', itemIndex, 'data') as string;
+		const url = await binaryToDataUrl(ctx, itemIndex, binaryProperty);
+		return buildBinaryInputs(inputName, concept, [url]);
+	}
+	const inputsString = ctx.getNodeParameter('inputs', itemIndex, '{}') as string;
+	return parseJsonInputs(ctx, inputsString, itemIndex);
+}
+
+/**
+ * Build one `inputs` object that gathers the chosen binary property from EVERY
+ * input item into a single `content` list (the "combine all items" path → one run
+ * whose Document input holds every file). Items lacking the property are skipped.
+ */
+async function resolveCombinedBinaryInputs(
+	ctx: IExecuteFunctions,
+	itemCount: number,
+): Promise<Record<string, unknown>> {
+	const inputName = ctx.getNodeParameter('binaryInputName', 0, 'documents') as string;
+	const concept = ctx.getNodeParameter('binaryConcept', 0, 'Document') as string;
+	const binaryProperty = ctx.getNodeParameter('binaryProperty', 0, 'data') as string;
+	const items = ctx.getInputData();
+	const urls: string[] = [];
+	for (let i = 0; i < itemCount; i++) {
+		if (!items[i]?.binary?.[binaryProperty]) continue;
+		urls.push(await binaryToDataUrl(ctx, i, binaryProperty));
+	}
+	if (urls.length === 0) {
+		throw new NodeOperationError(
+			ctx.getNode(),
+			`No binary data found on property "${binaryProperty}" across the input items`,
+			{ itemIndex: 0 },
+		);
+	}
+	return buildBinaryInputs(inputName, concept, urls);
 }
 
 function readPollParams(
@@ -250,25 +308,36 @@ function runStillRunning(runId: string): IDataObject {
 	};
 }
 
-/** Execute op: blocking, one-shot runner call. */
-async function executeOneShot(
+/**
+ * Run a prebuilt body through the chosen run operation: blocking execute, start
+ * only, or start-then-poll. Shared by the per-item and combine-all-items paths.
+ */
+async function runWithBody(
 	ctx: IExecuteFunctions,
 	baseUrl: string,
+	operation: string,
+	body: PipelexStartBody,
 	itemIndex: number,
 ): Promise<IDataObject> {
-	const body = readRunDefinition(ctx, itemIndex, false);
-	return requestExecute(ctx, baseUrl, body, itemIndex);
-}
-
-/** Start op: start a durable run and return its pipeline_run_id immediately. */
-async function startRun(
-	ctx: IExecuteFunctions,
-	baseUrl: string,
-	itemIndex: number,
-): Promise<IDataObject> {
-	const body = readRunDefinition(ctx, itemIndex, true);
+	if (operation === 'execute') {
+		return requestExecute(ctx, baseUrl, body, itemIndex);
+	}
 	const idempotency = idempotencyKey(ctx.getExecutionId(), ctx.getNode().id, itemIndex);
-	return requestStart(ctx, baseUrl, body, idempotency, itemIndex);
+	const startResponse = await requestStart(ctx, baseUrl, body, idempotency, itemIndex);
+	if (operation === 'start') {
+		return startResponse;
+	}
+	// startAndPoll
+	const runId = startResponse.pipeline_run_id as string | undefined;
+	if (!runId) {
+		throw new NodeOperationError(
+			ctx.getNode(),
+			'Run started but the platform returned no pipeline_run_id',
+			{ itemIndex },
+		);
+	}
+	const { maxWaitSeconds, pollIntervalSeconds } = readPollParams(ctx, itemIndex);
+	return pollForResultLoop(ctx, baseUrl, runId, maxWaitSeconds, pollIntervalSeconds, itemIndex);
 }
 
 /** Poll op: poll an existing run (by id) until it finishes, then return it. */
@@ -342,27 +411,6 @@ async function getResultOnce(
 				itemIndex,
 			});
 	}
-}
-
-/** Start & Poll op: start a durable run, then poll it to completion. */
-async function startAndPoll(
-	ctx: IExecuteFunctions,
-	baseUrl: string,
-	itemIndex: number,
-): Promise<IDataObject> {
-	const body = readRunDefinition(ctx, itemIndex, true);
-	const idempotency = idempotencyKey(ctx.getExecutionId(), ctx.getNode().id, itemIndex);
-	const startResponse = await requestStart(ctx, baseUrl, body, idempotency, itemIndex);
-	const runId = startResponse.pipeline_run_id as string | undefined;
-	if (!runId) {
-		throw new NodeOperationError(
-			ctx.getNode(),
-			'Run started but the platform returned no pipeline_run_id',
-			{ itemIndex },
-		);
-	}
-	const { maxWaitSeconds, pollIntervalSeconds } = readPollParams(ctx, itemIndex);
-	return pollForResultLoop(ctx, baseUrl, runId, maxWaitSeconds, pollIntervalSeconds, itemIndex);
 }
 
 export class Pipelex implements INodeType {
@@ -466,6 +514,31 @@ export class Pipelex implements INodeType {
 				},
 			},
 			{
+				displayName: 'Input Source',
+				name: 'inputSource',
+				type: 'options',
+				noDataExpression: true,
+				options: [
+					{
+						name: 'Binary File',
+						value: 'binary',
+						description:
+							'Build a Document/Image input from an item\'s binary attachment (e.g. a PDF from Gmail, Drive, or HTTP)',
+					},
+					{
+						name: 'JSON',
+						value: 'json',
+						description: 'Provide the inputs as a JSON object',
+					},
+				],
+				default: 'json',
+				displayOptions: {
+					show: {
+						operation: ['execute', 'start', 'startAndPoll'],
+					},
+				},
+			},
+			{
 				displayName: 'Inputs',
 				name: 'inputs',
 				type: 'json',
@@ -475,6 +548,65 @@ export class Pipelex implements INodeType {
 				displayOptions: {
 					show: {
 						operation: ['execute', 'start', 'startAndPoll'],
+						inputSource: ['json'],
+					},
+				},
+			},
+			{
+				displayName: 'Input Name',
+				name: 'binaryInputName',
+				type: 'string',
+				default: 'documents',
+				placeholder: 'e.g., invoices',
+				description: 'The pipeline input name to place the file(s) under — the concept input your method expects (e.g. invoices)',
+				displayOptions: {
+					show: {
+						operation: ['execute', 'start', 'startAndPoll'],
+						inputSource: ['binary'],
+					},
+				},
+			},
+			{
+				displayName: 'Concept',
+				name: 'binaryConcept',
+				type: 'options',
+				options: [
+					{ name: 'Document', value: 'Document' },
+					{ name: 'Image', value: 'Image' },
+				],
+				default: 'Document',
+				description: 'The native concept for the binary input',
+				displayOptions: {
+					show: {
+						operation: ['execute', 'start', 'startAndPoll'],
+						inputSource: ['binary'],
+					},
+				},
+			},
+			{
+				displayName: 'Binary Property',
+				name: 'binaryProperty',
+				type: 'string',
+				default: 'data',
+				placeholder: 'e.g., attachment_0',
+				description: 'Name of the binary property on the input item(s) to read (e.g. attachment_0 from the Gmail node, or data)',
+				displayOptions: {
+					show: {
+						operation: ['execute', 'start', 'startAndPoll'],
+						inputSource: ['binary'],
+					},
+				},
+			},
+			{
+				displayName: 'Combine All Items Into One Run',
+				name: 'combineItems',
+				type: 'boolean',
+				default: false,
+				description: 'Whether to gather the binary from every input item into a single run (one content list of all files) instead of one run per item',
+				displayOptions: {
+					show: {
+						operation: ['execute', 'start', 'startAndPoll'],
+						inputSource: ['binary'],
 					},
 				},
 			},
@@ -604,30 +736,46 @@ export class Pipelex implements INodeType {
 		const credentials = await this.getCredentials('piplexApi');
 		const baseUrl = (credentials.baseUrl as string).replace(/\/$/, '');
 		const operation = this.getNodeParameter('operation', 0) as string;
+		const isRunOp = operation === 'execute' || operation === 'start' || operation === 'startAndPoll';
+		const inputSource = isRunOp ? (this.getNodeParameter('inputSource', 0, 'json') as string) : 'json';
+		const combineItems =
+			inputSource === 'binary' && (this.getNodeParameter('combineItems', 0, false) as boolean);
+
+		// Combine path: ONE run whose Document input gathers the chosen binary
+		// property from every input item. n8n hands the node all items at once, so
+		// the fan-in happens here — no aggregate node needed.
+		if (combineItems) {
+			const pairedItem = items.map((_unused, index) => ({ item: index }));
+			try {
+				const inputs = await resolveCombinedBinaryInputs(this, items.length);
+				const body = readRunDefinition(this, 0, operation !== 'execute', inputs);
+				const json = await runWithBody(this, baseUrl, operation, body, 0);
+				returnData.push({ json, pairedItem });
+			} catch (error) {
+				if (this.continueOnFail()) {
+					returnData.push({ json: { error: (error as Error).message }, pairedItem });
+					return [returnData];
+				}
+				rethrowOpError(this, error, 0);
+			}
+			return [returnData];
+		}
 
 		for (let i = 0; i < items.length; i++) {
 			try {
 				let json: IDataObject;
-				switch (operation) {
-					case 'execute':
-						json = await executeOneShot(this, baseUrl, i);
-						break;
-					case 'start':
-						json = await startRun(this, baseUrl, i);
-						break;
-					case 'getResult':
-						json = await getResultOnce(this, baseUrl, i);
-						break;
-					case 'poll':
-						json = await pollForResult(this, baseUrl, i);
-						break;
-					case 'startAndPoll':
-						json = await startAndPoll(this, baseUrl, i);
-						break;
-					default:
-						throw new NodeOperationError(this.getNode(), `Unknown operation: ${operation}`, {
-							itemIndex: i,
-						});
+				if (operation === 'poll') {
+					json = await pollForResult(this, baseUrl, i);
+				} else if (operation === 'getResult') {
+					json = await getResultOnce(this, baseUrl, i);
+				} else if (isRunOp) {
+					const inputs = await resolveInputs(this, i);
+					const body = readRunDefinition(this, i, operation !== 'execute', inputs);
+					json = await runWithBody(this, baseUrl, operation, body, i);
+				} else {
+					throw new NodeOperationError(this.getNode(), `Unknown operation: ${operation}`, {
+						itemIndex: i,
+					});
 				}
 				returnData.push({ json, pairedItem: { item: i } });
 			} catch (error) {

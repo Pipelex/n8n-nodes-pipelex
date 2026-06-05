@@ -284,3 +284,38 @@ export async function requestExecute(
 		itemIndex,
 	});
 }
+
+/**
+ * Read an item's binary property and return it as a base64 `data:` URL. Uses the
+ * n8n binary helpers (`assertBinaryData` + `getBinaryDataBuffer`), which resolve
+ * on-disk (filesystem-mode) binary — something a `{{ }}` expression cannot do.
+ * The MIME type comes from the binary metadata.
+ */
+export async function binaryToDataUrl(
+	ctx: IExecuteFunctions,
+	itemIndex: number,
+	binaryProperty: string,
+): Promise<string> {
+	const meta = ctx.helpers.assertBinaryData(itemIndex, binaryProperty);
+	const buffer = await ctx.helpers.getBinaryDataBuffer(itemIndex, binaryProperty);
+	const mimeType = meta.mimeType || 'application/octet-stream';
+	return `data:${mimeType};base64,${buffer.toString('base64')}`;
+}
+
+/**
+ * Assemble the `inputs` object for a binary-sourced Document/Image input:
+ * `{ [inputName]: { concept, content: [{ url }, …] } }`. The platform decodes the
+ * data URLs and stores them; a list of URLs is treated as a `Document[]`.
+ */
+export function buildBinaryInputs(
+	inputName: string,
+	concept: string,
+	urls: string[],
+): Record<string, unknown> {
+	return {
+		[inputName]: {
+			concept,
+			content: urls.map((url) => ({ url })),
+		},
+	};
+}

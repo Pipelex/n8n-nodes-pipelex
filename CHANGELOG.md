@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- **Binary file input (Gmail / Drive / HTTP → Pipelex, no glue nodes).** Execute / Start / Start & Poll gain an **Input Source** selector (`JSON` | `Binary File`). In Binary mode you pick an **Input Name** (the method's input key, e.g. `invoices`), a **Concept** (`Document` / `Image`), and a **Binary Property** (e.g. `attachment_0`); the node reads the item's binary itself via n8n's binary helpers (`getBinaryDataBuffer` — resolves filesystem-mode binary that expressions cannot) and builds a base64 `data:` URL input. A **Combine All Items Into One Run** toggle gathers the chosen binary property from every input item into a single `content` list (one run whose `Document[]` holds every file); off = one run per item. This makes `Gmail → Pipelex` a two-node flow with no Extract-From-File / Aggregate / Code glue.
 - **Breaking — node is now a four-operation node.** The single blocking `Execute` operation is replaced by an `Operation` selector:
   - **Start & Poll** (default) — starts a durable run (`POST /platform/v1/runs`) and polls the self-healing result endpoint (`GET /platform/v1/runs/by-id/{run_id}/result`) until it finishes. Survives the public API's ~30s synchronous ceiling. Output is now `{ done, status, pipeline_run_id, main_stuff, graph_spec }` — **not** the old `/execute` `pipe_output`.
   - **Execute (One-Shot)** — keeps the old blocking `POST /runner/v1/pipeline/execute` behavior (returns `pipe_output`). Carries a notice + translates the ~30s public-API gateway timeout into an actionable message pointing at Start & Poll.

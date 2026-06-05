@@ -235,6 +235,28 @@ How often to check whether the run has finished (default 2). The server's `Retry
 
 ---
 
+## Binary file input (Gmail / Drive / HTTP → Pipelex)
+
+On **Execute**, **Start**, and **Start & Poll**, the **Input Source** field switches between two ways to supply `inputs`:
+
+- **JSON** — type the inputs object in the **Inputs** field (the default).
+- **Binary File** — build a `Document`/`Image` input directly from a file attached to the incoming item, with no Extract-From-File / Aggregate / Code glue.
+
+Why this exists: n8n keeps attachments in a separate **binary** lane (frequently stored on disk), so `{{ $binary.x.data }}` expressions return a storage pointer, not the bytes. The node reads the binary itself with n8n's binary helper and inlines it as a base64 `data:` URL.
+
+Binary-mode fields:
+
+| Field | Meaning |
+|---|---|
+| **Input Name** | The method's input key the file(s) go under, e.g. `invoices`. |
+| **Concept** | `Document` (PDFs, docs…) or `Image`. |
+| **Binary Property** | The binary field on the item, e.g. `attachment_0` (Gmail) or `data`. |
+| **Combine All Items Into One Run** | Off → one run per item (one file each). On → gather the property from **every** input item into a single run whose `content` holds one `{ url }` per file. |
+
+**Example:** Gmail *Get Many Messages* (Download Attachments on) → Pipelex *Start & Poll*, Input Source **Binary File**, Input Name `invoices`, Concept `Document`, Binary Property `attachment_0`, Combine **on** — extracts every invoice PDF across all fetched emails in one run.
+
+---
+
 ## Learn More
 
 - 📖 [Pipelex API Documentation](https://docs.pipelex.com/pages/api/)
