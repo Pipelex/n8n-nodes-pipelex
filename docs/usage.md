@@ -1,8 +1,20 @@
 # Usage Guide
 
-## Resource & Operation
+## Operations
 
-The Pipelex node exposes a single **Pipeline** resource with an **Execute** operation. It calls `POST /runner/v1/pipeline/execute` on your Pipelex API server and waits for the result.
+The Pipelex node has one **Operation** selector with four operations:
+
+| Operation | What it does | Endpoint |
+|---|---|---|
+| **Start & Poll** (default) | Start a durable run and poll internally until it finishes, then return the result. Waits indefinitely by default. | `POST /platform/v1/runs` → `GET …/by-id/{run_id}/result` |
+| **Execute (One-Shot)** | Blocking single request that returns the result directly. **Times out at ~30s on the public Pipelex API.** | `POST /runner/v1/pipeline/execute` |
+| **Start Run** | Start a durable run and return its `pipeline_run_id` immediately (no waiting). | `POST /platform/v1/runs` |
+| **Poll for Result** | Poll an existing run by `pipeline_run_id` until it finishes, then return the result. | `GET …/by-id/{run_id}/result` |
+| **Get Result** | Fetch a run's result **once** by `pipeline_run_id` (no polling). `done: false` while still running. | `GET …/by-id/{run_id}/result` |
+
+Use **Execute** for quick pipelines that finish inside the ~30s public-API window. Use **Start & Poll** for anything longer (it polls a durable run, so it never hits that ceiling). Use **Start Run** + **Poll for Result** when you want to kick off a run in one place and collect it elsewhere — the `pipeline_run_id` is the handle. Use **Get Result** for a single non-blocking status check (e.g. on a schedule or behind your own wait logic) — it returns `done: false` while the run is still in flight instead of waiting.
+
+The polling operations honor the server's `Retry-After` and expose a **Max Wait (Seconds)** control: `0` (default) waits indefinitely; a positive value caps the wait and, on exceed, returns the `pipeline_run_id` + a "still running" message so you can fetch the result later with **Poll for Result**.
 
 ## Credential: Base URL
 
@@ -10,21 +22,20 @@ The Pipelex API base URL is configured on the credential, not on the node. Open 
 
 **Examples:**
 
-- Hosted API (default, **Coming Soon**): `https://api.pipelex.com` — join the [waitlist](https://go.pipelex.com/waitlist) for access.
-- Local Docker (self-hosted n8n only): `http://localhost:8081` or `http://host.docker.internal:8081`
-- Remote self-hosted server: `https://your-pipelex-host.example.com`
+- Hosted platform (default): `https://api.pipelex.com` — run access is gated for now; join the [waitlist](https://go.pipelex.com/waitlist).
+- Your own server exposing the platform run surface (`/platform/v1/runs*`) and/or the runner (`/runner/v1/pipeline/*`): `https://your-pipelex-host.example.com` (a self-hosting guide is in the works).
 
-> ⚠️ **Running on n8n Cloud or any deployed n8n instance?** `localhost`/`127.0.0.1` URLs won't be reachable. Deploy the [pipelex-api Docker image](https://hub.docker.com/r/pipelex/pipelex-api) somewhere n8n can reach (a small VM, Render/Fly.io/Railway, or a tunnel like ngrok) and use that public URL.
+> ⚠️ **Running on n8n Cloud or any deployed n8n instance?** `localhost`/`127.0.0.1` URLs won't be reachable from n8n. Use a Base URL that n8n can reach over the network.
 
-The credential test hits `GET <Base URL>/me` to verify both reachability and the Bearer Token.
+The credential test hits `GET <Base URL>/platform/v1/auth/verify` to verify both reachability and the Bearer Token. Note it only checks the token is **valid** — not that it can **start runs**. On the hosted API, running a pipeline currently needs an admin / `runs:execute`-scoped key, so a valid-but-unscoped key passes the test and then returns an actionable "lacks runs access" error on Start/Execute.
 
 ---
 
 ## Understanding `pipe_code` and `mthds_contents`
 
-The Pipelex node offers flexibility in how you define and execute pipelines. You can either reference a pre-registered pipeline, provide an inline MTHDS bundle, or combine both approaches.
+The Pipelex node offers flexibility in how you define and execute pipelines. You can either reference a pre-registered pipeline, provide an inline MTHDS bundle, or combine both approaches. These fields apply to **Execute**, **Start**, and **Start & Poll** (the operations that submit a pipeline).
 
-The inline bundle is set under **Additional Fields → MTHDS Bundle** and is sent to the API as `mthds_contents` (a JSON array — the node wraps your single bundle as `[mthds_content]`).
+Inline bundles are set in the **MTHDS Bundles** field and sent as `mthds_contents` (a `string[]` — add one entry per bundle).
 
 ### Case 1: Only `pipe_code` (Pipeline Library)
 
@@ -32,7 +43,7 @@ Use this when your pipeline is already registered in your Pipelex API server's l
 
 **n8n Node Configuration:**
 - **Pipe Code:** `invoice_extractor`
-- **Additional Fields → MTHDS Bundle:** _(leave empty)_
+- **MTHDS Bundles:** _(leave empty)_
 - **Inputs:** `{ "invoice_text": "..." }`
 
 **What happens:**
@@ -61,7 +72,7 @@ Use this when you want to define the pipeline directly in the n8n node.
 
 **n8n Node Configuration:**
 - **Pipe Code:** _(leave empty)_
-- **Additional Fields → MTHDS Bundle:**
+- **MTHDS Bundles:**
 ```toml
 domain = "invoice_processing"
 main_pipe = "extract_invoice"
@@ -110,7 +121,7 @@ Use this when you have multiple pipes in your inline MTHDS bundle and want to ex
 
 **n8n Node Configuration:**
 - **Pipe Code:** `extract_invoice`
-- **Additional Fields → MTHDS Bundle:**
+- **MTHDS Bundles:**
 ```toml
 domain = "document_processing"
 main_pipe = "analyze_document"
@@ -195,12 +206,9 @@ Pass data from previous nodes:
 
 ---
 
-## Additional Fields (optional)
+## Optional output controls
 
-All optional parameters live under the **Additional Fields** collection on the node.
-
-### MTHDS Bundle (`mthds_contents`)
-Inline MTHDS bundle content. The node sends it as a one-element `mthds_contents` array. Provide this if you don't use a pre-registered Pipe Code.
+These optional fields are surfaced at the top level on the **Execute**, **Start**, and **Start & Poll** operations (they are forwarded verbatim to the runner).
 
 ### Output Name (`output_name`)
 Specify the name you want to give to the main pipe.
@@ -214,8 +222,16 @@ Controls whether the pipeline returns a single item or multiple items (array).
 
 **Example:** If your pipeline extracts keywords from text and is configured with `output = "Keyword[]"` in the MTHDS bundle, set `output_multiplicity` to `true` to receive an array of all extracted keywords, `n` for a specific number of items.
 
-### Dynamic Output Concept Code (`dynamic_output_concept_code`)
+### Dynamic Output Concept Ref (`dynamic_output_concept_ref`)
 Override the output concept. See more [here](https://docs.pipelex.com/pages/build-reliable-ai-workflows-with-pipelex/define_your_concepts/#dynamiccontent).
+
+## Polling controls (Poll for Result / Start & Poll)
+
+### Max Wait (Seconds) (`maxWaitSeconds`)
+Maximum seconds to wait for the run to finish. **`0` (default) waits indefinitely.** If set above 0 and exceeded, the node returns the `pipeline_run_id` with a "still running" message — fetch the result later with the **Poll for Result** operation.
+
+### Poll Interval (Seconds) (`pollIntervalSeconds`)
+How often to check whether the run has finished (default 2). The server's `Retry-After` overrides this when it asks for a longer wait.
 
 ---
 

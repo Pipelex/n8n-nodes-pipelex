@@ -61,6 +61,7 @@ check:
 	@pnpm run lint
 	@pnpm run build
 	@pnpm run scan:simulate
+	@pnpm run test
 	@echo "$(GREEN)✓ All checks passed$(NC)"
 
 # Lint the built JS output. Skipped from `check` because the recommended
@@ -163,12 +164,13 @@ unlink:
 	npm unlink -g 2>/dev/null || true
 	@echo "$(GREEN)✓ Package unlinked$(NC)"
 
-run: rebuild fix-permissions
-	@echo "$(BLUE)Starting n8n with your node...$(NC)"
+run: fix-permissions
+	@echo "$(BLUE)Starting the n8n dev server with your node (no global n8n needed)...$(NC)"
+	@echo "$(YELLOW)Uses @n8n/node-cli — downloads/runs n8n in a sandbox and hot-reloads on save.$(NC)"
 	@if [ -f .env.n8n ]; then \
-		export $$(cat .env.n8n | grep -v '^#' | xargs) && n8n start; \
+		export $$(cat .env.n8n | grep -v '^#' | xargs) && pnpm exec n8n-node dev; \
 	else \
-		n8n start; \
+		pnpm exec n8n-node dev; \
 	fi
 
 stop:

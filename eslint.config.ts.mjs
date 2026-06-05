@@ -6,7 +6,10 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
 	{
-		ignores: ['dist/**', 'node_modules/**', '.venv/**', 'site/**'],
+		// `test/**` holds dev-only vitest specs (mocks, `any`-typed fakes) — they
+		// are not part of the published surface or the n8n compliance contract, so
+		// they are excluded from both lint passes and validated by `pnpm test`.
+		ignores: ['dist/**', 'node_modules/**', '.venv/**', 'site/**', 'test/**'],
 	},
 	{
 		files: ['**/*.ts'],
