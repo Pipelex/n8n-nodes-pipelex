@@ -61,6 +61,7 @@ check:
 	@pnpm run lint
 	@pnpm run build
 	@pnpm run scan:simulate
+	@pnpm run test
 	@echo "$(GREEN)✓ All checks passed$(NC)"
 
 # Lint the built JS output. Skipped from `check` because the recommended
@@ -86,7 +87,7 @@ help:
 	@echo "  $(GREEN)make check$(NC)          Run quality checks on local code (for PRs)"
 	@echo "  $(GREEN)make check-published$(NC) Check published npm package (auto-runs after publish)"
 	@echo "  $(GREEN)make setup$(NC)          Build and link the node for local testing"
-	@echo "  $(GREEN)make run$(NC)            Rebuild and start n8n (interactive mode)"
+	@echo "  $(GREEN)make run$(NC)            Start the n8n dev server (builds + hot-reloads via tsc --watch)"
 	@echo "  $(GREEN)make restart$(NC)        Rebuild and start n8n in background"
 	@echo ""
 	@echo "$(YELLOW)Development:$(NC)"
@@ -163,12 +164,13 @@ unlink:
 	npm unlink -g 2>/dev/null || true
 	@echo "$(GREEN)✓ Package unlinked$(NC)"
 
-run: rebuild fix-permissions
-	@echo "$(BLUE)Starting n8n with your node...$(NC)"
+run: fix-permissions
+	@echo "$(BLUE)Starting the n8n dev server with your node (no global n8n needed)...$(NC)"
+	@echo "$(YELLOW)Uses @n8n/node-cli — downloads/runs n8n in a sandbox and hot-reloads on save.$(NC)"
 	@if [ -f .env.n8n ]; then \
-		export $$(cat .env.n8n | grep -v '^#' | xargs) && n8n start; \
+		export $$(cat .env.n8n | grep -v '^#' | xargs) && pnpm exec n8n-node dev; \
 	else \
-		n8n start; \
+		pnpm exec n8n-node dev; \
 	fi
 
 stop:

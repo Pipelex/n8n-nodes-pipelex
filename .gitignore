@@ -53,3 +53,4 @@ coverage/
 # Python virtual environment and docs build
 .venv/
 site/
+.gstack/
