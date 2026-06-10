@@ -59,8 +59,11 @@ function rethrowOpError(ctx: IExecuteFunctions, error: unknown, itemIndex: numbe
  * mutually exclusive with mthds_contents (a stored method IS the bundle).
  */
 function readRunDefinition(ctx: IExecuteFunctions, itemIndex: number): HostedStartBody {
-	const pipeCode = ctx.getNodeParameter('pipeCode', itemIndex, '') as string;
-	const methodId = ctx.getNodeParameter('methodId', itemIndex, '') as string;
+	// Trimmed so whitespace-only values fail the local required-source check
+	// instead of turning into a server-side 422 (and so stray whitespace in
+	// Method ID can't trip the mutual-exclusion guard).
+	const pipeCode = (ctx.getNodeParameter('pipeCode', itemIndex, '') as string).trim();
+	const methodId = (ctx.getNodeParameter('methodId', itemIndex, '') as string).trim();
 	const mthdsContentsRaw = ctx.getNodeParameter('mthdsContents', itemIndex, []) as unknown;
 	const inputsString = ctx.getNodeParameter('inputs', itemIndex, '{}') as string;
 	const outputName = ctx.getNodeParameter('outputName', itemIndex, '') as string;
@@ -197,9 +200,10 @@ async function pollForResultLoop(
 			return runStillRunning(runId);
 		}
 		// Honor the server's Retry-After (the mapper defaults it to 5s when
-		// absent), but never sleep past the deadline (Infinity when unbounded).
+		// absent), but never sleep past the deadline (Infinity when unbounded):
+		// the anti-busy-loop floor applies only when the deadline allows it.
 		const requestedMs = outcome.retryAfterSeconds * 1000;
-		const sleepMs = Math.max(Math.min(requestedMs, remainingMs), MIN_POLL_SLEEP_MS);
+		const sleepMs = Math.min(Math.max(requestedMs, MIN_POLL_SLEEP_MS), remainingMs);
 		await sleepWithAbort(sleepMs, abortSignal);
 	}
 }
@@ -269,7 +273,7 @@ async function getRunResult(
 	baseUrl: string,
 	itemIndex: number,
 ): Promise<IDataObject> {
-	const runId = ctx.getNodeParameter('runId', itemIndex, '') as string;
+	const runId = (ctx.getNodeParameter('runId', itemIndex, '') as string).trim();
 	if (!runId) {
 		throw new NodeOperationError(ctx.getNode(), 'Pipeline Run ID is required', { itemIndex });
 	}
@@ -489,11 +493,19 @@ export class Pipelex implements INodeType {
 		for (let i = 0; i < items.length; i++) {
 			try {
 				let json: IDataObject;
+				// Legacy saved-operation values from the published 0.0.x node are
+				// mapped rather than rejected: `start`/`startAndPoll` → the unified
+				// internal-poll execute (same inputs; the output's pipeline_run_id
+				// still supports Get Run Result); `poll` → the single-shot
+				// Get Run Result (feed the id back in a loop for repeated polling).
 				switch (operation) {
 					case 'execute':
+					case 'start':
+					case 'startAndPoll':
 						json = await executePipeline(this, baseUrl, i);
 						break;
 					case 'getResult':
+					case 'poll':
 						json = await getRunResult(this, baseUrl, i);
 						break;
 					default:
