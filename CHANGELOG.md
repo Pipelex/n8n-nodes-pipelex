@@ -2,17 +2,17 @@
 
 ## [Unreleased]
 
-- **Breaking — node is now a four-operation node.** The single blocking `Execute` operation is replaced by an `Operation` selector:
-  - **Start & Poll** (default) — starts a durable run (`POST /platform/v1/runs`) and polls the self-healing result endpoint (`GET /platform/v1/runs/by-id/{run_id}/result`) until it finishes. Survives the public API's ~30s synchronous ceiling. Output is now `{ done, status, pipeline_run_id, main_stuff, graph_spec }` — **not** the old `/execute` `pipe_output`.
-  - **Execute (One-Shot)** — keeps the old blocking `POST /runner/v1/pipeline/execute` behavior (returns `pipe_output`). Carries a notice + translates the ~30s public-API gateway timeout into an actionable message pointing at Start & Poll.
-  - **Start Run** — starts a durable run and returns its `pipeline_run_id` immediately (no waiting).
-  - **Poll for Result** — polls an existing run by `pipeline_run_id` until it finishes, then returns the result.
-  - **Get Result** — fetches a run's result once by `pipeline_run_id` (no polling); returns `done: false` while still running.
-- **Max Wait defaults to unbounded** (`0` = wait indefinitely) on the polling operations. A positive cap, if exceeded, returns the `pipeline_run_id` + a "still running" message instead of failing, so the run can be fetched later with Poll for Result. The server's `Retry-After` is honored.
-- **Idempotency on start.** Start / Start & Poll send an `Idempotency-Key` (n8n execution id + item index) on `POST /runs`, so an n8n "Retry On Fail" replays the same run instead of creating a duplicate paid run.
+- **Breaking — migrated to the unified MTHDS API surface (`/v1/*`).** The legacy `/runner/v1/*` and `/platform/v1/*` prefixes are gone: start → `POST /v1/start` (202 `StartAck { pipeline_run_id, state, created_at }`), result → `GET /v1/runs/{pipeline_run_id}/results` (202 + `Retry-After` while running / 200 result / 409 terminal failure), credential test → `GET /v1/auth/verify`. The wire shapes are copy-pasted from `mthds-js` v0.10.0 into `nodes/Pipelex/MthdsShapes.ts` (n8n community nodes cannot ship runtime dependencies, so the SDK is vendored, not imported — sync against the source files named in that header when the contract moves).
+- **Breaking — node is now a two-operation node.** The blocking `Execute` operation (old `POST /runner/v1/pipeline/execute`, which died at the public API's ~30s gateway ceiling) is **deleted**, superseded by internal polling:
+  - **Execute Pipeline** (default) — starts a durable run and polls internally until it finishes. Paste your method + inputs, run, get the result; no Wait-node loop to assemble. Output is `{ status, pipeline_run_id, main_stuff }` — **not** the old `/execute` `pipe_output`.
+  - **Get Run Result** — the escape hatch: fetches a run's result once by `pipeline_run_id` (no polling); returns `status: "RUNNING"` while still running. Use it to collect a run that outlived Max Wait.
+- **Max Wait defaults to 300s** (safe under typical n8n Cloud execution caps). On exceed, Execute Pipeline returns the `pipeline_run_id` + a "still running" message — a usable output, not an error. `0` waits indefinitely (self-hosted n8n). The poll cadence honors the server's `Retry-After` (5s when absent); a transient 503 mid-poll reads as "still running" (mirroring mthds-js), never a lost run.
+- **`method_id` support.** Run a stored method from your org's catalog (hosted-API extension) as an alternative to pasting MTHDS bundles inline — mutually exclusive with `mthds_contents`, enforced client-side with a clear error.
+- **Result output strips `graph_spec` and `done`.** The n8n output drops the heavy `graph_spec` visualization artifact (it just cluttered the item view) and the redundant `done` boolean — `status` (`RUNNING` / `COMPLETED`) is the single completion signal. This is n8n-only: the server's results response still relays `graph_spec` verbatim.
+- **Idempotency on start.** Execute Pipeline sends an `Idempotency-Key` (n8n execution id + node id + item index) on `POST /v1/start`, so an n8n "Retry On Fail" replays the same run instead of creating a duplicate paid run.
 - **Actionable 403.** A run rejected for lack of runs access surfaces a clear "needs an admin / `runs:execute`-scoped key" message — the credential test only validates the token, not run scope.
-- Fixed the runner override field name to `dynamic_output_concept_ref` on every operation (the old `_code` spelling was silently discarded by the runner).
-- Dev tooling: added Vitest unit tests (pure result mapper + all four operation flows), wired `pnpm test` into `make check`, and added a Test CI workflow. Vitest is a devDependency only — the node still ships with zero runtime dependencies.
+- Fixed the runner override field name to `dynamic_output_concept_ref` (the old `_code` spelling was silently discarded by the runner).
+- Dev tooling: added Vitest unit tests (pure result mapper, request shaping, and both operation flows), wired `pnpm test` into `make check`, and added a Test CI workflow. Vitest is a devDependency only — the node still ships with zero runtime dependencies.
 - `make run` now launches the `@n8n/node-cli` dev server (no global `n8n` install required; hot-reloads on save). Note n8n requires Node.js `>=20.19 <= 24.x`.
 
 ## [v0.0.10] - 2026-05-21

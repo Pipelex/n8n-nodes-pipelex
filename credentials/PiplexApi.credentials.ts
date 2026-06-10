@@ -47,7 +47,7 @@ export class PiplexApi implements ICredentialType {
 	test: ICredentialTestRequest = {
 		request: {
 			baseURL: '={{$credentials.baseUrl}}',
-			url: '/platform/v1/auth/verify',
+			url: '/v1/auth/verify',
 			method: 'GET',
 		},
 	};

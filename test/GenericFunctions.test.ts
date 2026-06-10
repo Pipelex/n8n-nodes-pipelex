@@ -6,6 +6,7 @@ import {
 	idempotencyKey,
 	mapResultResponse,
 } from '../nodes/Pipelex/GenericFunctions';
+import { DEFAULT_DEGRADED_RETRY_SECONDS, parseRetryAfter } from '../nodes/Pipelex/MthdsShapes';
 
 describe('buildStartBody', () => {
 	it('maps pipe_code only', () => {
@@ -18,15 +19,21 @@ describe('buildStartBody', () => {
 		expect(body).toEqual({ mthds_contents: ['bundle-1', 'bundle-2'] });
 	});
 
-	it('allows both pipe_code and mthds_contents (XOR not enforced here)', () => {
+	it('allows both pipe_code and mthds_contents (a bundle + a chosen pipe)', () => {
 		const body = buildStartBody({ pipeCode: 'p', mthdsContents: ['b'] });
 		expect(body.pipe_code).toBe('p');
 		expect(body.mthds_contents).toEqual(['b']);
 	});
 
-	it('forwards method_id', () => {
-		const body = buildStartBody({ pipeCode: 'p', methodId: 'method-42' });
-		expect(body.method_id).toBe('method-42');
+	it('maps method_id (hosted stored-method extension)', () => {
+		const body = buildStartBody({ methodId: 'method-42' });
+		expect(body).toEqual({ method_id: 'method-42' });
+	});
+
+	it('does not enforce the method_id/mthds_contents exclusivity (the node does)', () => {
+		const body = buildStartBody({ methodId: 'm', mthdsContents: ['b'] });
+		expect(body.method_id).toBe('m');
+		expect(body.mthds_contents).toEqual(['b']);
 	});
 
 	it('maps overrides to snake_case', () => {
@@ -77,7 +84,23 @@ describe('idempotencyKey', () => {
 	});
 });
 
-describe('mapResultResponse', () => {
+describe('parseRetryAfter (vendored from mthds-js)', () => {
+	it('parses the lowercased header', () => {
+		expect(parseRetryAfter({ 'retry-after': '7' })).toBe(7);
+	});
+
+	it('tolerates the title-cased header', () => {
+		expect(parseRetryAfter({ 'Retry-After': '12' })).toBe(12);
+	});
+
+	it('returns undefined for absent / non-numeric / negative values', () => {
+		expect(parseRetryAfter({})).toBeUndefined();
+		expect(parseRetryAfter({ 'retry-after': 'soon' })).toBeUndefined();
+		expect(parseRetryAfter({ 'retry-after': '-3' })).toBeUndefined();
+	});
+});
+
+describe('mapResultResponse (mirrors mthds-js getRunResult)', () => {
 	it('200 → completed, passes the body through', () => {
 		const body = { pipeline_run_id: 'r1', main_stuff: { x: 1 }, graph_spec: { nodes: [] } };
 		const outcome = mapResultResponse(200, body, {});
@@ -85,37 +108,35 @@ describe('mapResultResponse', () => {
 	});
 
 	it('202 with Retry-After → running with parsed seconds', () => {
-		const outcome = mapResultResponse(202, {}, { 'retry-after': '5' });
-		expect(outcome).toEqual({ kind: 'running', retryAfterSeconds: 5 });
+		const outcome = mapResultResponse(202, {}, { 'retry-after': '8' });
+		expect(outcome).toEqual({ kind: 'running', retryAfterSeconds: 8 });
 	});
 
-	it('202 with title-cased Retry-After header → running with parsed seconds', () => {
-		const outcome = mapResultResponse(202, {}, { 'Retry-After': '12' });
-		expect(outcome).toEqual({ kind: 'running', retryAfterSeconds: 12 });
-	});
-
-	it('202 without Retry-After → running, no seconds', () => {
+	it('202 without Retry-After → running with the 5s degraded default', () => {
 		const outcome = mapResultResponse(202, {}, {});
-		expect(outcome).toEqual({ kind: 'running', retryAfterSeconds: undefined });
+		expect(outcome).toEqual({
+			kind: 'running',
+			retryAfterSeconds: DEFAULT_DEGRADED_RETRY_SECONDS,
+		});
 	});
 
-	it('202 with a non-numeric Retry-After → running, no seconds', () => {
+	it('202 with a non-numeric Retry-After → running with the default', () => {
 		const outcome = mapResultResponse(202, {}, { 'retry-after': 'soon' });
-		expect(outcome).toEqual({ kind: 'running', retryAfterSeconds: undefined });
+		expect(outcome).toEqual({
+			kind: 'running',
+			retryAfterSeconds: DEFAULT_DEGRADED_RETRY_SECONDS,
+		});
 	});
 
-	it('502/503/504 → transient (gateway outage, not in-flight)', () => {
+	it('503 → running too (transient blip mid-poll never fails a poller)', () => {
 		expect(mapResultResponse(503, {}, { 'retry-after': '10' })).toEqual({
-			kind: 'transient',
-			statusCode: 503,
+			kind: 'running',
 			retryAfterSeconds: 10,
 		});
-		expect(mapResultResponse(502, {}, {})).toEqual({
-			kind: 'transient',
-			statusCode: 502,
-			retryAfterSeconds: undefined,
+		expect(mapResultResponse(503, {}, {})).toEqual({
+			kind: 'running',
+			retryAfterSeconds: DEFAULT_DEGRADED_RETRY_SECONDS,
 		});
-		expect(mapResultResponse(504, {}, {})).toMatchObject({ kind: 'transient', statusCode: 504 });
 	});
 
 	it('403 → forbidden with the actionable message', () => {
@@ -143,6 +164,11 @@ describe('mapResultResponse', () => {
 			kind: 'failed',
 			message: 'Run finished with a non-completed status',
 		});
+	});
+
+	it('other 5xx (502/504) → unexpected, not silently "running"', () => {
+		expect(mapResultResponse(502, {}, {})).toMatchObject({ kind: 'unexpected', statusCode: 502 });
+		expect(mapResultResponse(504, {}, {})).toMatchObject({ kind: 'unexpected', statusCode: 504 });
 	});
 
 	it('other non-2xx → unexpected, carries status code', () => {
