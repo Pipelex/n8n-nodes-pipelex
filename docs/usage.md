@@ -34,7 +34,7 @@ The credential test hits `GET <Base URL>/v1/auth/verify` to verify both reachabi
 
 The Pipelex node offers flexibility in how you define and execute pipelines. You can reference a pre-registered pipeline, provide an inline MTHDS bundle, combine both, or run a **stored method** by ID. These fields apply to **Execute Pipeline** (the operation that submits a pipeline).
 
-Inline bundles are set in the **MTHDS Bundles** field and sent as `mthds_contents` (a `string[]` — add one entry per bundle). Alternatively, set **Method ID** (`method_id`) to run a method stored in your org's catalog on the hosted API — its MTHDS source supplies the bundle, so Method ID and MTHDS Bundles are **mutually exclusive**.
+Inline bundles are set in the **MTHDS Bundles** field and sent as `mthds_contents` (a `string[]` — add one entry per bundle). Alternatively, set **Method ID** (`method_id`) to run a method stored in your org's catalog on the hosted API — its MTHDS source supplies the bundle. Setting both is allowed: the inline MTHDS Bundles are what runs, and `method_id` links the run to the stored method in your run history.
 
 ### Case 1: Only `pipe_code` (Pipeline Library)
 

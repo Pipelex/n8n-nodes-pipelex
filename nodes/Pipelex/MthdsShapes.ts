@@ -44,7 +44,8 @@ export type RunStatus =
  * - `callback_urls` — webhooks need a receivable endpoint; the node polls instead.
  *
  * `method_id` is the HOSTED extension (a stored method in the active org's
- * catalog), mutually exclusive with `mthds_contents`.
+ * catalog); combinable with `mthds_contents` — the hosted API runs the
+ * inline bundles and records `method_id` as the run-history linkage.
  */
 export interface HostedStartBody {
 	pipe_code?: string;

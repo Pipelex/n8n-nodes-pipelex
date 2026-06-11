@@ -30,7 +30,7 @@ describe('buildStartBody', () => {
 		expect(body).toEqual({ method_id: 'method-42' });
 	});
 
-	it('does not enforce the method_id/mthds_contents exclusivity (the node does)', () => {
+	it('passes method_id + mthds_contents through together (hosted precedence rule: inline runs)', () => {
 		const body = buildStartBody({ methodId: 'm', mthdsContents: ['b'] });
 		expect(body.method_id).toBe('m');
 		expect(body.mthds_contents).toEqual(['b']);

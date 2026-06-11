@@ -37,7 +37,7 @@ export interface BuildStartParams {
  * Map the node's params to the `POST /v1/start` body, omitting empties.
  * Pure — unit-testable without the execute harness. Does NOT enforce the
  * run-source rules (one of pipe_code/mthds_contents/method_id; method_id and
- * mthds_contents mutually exclusive); that validation lives in the node so the
+ * mthds_contents combinable — inline wins); run-source validation lives in the node so the
  * error carries an `itemIndex`.
  */
 export function buildStartBody(params: BuildStartParams): HostedStartBody {

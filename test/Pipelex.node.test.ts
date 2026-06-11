@@ -111,17 +111,19 @@ describe('Pipelex node — Execute Pipeline (start + internal poll)', () => {
 		expect(httpFn.mock.calls[0][1].body).toEqual({ method_id: 'method-42', inputs: {} });
 	});
 
-	it('rejects method_id + MTHDS bundles client-side (mutually exclusive), no HTTP call', async () => {
+	it('sends method_id + MTHDS bundles together (inline bundles run; method_id links run history)', async () => {
 		const { ctx, httpFn } = makeContext({
 			operation: 'execute',
 			params: { methodId: 'method-42', mthdsContents: ['bundle'], inputs: '{}' },
-			continueOnFail: true,
 			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
 		});
 
-		const result = await Pipelex.prototype.execute.call(ctx);
-		expect(String(result[0][0].json.error)).toContain('mutually exclusive');
-		expect(httpFn).not.toHaveBeenCalled();
+		await Pipelex.prototype.execute.call(ctx);
+		expect(httpFn.mock.calls[0][1].body).toEqual({
+			method_id: 'method-42',
+			mthds_contents: ['bundle'],
+			inputs: {},
+		});
 	});
 
 	it('keeps polling while running (202), honoring Retry-After, then returns when completed', async () => {

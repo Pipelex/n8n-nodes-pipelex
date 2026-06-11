@@ -56,12 +56,13 @@ function rethrowOpError(ctx: IExecuteFunctions, error: unknown, itemIndex: numbe
  * map them to the snake_case `POST /v1/start` body. Mirrors the server's
  * run-source rules client-side so the errors are immediate and item-scoped:
  * at least one of pipe_code / mthds_contents / method_id, and method_id is
- * mutually exclusive with mthds_contents (a stored method IS the bundle).
+ * combinable with mthds_contents (inline bundles run; method_id is the
+ * run-history linkage on the hosted API).
  */
 function readRunDefinition(ctx: IExecuteFunctions, itemIndex: number): HostedStartBody {
 	// Trimmed so whitespace-only values fail the local required-source check
 	// instead of turning into a server-side 422 (and so stray whitespace in
-	// Method ID can't trip the mutual-exclusion guard).
+	// Method ID never reaches the server as a phantom run source).
 	const pipeCode = (ctx.getNodeParameter('pipeCode', itemIndex, '') as string).trim();
 	const methodId = (ctx.getNodeParameter('methodId', itemIndex, '') as string).trim();
 	const mthdsContentsRaw = ctx.getNodeParameter('mthdsContents', itemIndex, []) as unknown;
@@ -83,13 +84,9 @@ function readRunDefinition(ctx: IExecuteFunctions, itemIndex: number): HostedSta
 			)
 		: [];
 
-	if (methodId && mthdsContents.length > 0) {
-		throw new NodeOperationError(
-			ctx.getNode(),
-			'"Method ID" and "MTHDS Bundles" are mutually exclusive — a stored method already supplies the bundle. Provide one or the other.',
-			{ itemIndex },
-		);
-	}
+	// Method ID and MTHDS Bundles may both be set: the hosted API runs the
+	// inline bundles (precedence) and records method_id as the run-history
+	// linkage — no client-side exclusion.
 	if (!pipeCode && mthdsContents.length === 0 && !methodId) {
 		throw new NodeOperationError(
 			ctx.getNode(),
@@ -345,10 +342,10 @@ export class Pipelex implements INodeType {
 
 			// ── Pipeline definition (Execute Pipeline) ────────────────────────────
 			// Field order: MTHDS Bundles (the big payload) → Inputs → Pipe Code →
-			// Method ID → optional overrides. Run source rules (enforced at
+			// Method ID → optional overrides. Run source rule (enforced at
 			// runtime, mirroring the server): at least one of Pipe Code / MTHDS
-			// Bundles / Method ID; Method ID and MTHDS Bundles are mutually
-			// exclusive.
+			// Bundles / Method ID. Method ID combines with MTHDS Bundles —
+			// inline bundles run, method_id links the run to the stored method.
 			{
 				displayName: 'MTHDS Bundles',
 				name: 'mthdsContents',
