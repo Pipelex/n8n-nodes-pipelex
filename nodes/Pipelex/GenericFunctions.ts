@@ -1,5 +1,6 @@
 import {
 	NodeApiError,
+	type ICredentialDataDecryptedObject,
 	type IDataObject,
 	type IExecuteFunctions,
 	type IHttpRequestMethods,
@@ -14,13 +15,38 @@ import {
 	type StartAck,
 } from './MthdsShapes';
 
-const CREDENTIALS_NAME = 'piplexApi';
-
 // A non-scoped key passes the credential test (`/v1/auth/verify` accepts any
 // valid token) but 403s on a real run. Turn that dead-end into an actionable
 // message.
 export const FORBIDDEN_MESSAGE =
 	'This API key lacks runs access. Running a pipeline needs an admin / `runs:execute`-scoped key — the credential test only checks that the token is valid, not that it can start runs.';
+
+/**
+ * Resolved connection to the Pipelex API — the credential, read once per
+ * execution and turned into ready-to-send request pieces.
+ *
+ * Auth is a manually-built `Authorization` header (NOT n8n's
+ * `httpRequestWithAuthentication`), on purpose: a credential with a generic
+ * `authenticate` block makes n8n inject a "Custom API Call" entry into the
+ * node's Operation dropdown (core `injectCustomApiCallOptions` /
+ * `supportsProxyAuth`), which is unwanted for this node's curated operations.
+ * The credential therefore declares no `authenticate`, and every request here
+ * carries the header explicitly.
+ */
+export interface ApiConnection {
+	/** Credential Base URL, trailing slash stripped. */
+	baseUrl: string;
+	/** Full `Authorization` header value (`Bearer <token>`). */
+	authorization: string;
+}
+
+/** Build the {@link ApiConnection} from the decrypted `piplexApi` credential. */
+export function buildApiConnection(credentials: ICredentialDataDecryptedObject): ApiConnection {
+	return {
+		baseUrl: String(credentials.baseUrl ?? '').replace(/\/$/, ''),
+		authorization: `Bearer ${String(credentials.apiKey ?? '')}`,
+	};
+}
 
 /** User-facing params collected by the node, before snake_case mapping. */
 export interface BuildStartParams {
@@ -148,15 +174,15 @@ export function mapResultResponse(
  */
 export async function requestStart(
 	ctx: IExecuteFunctions,
-	baseUrl: string,
+	conn: ApiConnection,
 	body: HostedStartBody,
 	idempotency: string,
 	itemIndex: number,
 ): Promise<StartAck> {
-	const response = (await ctx.helpers.httpRequestWithAuthentication.call(ctx, CREDENTIALS_NAME, {
+	const response = (await ctx.helpers.httpRequest({
 		method: 'POST' as IHttpRequestMethods,
-		url: `${baseUrl}/v1/start`,
-		headers: { 'Idempotency-Key': idempotency },
+		url: `${conn.baseUrl}/v1/start`,
+		headers: { Authorization: conn.authorization, 'Idempotency-Key': idempotency },
 		body,
 		json: true,
 		returnFullResponse: true,
@@ -188,12 +214,13 @@ export async function requestStart(
  */
 export async function requestResult(
 	ctx: IExecuteFunctions,
-	baseUrl: string,
+	conn: ApiConnection,
 	runId: string,
 ): Promise<IN8nHttpFullResponse> {
-	return (await ctx.helpers.httpRequestWithAuthentication.call(ctx, CREDENTIALS_NAME, {
+	return (await ctx.helpers.httpRequest({
 		method: 'GET' as IHttpRequestMethods,
-		url: `${baseUrl}/v1/runs/${encodeURIComponent(runId)}/results`,
+		url: `${conn.baseUrl}/v1/runs/${encodeURIComponent(runId)}/results`,
+		headers: { Authorization: conn.authorization },
 		json: true,
 		returnFullResponse: true,
 		ignoreHttpStatusErrors: true,

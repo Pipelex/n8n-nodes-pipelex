@@ -81,29 +81,42 @@ This node requires a **Pipelex API credential** to authenticate with your Pipele
 
 ## Node Configuration
 
-The Pipelex node has one **Operation** selector with two operations:
+The Pipelex node has one **Operation** selector with four operations, mirroring the mthds-js client surface (`start` / `waitForResult` / `getRunResult` — SDK conveniences over the MTHDS Protocol routes):
 
 | Operation | What it does | Endpoint | Returns |
 |---|---|---|---|
-| **Execute Pipeline** (default) | Starts a durable run and polls internally until it finishes — paste, run, get the result. The polling is invisible: no Wait-node loop to assemble. If **Max Wait** (default 300s) is exceeded, returns the `pipeline_run_id` with a "still running" message instead of failing. | `POST /v1/start` then `GET /v1/runs/{pipeline_run_id}/results` | `{ status, pipeline_run_id, main_stuff }` |
-| **Get Run Result** | The escape hatch: fetches a run's result **once** by `pipeline_run_id` — no polling. Use it to collect a run that outlived Max Wait. Returns `status: "RUNNING"` while still in flight, the result when `COMPLETED`. | `GET /v1/runs/{pipeline_run_id}/results` | `{ status, pipeline_run_id, main_stuff }` |
+| **Start & Wait for Result** (default) | Starts a durable run and polls internally until it finishes — paste, run, get the result. The polling is invisible: no Wait-node loop to assemble. If **Max Wait** (default 300s) is exceeded, returns the `pipeline_run_id` with a "still running" message instead of failing. | `POST /v1/start` then `GET /v1/runs/{pipeline_run_id}/results` | `{ status, pipeline_run_id, main_stuff }` |
+| **Start Pipeline** | Starts a durable run and returns **immediately** — no waiting. The output's `pipeline_run_id` is the point: feed it to Poll & Get Result or Get Run Result later, even from another workflow branch or a separate scheduled workflow. | `POST /v1/start` | `{ pipeline_run_id, state, created_at }` (the StartAck) |
+| **Poll & Get Result** | Waits for an **already-started** run by `pipeline_run_id`: polls until it finishes or Max Wait is exceeded (then the same "still running" output, not an error). | `GET /v1/runs/{pipeline_run_id}/results` (polled) | `{ status, pipeline_run_id, main_stuff }` |
+| **Get Run Result** | Fetches a run's result **once** by `pipeline_run_id` — no polling. Returns `status: "RUNNING"` while still in flight, the result when `COMPLETED`. | `GET /v1/runs/{pipeline_run_id}/results` | `{ status, pipeline_run_id, main_stuff }` |
 
-**Pipeline-definition fields** (Execute Pipeline):
+**Which one to use?**
+
+- **Quick runs** → **Start & Wait for Result**: one node, start to result.
+- **Long runs** → **Start Pipeline**, then **Poll & Get Result** later (or on another workflow branch) when you actually need the result.
+- **Webhook-style / fire-and-collect** → **Start Pipeline**, then **Get Run Result** on a schedule until it reports `COMPLETED`.
+
+> ℹ️ The published 0.0.x `execute` operation value (the old "Execute Pipeline") still executes as a hidden alias of **Start & Wait for Result** — existing saved workflows keep running without edits.
+
+**Pipeline-definition fields** (Start & Wait for Result / Start Pipeline):
 
 | Parameter | API Field | Description |
 |---|---|---|
-| **MTHDS Bundles** | `mthds_contents` | One or more inline MTHDS bundles (a `string[]`). Mutually exclusive with Method ID. |
+| **MTHDS Bundles** | `mthds_contents` | One or more inline MTHDS bundles (a `string[]`). Combinable with Method ID — inline bundles run, `method_id` links the run to the stored method. |
 | **Inputs** | `inputs` | JSON object whose keys match your pipeline's expected inputs. Defaults to `{}`. |
 | **Pipe Code** | `pipe_code` | Code of the pipe to execute (registered on the server, or defined in the MTHDS Bundles). |
-| **Method ID** | `method_id` | ID of a stored method whose MTHDS source supplies the bundle (hosted API only) — the alternative to pasting bundles inline. Mutually exclusive with MTHDS Bundles. |
+| **Method ID** | `method_id` | ID of a stored method whose MTHDS source supplies the bundle (hosted API only) — the alternative to pasting bundles inline. |
 | **Output Name** | `output_name` | Optional name of the output variable. |
 | **Output Multiplicity** | `output_multiplicity` | Optional output multiplicity. |
 | **Dynamic Output Concept Ref** | `dynamic_output_concept_ref` | Optional override for the dynamic output concept ref. |
-| **Max Wait (Seconds)** | — | Max seconds to wait for the run to finish (**default 300**, safe under typical n8n Cloud execution caps). On exceed, the node returns the `pipeline_run_id` + a "still running" message so you can fetch it later with **Get Run Result**. `0` waits indefinitely (only sensible on self-hosted n8n without execution timeouts). The server's `Retry-After` drives the poll cadence (5s when absent). |
 
-**Run target** (Get Run Result): **Pipeline Run ID** — the `pipeline_run_id` returned by Execute Pipeline's "still running" output.
+**Run target** (Poll & Get Result / Get Run Result): **Pipeline Run ID** — the `pipeline_run_id` returned by Start Pipeline (or by a "still running" output).
 
-**Note:** Provide at least one of `Pipe Code`, `MTHDS Bundles`, or `Method ID` (and not both of the last two). Learn more about the Pipelex API [here](https://docs.pipelex.com/pages/api/).
+**Polling control** (Start & Wait for Result / Poll & Get Result): **Max Wait (Seconds)** — max seconds to wait for the run to finish (**default 300**, safe under typical n8n Cloud execution caps). On exceed, the node returns the `pipeline_run_id` + a "still running" message so you can fetch it later with **Get Run Result**. `0` waits indefinitely (only sensible on self-hosted n8n without execution timeouts). The server's `Retry-After` drives the poll cadence (5s when absent).
+
+**Note:** Provide at least one of `Pipe Code`, `MTHDS Bundles`, or `Method ID`. Learn more about the Pipelex API [here](https://docs.pipelex.com/pages/api/).
+
+**No "Custom API Call" entry:** n8n injects that raw-HTTP operation into nodes whose credential declares a generic `authenticate` block. This node's credential doesn't (the node builds its `Authorization` header itself), so the dropdown contains only the four curated operations above.
 
 ---
 
@@ -114,13 +127,15 @@ The Pipelex node has one **Operation** selector with two operations:
 1. **Add the Pipelex node** to your n8n workflow
 2. **Configure the credential** (Base URL + Bearer Token) — defaults to `https://api.pipelex.com`
 3. **Pick the operation:**
-   - **Execute Pipeline** (default) — start the run and get the result in one node; the polling happens internally
+   - **Start & Wait for Result** (default) — start the run and get the result in one node; the polling happens internally
+   - **Start Pipeline** — start the run and return immediately with its `pipeline_run_id` (collect the result later)
+   - **Poll & Get Result** — wait for an already-started run by `pipeline_run_id` until it finishes (or Max Wait)
    - **Get Run Result** — a one-shot, non-blocking fetch by `pipeline_run_id` (returns `status: "RUNNING"` while still running)
 4. **Provide the pipeline:** a `Pipe Code`, inline `MTHDS Bundles`, or a stored `Method ID`
 5. **Set Inputs** as a JSON object matching your pipeline's expected inputs
 6. **Run** the workflow
 
-Long-running pipelines: **Max Wait** (default 300s) caps how long Execute Pipeline blocks the n8n execution. If a run outlives it, the node returns the `pipeline_run_id` with a "still running" message — feed that id to **Get Run Result** later (e.g. on a schedule) to collect the result. Learn more about the output format [here](https://docs.pipelex.com/pages/api/).
+Long-running pipelines: **Max Wait** (default 300s) caps how long the polling operations block the n8n execution. If a run outlives it, the node returns the `pipeline_run_id` with a "still running" message — feed that id to **Get Run Result** later (e.g. on a schedule) or to **Poll & Get Result** to keep waiting. Or skip the first wait entirely: **Start Pipeline** now, collect later. Learn more about the output format [here](https://docs.pipelex.com/pages/api/).
 
 ---
 

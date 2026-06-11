@@ -1,11 +1,16 @@
-import type {
-	IAuthenticateGeneric,
-	Icon,
-	ICredentialTestRequest,
-	ICredentialType,
-	INodeProperties,
-} from 'n8n-workflow';
+import type { ICredentialTestRequest, ICredentialType, Icon, INodeProperties } from 'n8n-workflow';
 
+/**
+ * NOTE — no `authenticate` block, on purpose. n8n injects a "Custom API Call"
+ * entry into the Operation dropdown of every node whose credential declares a
+ * generic `authenticate` (core: `LoadNodesAndCredentials.injectCustomApiCallOptions`
+ * → `supportsProxyAuth`, pushing `CUSTOM_API_CALL_NAME`). That raw-HTTP escape
+ * hatch makes no sense for this node's four curated operations, so the
+ * Authorization header is built manually instead (see `buildApiConnection` in
+ * `nodes/Pipelex/GenericFunctions.ts`) and the credential `test` request
+ * carries its own header — the `test` block alone does NOT trigger the
+ * injection, so credential verification keeps working.
+ */
 export class PiplexApi implements ICredentialType {
 	name = 'piplexApi';
 	displayName = 'Pipelex Bearer Token API';
@@ -35,20 +40,17 @@ export class PiplexApi implements ICredentialType {
 		},
 	];
 
-	authenticate: IAuthenticateGeneric = {
-		type: 'generic',
-		properties: {
-			headers: {
-				Authorization: '=Bearer {{$credentials.apiKey}}',
-			},
-		},
-	};
-
+	// The test request authenticates itself (no `authenticate` block to lean
+	// on — see the class comment). `$credentials` expressions resolve here the
+	// same way the `baseURL` expression already does.
 	test: ICredentialTestRequest = {
 		request: {
 			baseURL: '={{$credentials.baseUrl}}',
 			url: '/v1/auth/verify',
 			method: 'GET',
+			headers: {
+				Authorization: '=Bearer {{$credentials.apiKey}}',
+			},
 		},
 	};
 }

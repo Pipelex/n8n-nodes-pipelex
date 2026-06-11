@@ -2,11 +2,24 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	FORBIDDEN_MESSAGE,
+	buildApiConnection,
 	buildStartBody,
 	idempotencyKey,
 	mapResultResponse,
 } from '../nodes/Pipelex/GenericFunctions';
 import { DEFAULT_DEGRADED_RETRY_SECONDS, parseRetryAfter } from '../nodes/Pipelex/MthdsShapes';
+
+describe('buildApiConnection (manual auth — credential has no authenticate block)', () => {
+	it('builds the Bearer Authorization header from the credential', () => {
+		const conn = buildApiConnection({ baseUrl: 'https://api.test', apiKey: 'tok-1' });
+		expect(conn).toEqual({ baseUrl: 'https://api.test', authorization: 'Bearer tok-1' });
+	});
+
+	it('strips a trailing slash from the base URL', () => {
+		const conn = buildApiConnection({ baseUrl: 'https://api.test/', apiKey: 'tok-1' });
+		expect(conn.baseUrl).toBe('https://api.test');
+	});
+});
 
 describe('buildStartBody', () => {
 	it('maps pipe_code only', () => {

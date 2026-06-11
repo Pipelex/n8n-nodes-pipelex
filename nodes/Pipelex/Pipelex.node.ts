@@ -12,26 +12,38 @@ import {
 } from 'n8n-workflow';
 
 import {
+	buildApiConnection,
 	buildStartBody,
 	idempotencyKey,
 	mapResultResponse,
 	requestResult,
 	requestStart,
+	type ApiConnection,
 	type ResultOutcome,
 } from './GenericFunctions';
-import type { HostedStartBody } from './MthdsShapes';
+import type { HostedStartBody, StartAck } from './MthdsShapes';
 
-// Polling defaults. Max Wait caps how long Execute Pipeline blocks the n8n
+// Polling defaults. Max Wait caps how long a polling operation blocks the n8n
 // execution — 300s covers the overwhelming majority of runs while staying
 // safely under typical n8n Cloud execution caps. On exceed the node returns
 // the pipeline_run_id + a "still running" payload (NOT an error) so the run
-// can be fetched later with Get Run Result. 0 = wait indefinitely (self-hosted
-// n8n with no execution timeout).
+// can be fetched later with Get Run Result / Poll & Get Result. 0 = wait
+// indefinitely (self-hosted n8n with no execution timeout).
 const DEFAULT_MAX_WAIT_SECONDS = 300;
 // Floor on the sleep between polls — guards against a hot loop if the server
 // ever sends `Retry-After: 0`. (When the header is absent, the mapper already
 // defaults to 5s.)
 const MIN_POLL_SLEEP_MS = 250;
+
+// Operations that submit a run (and therefore show the pipeline-definition
+// fields). `execute` is the published 0.0.x legacy value — see the execute()
+// switch — kept in the displayOptions lists so old saved workflows still
+// render their fields.
+const START_OPERATIONS = ['startAndPoll', 'start', 'execute'];
+// Operations that take an existing pipeline_run_id as input.
+const RUN_ID_OPERATIONS = ['poll', 'getResult'];
+// Operations that poll internally (and therefore expose Max Wait).
+const POLLING_OPERATIONS = ['startAndPoll', 'poll', 'execute'];
 
 /**
  * Re-throw an error from an op helper. The helpers already raise
@@ -52,8 +64,8 @@ function rethrowOpError(ctx: IExecuteFunctions, error: unknown, itemIndex: numbe
 }
 
 /**
- * Collect + validate the pipeline-definition fields of Execute Pipeline and
- * map them to the snake_case `POST /v1/start` body. Mirrors the server's
+ * Collect + validate the pipeline-definition fields of the start operations
+ * and map them to the snake_case `POST /v1/start` body. Mirrors the server's
  * run-source rules client-side so the errors are immediate and item-scoped:
  * at least one of pipe_code / mthds_contents / method_id, and method_id is
  * combinable with mthds_contents (inline bundles run; method_id is the
@@ -128,6 +140,15 @@ function readRunDefinition(ctx: IExecuteFunctions, itemIndex: number): HostedSta
 	});
 }
 
+/** Read + require the `runId` field (Poll & Get Result / Get Run Result). */
+function readRunId(ctx: IExecuteFunctions, itemIndex: number): string {
+	const runId = (ctx.getNodeParameter('runId', itemIndex, '') as string).trim();
+	if (!runId) {
+		throw new NodeOperationError(ctx.getNode(), 'Pipeline Run ID is required', { itemIndex });
+	}
+	return runId;
+}
+
 /** Translate a terminal/abnormal poll outcome into a `NodeApiError`. */
 function throwResultError(
 	ctx: IExecuteFunctions,
@@ -157,16 +178,19 @@ function throwResultError(
 }
 
 /**
- * Poll a run's results endpoint until it reaches a terminal state. Honors the
- * server's `Retry-After` (default 5s when absent; a 503 mid-poll also reads as
- * "keep polling", mirroring mthds-js — never fail a poller on a blip). With
+ * Poll a run's results endpoint until it reaches a terminal state — the one
+ * loop shared by Start & Wait for Result (fed by its own StartAck) and
+ * Poll & Get Result (fed by the user-supplied pipeline_run_id); the n8n
+ * equivalent of mthds-js `waitForResult`. Honors the server's `Retry-After`
+ * (default 5s when absent; a 503 mid-poll also reads as "keep polling",
+ * mirroring mthds-js — never fail a poller on a blip). With
  * `maxWaitSeconds <= 0` this polls indefinitely (the n8n execution's own
  * timeout is the only ceiling); with a positive cap it returns the
  * pipeline_run_id + a "still running" payload on exceed so the run isn't lost.
  */
 async function pollForResultLoop(
 	ctx: IExecuteFunctions,
-	baseUrl: string,
+	conn: ApiConnection,
 	runId: string,
 	maxWaitSeconds: number,
 	itemIndex: number,
@@ -176,7 +200,7 @@ async function pollForResultLoop(
 	const deadline = unbounded ? Number.POSITIVE_INFINITY : Date.now() + maxWaitSeconds * 1000;
 
 	for (;;) {
-		const response = await requestResult(ctx, baseUrl, runId);
+		const response = await requestResult(ctx, conn, runId);
 		const outcome = mapResultResponse(
 			response.statusCode,
 			(response.body ?? {}) as IDataObject,
@@ -211,7 +235,7 @@ function runStillRunning(runId: string): IDataObject {
 		status: 'RUNNING',
 		pipeline_run_id: runId,
 		message:
-			'Still running after Max Wait. Fetch it later with the "Get Run Result" operation and this pipeline_run_id.',
+			'Still running after Max Wait. Fetch it later with the "Get Run Result" operation (or keep waiting with "Poll & Get Result") and this pipeline_run_id.',
 	};
 }
 
@@ -230,51 +254,101 @@ function sanitizeResult(result: IDataObject): IDataObject {
 }
 
 /**
- * Execute Pipeline op (default): `POST /v1/start` (with an idempotency key,
- * 202 StartAck), then poll `GET /v1/runs/{pipeline_run_id}/results` internally
- * until the run finishes or Max Wait is exceeded. One node, no Wait-loop to
- * assemble — the polling is invisible to the user.
+ * `POST /v1/start` (with an idempotency key, 202 StartAck) for the run defined
+ * by the node's pipeline-definition fields. Shared by Start & Wait for Result
+ * and Start Pipeline — the StartAck's server-generated pipeline_run_id is
+ * guaranteed present on return.
  */
-async function executePipeline(
+async function startRun(
 	ctx: IExecuteFunctions,
-	baseUrl: string,
+	conn: ApiConnection,
 	itemIndex: number,
-): Promise<IDataObject> {
+): Promise<StartAck> {
 	const body = readRunDefinition(ctx, itemIndex);
 	const idempotency = idempotencyKey(ctx.getExecutionId(), ctx.getNode().id, itemIndex);
-	const startAck = await requestStart(ctx, baseUrl, body, idempotency, itemIndex);
-	const runId = startAck.pipeline_run_id;
-	if (!runId) {
+	const startAck = await requestStart(ctx, conn, body, idempotency, itemIndex);
+	if (!startAck.pipeline_run_id) {
 		throw new NodeOperationError(
 			ctx.getNode(),
 			'Run started but the server returned no pipeline_run_id',
 			{ itemIndex },
 		);
 	}
+	return startAck;
+}
+
+/**
+ * Start & Wait for Result op (default): `POST /v1/start`, then poll
+ * `GET /v1/runs/{pipeline_run_id}/results` internally until the run finishes
+ * or Max Wait is exceeded. One node, no Wait-loop to assemble — the polling is
+ * invisible to the user.
+ */
+async function startAndWaitForResult(
+	ctx: IExecuteFunctions,
+	conn: ApiConnection,
+	itemIndex: number,
+): Promise<IDataObject> {
+	const startAck = await startRun(ctx, conn, itemIndex);
 	const maxWaitSeconds = ctx.getNodeParameter(
 		'maxWaitSeconds',
 		itemIndex,
 		DEFAULT_MAX_WAIT_SECONDS,
 	) as number;
-	return pollForResultLoop(ctx, baseUrl, runId, maxWaitSeconds, itemIndex);
+	return pollForResultLoop(ctx, conn, startAck.pipeline_run_id, maxWaitSeconds, itemIndex);
 }
 
 /**
- * Get Run Result op (the escape hatch): single-shot result fetch by
- * pipeline_run_id — NO polling. Use it to collect a run that outlived Max Wait
- * on Execute Pipeline. Maps the one response: completed → result, in-flight
- * (incl. a transient 503) → a still-running payload, terminal failure → error.
+ * Start Pipeline op: `POST /v1/start` only — no polling. Output is the
+ * StartAck (`{ pipeline_run_id, state, created_at }`); the pipeline_run_id is
+ * the point — feed it to Poll & Get Result or Get Run Result later (possibly
+ * from another workflow branch or a scheduled workflow).
+ */
+async function startPipeline(
+	ctx: IExecuteFunctions,
+	conn: ApiConnection,
+	itemIndex: number,
+): Promise<IDataObject> {
+	const startAck = await startRun(ctx, conn, itemIndex);
+	return {
+		pipeline_run_id: startAck.pipeline_run_id,
+		state: startAck.state,
+		created_at: startAck.created_at,
+	};
+}
+
+/**
+ * Poll & Get Result op: mthds-js `waitForResult` by id — poll an existing
+ * run's results endpoint (same Retry-After-honoring loop as Start & Wait for
+ * Result) until terminal or Max Wait; on exceed, the same graceful
+ * still-running output.
+ */
+async function pollRunResult(
+	ctx: IExecuteFunctions,
+	conn: ApiConnection,
+	itemIndex: number,
+): Promise<IDataObject> {
+	const runId = readRunId(ctx, itemIndex);
+	const maxWaitSeconds = ctx.getNodeParameter(
+		'maxWaitSeconds',
+		itemIndex,
+		DEFAULT_MAX_WAIT_SECONDS,
+	) as number;
+	return pollForResultLoop(ctx, conn, runId, maxWaitSeconds, itemIndex);
+}
+
+/**
+ * Get Run Result op: single-shot result fetch by pipeline_run_id — NO polling.
+ * Use it to collect a run that outlived Max Wait (e.g. on a schedule). Maps
+ * the one response: completed → result, in-flight (incl. a transient 503) →
+ * a still-running payload, terminal failure → error.
  */
 async function getRunResult(
 	ctx: IExecuteFunctions,
-	baseUrl: string,
+	conn: ApiConnection,
 	itemIndex: number,
 ): Promise<IDataObject> {
-	const runId = (ctx.getNodeParameter('runId', itemIndex, '') as string).trim();
-	if (!runId) {
-		throw new NodeOperationError(ctx.getNode(), 'Pipeline Run ID is required', { itemIndex });
-	}
-	const response = await requestResult(ctx, baseUrl, runId);
+	const runId = readRunId(ctx, itemIndex);
+	const response = await requestResult(ctx, conn, runId);
 	const outcome = mapResultResponse(
 		response.statusCode,
 		(response.body ?? {}) as IDataObject,
@@ -302,7 +376,7 @@ export class Pipelex implements INodeType {
 		version: 1,
 		usableAsTool: true,
 		subtitle:
-			'={{ ({ execute: "Execute Pipeline", getResult: "Get Run Result" })[$parameter["operation"]] }}',
+			'={{ ({ startAndPoll: "Start & Wait for Result", start: "Start Pipeline", poll: "Poll & Get Result", getResult: "Get Run Result", execute: "Start & Wait for Result" })[$parameter["operation"]] }}',
 		description: 'Execute Pipelex pipelines',
 		defaults: {
 			name: 'Pipelex',
@@ -316,6 +390,11 @@ export class Pipelex implements INodeType {
 			},
 		],
 		properties: [
+			// Four operations mirroring the mthds-js client surface (start /
+			// waitForResult / getRunResult — SDK conveniences over the MTHDS
+			// Protocol routes). Ordered by typical usage, not alphabetically
+			// (the sort lint is advisory and 4 options is under the
+			// n8n-nodes-base alphabetize threshold).
 			{
 				displayName: 'Operation',
 				name: 'operation',
@@ -323,26 +402,40 @@ export class Pipelex implements INodeType {
 				noDataExpression: true,
 				options: [
 					{
-						name: 'Execute Pipeline',
-						value: 'execute',
-						action: 'Execute a pipeline and wait for its result',
+						name: 'Start & Wait for Result',
+						value: 'startAndPoll',
+						action: 'Start a pipeline and wait for its result',
 						description:
-							'Start a durable run and poll internally until it finishes — paste your method + inputs, run, get the result. If Max Wait is exceeded, returns the pipeline_run_id to fetch later with Get Run Result.',
+							'Start a durable run and poll internally until it finishes — paste your method + inputs, run, get the result. If Max Wait is exceeded, returns the pipeline_run_id to fetch later.',
+					},
+					{
+						name: 'Start Pipeline',
+						value: 'start',
+						action: 'Start a pipeline',
+						description:
+							'Start a durable run and return immediately with its pipeline_run_id (no waiting) — collect the result later with Poll & Get Result or Get Run Result, even from another workflow',
+					},
+					{
+						name: 'Poll & Get Result',
+						value: 'poll',
+						action: 'Poll a run until its result is ready',
+						description:
+							'Wait for an already-started run by its pipeline_run_id: poll until it finishes or Max Wait is exceeded (then returns a "still running" output, not an error)',
 					},
 					{
 						name: 'Get Run Result',
 						value: 'getResult',
 						action: 'Get a run result',
 						description:
-							'Fetch a run result once by its pipeline_run_id (no polling) — the follow-up for a run that outlived Max Wait',
+							'Fetch a run result once by its pipeline_run_id (no polling) — returns status RUNNING while still in flight, the result when completed',
 					},
 				],
-				default: 'execute',
+				default: 'startAndPoll',
 			},
 
-			// ── Pipeline definition (Execute Pipeline) ────────────────────────────
-			// Field order: MTHDS Bundles (the big payload) → Inputs → Pipe Code →
-			// Method ID → optional overrides. Run source rule (enforced at
+			// ── Pipeline definition (Start & Wait for Result / Start Pipeline) ────
+			// Field order: MTHDS Bundles (the big payload) → Method ID → Inputs →
+			// Pipe Code → optional overrides. Run source rule (enforced at
 			// runtime, mirroring the server): at least one of Pipe Code / MTHDS
 			// Bundles / Method ID. Method ID combines with MTHDS Bundles —
 			// inline bundles run, method_id links the run to the stored method.
@@ -358,10 +451,24 @@ export class Pipelex implements INodeType {
 				default: [],
 				placeholder: 'Enter MTHDS bundle content...',
 				description:
-					'One or more inline MTHDS bundle contents (sent as mthds_contents). Mutually exclusive with Method ID.',
+					'One or more inline MTHDS bundle contents (sent as mthds_contents). Combinable with Method ID — inline bundles run, method_id links the run to the stored method.',
 				displayOptions: {
 					show: {
-						operation: ['execute'],
+						operation: START_OPERATIONS,
+					},
+				},
+			},
+			{
+				displayName: 'Method ID',
+				name: 'methodId',
+				type: 'string',
+				default: '',
+				placeholder: 'e.g., my-stored-method-ID',
+				description:
+					'ID of a stored method whose MTHDS source supplies the bundle (sent as method_id; hosted API only). Combinable with MTHDS Bundles, or usable alone instead of pasting them inline.',
+				displayOptions: {
+					show: {
+						operation: START_OPERATIONS,
 					},
 				},
 			},
@@ -374,7 +481,7 @@ export class Pipelex implements INodeType {
 					'The inputs for the pipeline. Defaults to {} server-side if omitted. See <a href="https://docs.pipelex.com/pages/api/" target="_blank">Pipelex API docs</a> for the expected format.',
 				displayOptions: {
 					show: {
-						operation: ['execute'],
+						operation: START_OPERATIONS,
 					},
 				},
 			},
@@ -388,21 +495,7 @@ export class Pipelex implements INodeType {
 					'The code of the pipe to execute (registered on the server, or defined in the MTHDS Bundles)',
 				displayOptions: {
 					show: {
-						operation: ['execute'],
-					},
-				},
-			},
-			{
-				displayName: 'Method ID',
-				name: 'methodId',
-				type: 'string',
-				default: '',
-				placeholder: 'e.g., my-stored-method-ID',
-				description:
-					'ID of a stored method whose MTHDS source supplies the bundle (sent as method_id; hosted API only). Mutually exclusive with MTHDS Bundles — an alternative to pasting them inline.',
-				displayOptions: {
-					show: {
-						operation: ['execute'],
+						operation: START_OPERATIONS,
 					},
 				},
 			},
@@ -414,7 +507,7 @@ export class Pipelex implements INodeType {
 				description: 'Optional name of the output variable',
 				displayOptions: {
 					show: {
-						operation: ['execute'],
+						operation: START_OPERATIONS,
 					},
 				},
 			},
@@ -426,7 +519,7 @@ export class Pipelex implements INodeType {
 				description: 'Optional output multiplicity',
 				displayOptions: {
 					show: {
-						operation: ['execute'],
+						operation: START_OPERATIONS,
 					},
 				},
 			},
@@ -439,10 +532,29 @@ export class Pipelex implements INodeType {
 					'Optional override for the dynamic output concept ref (sent as dynamic_output_concept_ref)',
 				displayOptions: {
 					show: {
-						operation: ['execute'],
+						operation: START_OPERATIONS,
 					},
 				},
 			},
+
+			// ── Run target (Poll & Get Result / Get Run Result) ───────────────────
+			{
+				displayName: 'Pipeline Run ID',
+				name: 'runId',
+				type: 'string',
+				default: '',
+				required: true,
+				placeholder: 'e.g., f56566eb-1b60-4e5b-834e-0cdcf3bf1374',
+				description:
+					'The pipeline_run_id returned by Start Pipeline (or by a "still running" output). Map the upstream pipeline_run_id field here.',
+				displayOptions: {
+					show: {
+						operation: RUN_ID_OPERATIONS,
+					},
+				},
+			},
+
+			// ── Polling control (Start & Wait for Result / Poll & Get Result) ─────
 			{
 				displayName: 'Max Wait (Seconds)',
 				name: 'maxWaitSeconds',
@@ -452,27 +564,10 @@ export class Pipelex implements INodeType {
 					minValue: 0,
 				},
 				description:
-					'Maximum seconds to wait for the run to finish (default 300). If exceeded, the node returns the pipeline_run_id with a "still running" message so you can fetch the result later with "Get Run Result". 0 waits indefinitely (only sensible on self-hosted n8n without execution timeouts).',
+					'Maximum seconds to wait for the run to finish (default 300). If exceeded, the node returns the pipeline_run_id with a "still running" message so you can fetch the result later with "Get Run Result" or keep waiting with "Poll & Get Result". 0 waits indefinitely (only sensible on self-hosted n8n without execution timeouts).',
 				displayOptions: {
 					show: {
-						operation: ['execute'],
-					},
-				},
-			},
-
-			// ── Run target (Get Run Result) ───────────────────────────────────────
-			{
-				displayName: 'Pipeline Run ID',
-				name: 'runId',
-				type: 'string',
-				default: '',
-				required: true,
-				placeholder: 'e.g., f56566eb-1b60-4e5b-834e-0cdcf3bf1374',
-				description:
-					'The pipeline_run_id returned by Execute Pipeline (in its "still running" output). Map the upstream pipeline_run_id field here.',
-				displayOptions: {
-					show: {
-						operation: ['getResult'],
+						operation: POLLING_OPERATIONS,
 					},
 				},
 			},
@@ -483,27 +578,36 @@ export class Pipelex implements INodeType {
 		const items = this.getInputData();
 		const returnData: INodeExecutionData[] = [];
 
+		// The Authorization header is built manually from the credential (see
+		// buildApiConnection) — the credential deliberately has no generic
+		// `authenticate` block, so n8n does not inject a "Custom API Call"
+		// entry into the Operation dropdown.
 		const credentials = await this.getCredentials('piplexApi');
-		const baseUrl = (credentials.baseUrl as string).replace(/\/$/, '');
+		const conn = buildApiConnection(credentials);
 		const operation = this.getNodeParameter('operation', 0) as string;
 
 		for (let i = 0; i < items.length; i++) {
 			try {
 				let json: IDataObject;
-				// Legacy saved-operation values from the published 0.0.x node are
-				// mapped rather than rejected: `start`/`startAndPoll` → the unified
-				// internal-poll execute (same inputs; the output's pipeline_run_id
-				// still supports Get Run Result); `poll` → the single-shot
-				// Get Run Result (feed the id back in a loop for repeated polling).
 				switch (operation) {
-					case 'execute':
-					case 'start':
+					// `execute` is the saved-operation value of the published 0.0.x
+					// node (its start+internal-poll "Execute Pipeline" op). It is no
+					// longer offered in the dropdown but keeps mapping to the same
+					// semantics — Start & Wait for Result — so existing workflows
+					// keep running unchanged. (Comment sits above the case pair: a
+					// comment-only case would trip `no-fallthrough`.)
 					case 'startAndPoll':
-						json = await executePipeline(this, baseUrl, i);
+					case 'execute':
+						json = await startAndWaitForResult(this, conn, i);
+						break;
+					case 'start':
+						json = await startPipeline(this, conn, i);
+						break;
+					case 'poll':
+						json = await pollRunResult(this, conn, i);
 						break;
 					case 'getResult':
-					case 'poll':
-						json = await getRunResult(this, baseUrl, i);
+						json = await getRunResult(this, conn, i);
 						break;
 					default:
 						throw new NodeOperationError(this.getNode(), `Unknown operation: ${operation}`, {
