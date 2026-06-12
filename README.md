@@ -48,29 +48,11 @@ Learn more about Pipelex:
 
 ### Prerequisites
 
-Before installing this node, you'll need access to a **Pipelex API server**. Choose one option:
+This node runs your pipelines through the **hosted Pipelex API's durable run lifecycle**: it starts a run via `POST /v1/start` and polls `GET /v1/runs/{pipeline_run_id}/results` internally until the result is ready. The credential's **Base URL** defaults to the hosted API at **`https://api.pipelex.com`**.
 
-#### Option A: Use the hosted Pipelex API (Coming Soon)
+> 🔑 **On the hosted API (`api.pipelex.com`), run access is gated for now.** Starting runs there currently requires an **admin / `runs:execute`-scoped** key. The credential **Test** only checks that your token is valid, so a non-scoped key will test green but return a clear *"lacks runs access"* error when you actually run a pipeline. Join the [waitlist](https://go.pipelex.com/waitlist) to be notified when self-serve run access opens up.
 
-The hosted API will live at **`https://api.pipelex.com`** — it's the default Base URL on the credential. Public access isn't open yet; join the [waitlist](https://go.pipelex.com/waitlist) to be notified when it launches.
-
-#### Option B: Self-host with Docker (Recommended for now)
-
-Run your own Pipelex API server using the official image (see the [pipelex-api repo](https://github.com/Pipelex/pipelex-api) for full configuration):
-
-```bash
-# Pull the official Docker image
-docker pull pipelex/pipelex-api
-
-# Run with a Pipelex Gateway API key (get one at https://app.pipelex.com)
-docker run --name pipelex-api -p 8081:8081 \
-  -e PIPELEX_GATEWAY_API_KEY=your-pipelex-gateway-api-key \
-  pipelex/pipelex-api:latest
-```
-
-To require authentication on a self-hosted server, add `-e AUTH_MODE=api_key -e API_KEY=your-secret`. See the [pipelex-api `.env.example`](https://github.com/Pipelex/pipelex-api/blob/main/.env.example) and the [Pipelex API documentation](https://docs.pipelex.com/pages/api/) for full setup details.
-
-> ⚠️ **Running on n8n Cloud or a deployed n8n instance?** `http://localhost:8081` is only reachable from the same machine as the API. Host the Docker image somewhere n8n can reach it — a small VM, a managed host like Render/Fly.io/Railway, or expose it via a tunnel such as ngrok — and use that public URL as the credential's **Base URL**. Only self-hosted n8n on the same machine can use `localhost`/`host.docker.internal`.
+> ℹ️ **Hosted-only:** the run-lifecycle polling routes (`/v1/runs/*`) and the `Method ID` field are hosted-API extensions, not part of the bare MTHDS Protocol — a bare runner does not implement them. To use your own backend, point the Base URL at a server exposing the same hosted surface (`/v1/start`, `/v1/runs/{pipeline_run_id}/results`, `/v1/auth/verify`).
 
 ### Install the n8n Community Node
 
@@ -87,41 +69,54 @@ This node requires a **Pipelex API credential** to authenticate with your Pipele
 1. In your n8n workflow, add a Pipelex node
 2. Click on **Credential to connect with** → **Create New Credential**
 3. Fill in:
-   - **Base URL** — defaults to `https://api.pipelex.com` (hosted API, coming soon). For now use `http://localhost:8081` (or `http://host.docker.internal:8081` from Docker) pointing at your self-hosted server.
+   - **Base URL** — defaults to `https://api.pipelex.com` (the hosted Pipelex API). Point it at your own server if you self-host the hosted run surface.
    - **Bearer Token** — your Pipelex API token (sent as `Authorization: Bearer <token>`)
-4. (Optional) Click **Test** — the credential is verified against `GET /me` on your base URL.
+4. (Optional) Click **Test** — the credential is verified against `GET /v1/auth/verify` on your base URL.
 
-**Where to get your Bearer Token:**
-- Hosted API (coming soon at `https://api.pipelex.com`): join the [waitlist](https://go.pipelex.com/waitlist)
-- Self-hosting with `AUTH_MODE=api_key`: use the `API_KEY` you set when starting the container
+> ⚠️ The credential Test only confirms your token is **valid**, not that it can **start runs**. Running a pipeline needs a key with runs access (admin / `runs:execute` scope, see above). A valid-but-unscoped key passes the Test and then returns an actionable error on Run.
+
+**Where to get your Bearer Token:** create one at [app.pipelex.com](https://app.pipelex.com/). Hosted run access is gated for now — join the [waitlist](https://go.pipelex.com/waitlist).
 
 ---
 
 ## Node Configuration
 
-The Pipelex node exposes a **Pipeline** resource with a single **Execute** operation.
+The Pipelex node has one **Operation** selector with four operations, mirroring the mthds-js client surface (`start` / `waitForResult` / `getRunResult` — SDK conveniences over the MTHDS Protocol routes):
 
-### Required Parameters
+| Operation | What it does | Endpoint | Returns |
+|---|---|---|---|
+| **Start & Wait for Result** (default) | Starts a durable run and polls internally until it finishes — paste, run, get the result. The polling is invisible: no Wait-node loop to assemble. If **Max Wait** (default 300s) is exceeded, returns the `pipeline_run_id` with a "still running" message instead of failing. | `POST /v1/start` then `GET /v1/runs/{pipeline_run_id}/results` | `{ status, pipeline_run_id, main_stuff }` |
+| **Start Pipeline** | Starts a durable run and returns **immediately** — no waiting. The output's `pipeline_run_id` is the point: feed it to Poll & Get Result or Get Run Result later, even from another workflow branch or a separate scheduled workflow. | `POST /v1/start` | `{ pipeline_run_id, state, created_at }` (the StartAck) |
+| **Poll & Get Result** | Waits for an **already-started** run by `pipeline_run_id`: polls until it finishes or Max Wait is exceeded (then the same "still running" output, not an error). | `GET /v1/runs/{pipeline_run_id}/results` (polled) | `{ status, pipeline_run_id, main_stuff }` |
+| **Get Run Result** | Fetches a run's result **once** by `pipeline_run_id` — no polling. Returns `status: "RUNNING"` while still in flight, the result when `COMPLETED`. | `GET /v1/runs/{pipeline_run_id}/results` | `{ status, pipeline_run_id, main_stuff }` |
+
+**Which one to use?**
+
+- **Quick runs** → **Start & Wait for Result**: one node, start to result.
+- **Long runs** → **Start Pipeline**, then **Poll & Get Result** later (or on another workflow branch) when you actually need the result.
+- **Webhook-style / fire-and-collect** → **Start Pipeline**, then **Get Run Result** on a schedule until it reports `COMPLETED`.
+
+> ℹ️ The published 0.0.x `execute` operation value (the old "Execute Pipeline") still executes as a hidden alias of **Start & Wait for Result** — existing saved workflows keep running without edits.
+
+**Pipeline-definition fields** (Start & Wait for Result / Start Pipeline):
 
 | Parameter | API Field | Description |
-|-----------|-----------|-------------|
-| **Resource** | – | `Pipeline` (only resource for now) |
-| **Operation** | – | `Execute` — runs the pipeline and waits for the result |
-| **Pipe Code** | `pipe_code` | The code of a pre-registered pipeline to execute. Required unless you provide an `MTHDS Bundle` under Additional Fields. |
-| **Inputs** | `inputs` | JSON object whose keys match your pipeline's expected inputs |
+|---|---|---|
+| **MTHDS Bundles** | `mthds_contents` | One or more inline MTHDS bundles (a `string[]`). Combinable with Method ID — inline bundles run, `method_id` links the run to the stored method. |
+| **Inputs** | `inputs` | JSON object whose keys match your pipeline's expected inputs. Defaults to `{}`. |
+| **Pipe Code** | `pipe_code` | Code of the pipe to execute (registered on the server, or defined in the MTHDS Bundles). |
+| **Method ID** | `method_id` | ID of a stored method whose MTHDS source supplies the bundle (hosted API only) — the alternative to pasting bundles inline. |
+| **Output Name** | `output_name` | Optional name of the output variable. |
+| **Output Multiplicity** | `output_multiplicity` | Optional output multiplicity. |
+| **Dynamic Output Concept Ref** | `dynamic_output_concept_ref` | Optional override for the dynamic output concept ref. |
 
-### Additional Fields (optional)
+**Run target** (Poll & Get Result / Get Run Result): **Pipeline Run ID** — the `pipeline_run_id` returned by Start Pipeline (or by a "still running" output).
 
-All optional inputs are grouped under the **Additional Fields** collection:
+**Polling control** (Start & Wait for Result / Poll & Get Result): **Max Wait (Seconds)** — max seconds to wait for the run to finish (**default 300**, safe under typical n8n Cloud execution caps). On exceed, the node returns the `pipeline_run_id` + a "still running" message so you can fetch it later with **Get Run Result**. `0` waits indefinitely (only sensible on self-hosted n8n without execution timeouts). The server's `Retry-After` drives the poll cadence (5s when absent).
 
-| Parameter | API Field | Description |
-|-----------|-----------|-------------|
-| **MTHDS Bundle** | `mthds_contents` | Inline MTHDS bundle content (sent as a single-element `mthds_contents` array). Provide this if you don't use a pre-registered Pipe Code. |
-| **Output Name** | `output_name` | Name of the output variable to surface |
-| **Output Multiplicity** | `output_multiplicity` | Control the multiplicity of outputs |
-| **Dynamic Output Concept Code** | `dynamic_output_concept_code` | Override the output concept dynamically |
+**Note:** Provide at least one of `Pipe Code`, `MTHDS Bundles`, or `Method ID`. Learn more about the Pipelex API [here](https://docs.pipelex.com/pages/api/).
 
-**Note:** You must provide **either** `Pipe Code` **or** `MTHDS Bundle` (or both). Learn more about the Pipelex API [here](https://docs.pipelex.com/pages/api/).
+**No "Custom API Call" entry:** n8n injects that raw-HTTP operation into nodes whose credential declares a generic `authenticate` block. This node's credential doesn't (the node builds its `Authorization` header itself), so the dropdown contains only the four curated operations above.
 
 ---
 
@@ -130,15 +125,17 @@ All optional inputs are grouped under the **Additional Fields** collection:
 ### Quick Start
 
 1. **Add the Pipelex node** to your n8n workflow
-2. **Configure the credential** (Base URL + Bearer Token) — defaults to the upcoming hosted API at `https://api.pipelex.com`; point it at your self-hosted server for now
-3. **Pick the operation:** Resource `Pipeline` → Operation `Execute`
-4. **Choose execution mode:**
-   - **Option A**: Provide `Pipe Code` (for pre-registered pipelines)
-   - **Option B**: Open **Additional Fields** and paste inline MTHDS code into `MTHDS Bundle`
+2. **Configure the credential** (Base URL + Bearer Token) — defaults to `https://api.pipelex.com`
+3. **Pick the operation:**
+   - **Start & Wait for Result** (default) — start the run and get the result in one node; the polling happens internally
+   - **Start Pipeline** — start the run and return immediately with its `pipeline_run_id` (collect the result later)
+   - **Poll & Get Result** — wait for an already-started run by `pipeline_run_id` until it finishes (or Max Wait)
+   - **Get Run Result** — a one-shot, non-blocking fetch by `pipeline_run_id` (returns `status: "RUNNING"` while still running)
+4. **Provide the pipeline:** a `Pipe Code`, inline `MTHDS Bundles`, or a stored `Method ID`
 5. **Set Inputs** as a JSON object matching your pipeline's expected inputs
-6. **Execute** the workflow
+6. **Run** the workflow
 
-The node will return the pipeline execution results, which can be passed to subsequent nodes in your workflow. Learn more about the output format [here](https://docs.pipelex.com/pages/api/).
+Long-running pipelines: **Max Wait** (default 300s) caps how long the polling operations block the n8n execution. If a run outlives it, the node returns the `pipeline_run_id` with a "still running" message — feed that id to **Get Run Result** later (e.g. on a schedule) or to **Poll & Get Result** to keep waiting. Or skip the first wait entirely: **Start Pipeline** now, collect later. Learn more about the output format [here](https://docs.pipelex.com/pages/api/).
 
 ---
 

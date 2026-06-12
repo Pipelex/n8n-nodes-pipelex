@@ -1,6 +1,6 @@
 {
 	"name": "n8n-nodes-pipelex",
-	"version": "0.0.10",
+	"version": "0.1.0",
 	"description": "Pipelex n8n node package",
 	"license": "MIT",
 	"keywords": [
@@ -22,6 +22,8 @@
 		"lint:ts": "eslint --config eslint.config.ts.mjs .",
 		"lint:n8n": "eslint --config eslint.config.n8n.mjs .",
 		"scan:simulate": "eslint --config eslint.config.scan.mjs 'dist/**/*.js' 'dist/**/*.json' 'package.json'",
+		"test": "vitest run",
+		"test:watch": "vitest",
 		"format": "prettier --write .",
 		"prepublishOnly": "pnpm run build",
 		"postpublish": "sleep 10 && make check-published"
@@ -47,7 +49,8 @@
 		"eslint-plugin-import-x": "^4.16.2",
 		"eslint-plugin-n8n-nodes-base": "^1.16.6",
 		"typescript": "~5.6",
-		"typescript-eslint": "^8.0.0"
+		"typescript-eslint": "^8.0.0",
+		"vitest": "^4.1.8"
 	},
 	"peerDependencies": {
 		"n8n-workflow": "*"

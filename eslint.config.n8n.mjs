@@ -10,7 +10,11 @@ import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
 	{
-		ignores: ['dist/**', 'node_modules/**', '.venv/**', 'site/**'],
+		// `test/**` + `vitest.config.ts` are dev-only and never enter the published
+		// tarball (`files: ["dist"]`), so the real `@n8n/scan-community-package`
+		// never sees them. Exclude them from the compliance lint too — otherwise the
+		// dev `vitest/config` import trips `no-restricted-imports`.
+		ignores: ['dist/**', 'node_modules/**', '.venv/**', 'site/**', 'test/**', 'vitest.config.ts'],
 	},
 	{
 		files: ['**/*.ts'],
