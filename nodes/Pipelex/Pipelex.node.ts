@@ -223,7 +223,7 @@ async function pollForResultLoop(
 		);
 
 		if (outcome.kind === 'completed') {
-			return { status: 'COMPLETED', ...outcome.body };
+			return { ...outcome.body, status: 'COMPLETED' };
 		}
 		if (outcome.kind !== 'running') {
 			throwResultError(ctx, outcome, itemIndex);
@@ -387,7 +387,7 @@ async function getRunResult(
 		response.headers ?? {},
 	);
 	if (outcome.kind === 'completed') {
-		return { status: 'COMPLETED', ...outcome.body };
+		return { ...outcome.body, status: 'COMPLETED' };
 	}
 	if (outcome.kind === 'running') {
 		return {

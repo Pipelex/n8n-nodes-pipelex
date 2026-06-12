@@ -19,6 +19,7 @@
 - **Actionable 403.** A run rejected for lack of runs access surfaces a clear "needs an admin / `runs:execute`-scoped key" message — the credential test only validates the token, not run scope.
 - **Actionable 404.** A 404 on the results endpoint surfaces a clear message naming both real causes — a bad/expired `pipeline_run_id`, or a credential Base URL pointing at a runner with no durable run lifecycle — instead of a bare "Unexpected response status 404".
 - Fixed the runner override field name to `dynamic_output_concept_ref` (the old `_code` spelling was silently discarded by the runner).
+- The normalized `status: 'COMPLETED'` literal now wins over any `status` field that a result body might carry — downstream workflow branches always read the node's canonical completion signal.
 - Dev tooling: added Vitest unit tests (pure result mapper, request shaping, and both operation flows), wired `pnpm test` into `make check`, and added a Test CI workflow. Vitest is a devDependency only — the node still ships with zero runtime dependencies.
 - `make run` now launches the `@n8n/node-cli` dev server (no global `n8n` install required; hot-reloads on save). Note n8n requires Node.js `>=20.19 <= 24.x`.
 

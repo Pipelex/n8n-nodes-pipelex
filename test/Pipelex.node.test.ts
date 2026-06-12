@@ -273,6 +273,26 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		});
 	});
 
+	it("normalizes status to 'COMPLETED' even when the server body carries a different status", async () => {
+		// Defensive: the typed RunResults body has no top-level `status`, but if the
+		// server ever adds one (or relays a stale one), the node's normalized status
+		// must win — downstream branches read `status` as the completion signal.
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: { pipeCode: 'p', inputs: '{}' },
+			httpImpl: startThenResults(() =>
+				fullResponse(200, {
+					pipeline_run_id: 'run-1',
+					status: 'running',
+					main_stuff: { answer: 7 },
+				}),
+			),
+		});
+
+		const json = (await Pipelex.prototype.execute.call(ctx))[0][0].json;
+		expect(json.status).toBe('COMPLETED');
+	});
+
 	it('captures the error as an item when continueOnFail is on', async () => {
 		const { ctx } = makeContext({
 			operation: 'startAndPoll',
@@ -524,6 +544,24 @@ describe('Pipelex node — Get Run Result (single-shot fetch)', () => {
 
 		await Pipelex.prototype.execute.call(ctx);
 		expect(httpFn.mock.calls[0][0].url).toBe('https://api.test/v1/runs/run%2F..%2F1/results');
+	});
+
+	it("normalizes status to 'COMPLETED' even when the server body carries a different status", async () => {
+		// Same defensive guarantee as the startAndPoll path: the literal status
+		// must win over any status field in the response body.
+		const { ctx } = makeContext({
+			operation: 'getResult',
+			params: { runId: 'run-1' },
+			httpImpl: () =>
+				fullResponse(200, {
+					pipeline_run_id: 'run-1',
+					status: 'running',
+					main_stuff: { answer: 7 },
+				}),
+		});
+
+		const json = (await Pipelex.prototype.execute.call(ctx))[0][0].json;
+		expect(json.status).toBe('COMPLETED');
 	});
 
 	it('reports still-running (202) without looping', async () => {
