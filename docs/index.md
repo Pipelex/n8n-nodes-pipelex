@@ -30,8 +30,8 @@ Here is some n8n documentation about [installing community nodes](https://docs.n
    - Paste your **Bearer Token**
 
 3. **Configure the node**:
-   - Pick an **Operation**: `Start & Poll` (default — starts a run and waits for the result), `Execute (One-Shot)` (blocking, ~30s public-API cap), `Start Run` → `Poll for Result` (start now, wait later by `pipeline_run_id`), or `Get Result` (one-shot, non-blocking status check)
-   - Provide either a `Pipe Code` **or** inline `MTHDS Bundles`
+   - Pick an **Operation**: `Start & Wait for Result` (default — starts a run and polls internally until the result is ready), `Start Pipeline` (starts a run and returns its `pipeline_run_id` immediately), `Poll & Get Result` (waits for an already-started run by `pipeline_run_id`), or `Get Run Result` (one-shot, non-blocking fetch by `pipeline_run_id`)
+   - Provide a `Pipe Code`, inline `MTHDS Bundles`, or a stored `Method ID`
    - Set `Inputs` as a JSON object matching your pipeline's expected inputs
 
 4. **Copy paste an example from the [Examples](./examples.md) page**

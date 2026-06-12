@@ -2,19 +2,26 @@
 
 ## Operations
 
-The Pipelex node has one **Operation** selector with four operations:
+The Pipelex node has one **Operation** selector with four operations, mirroring the mthds-js client surface (`start` / `waitForResult` / `getRunResult`):
 
 | Operation | What it does | Endpoint |
 |---|---|---|
-| **Start & Poll** (default) | Start a durable run and poll internally until it finishes, then return the result. Waits indefinitely by default. | `POST /platform/v1/runs` → `GET …/by-id/{run_id}/result` |
-| **Execute (One-Shot)** | Blocking single request that returns the result directly. **Times out at ~30s on the public Pipelex API.** | `POST /runner/v1/pipeline/execute` |
-| **Start Run** | Start a durable run and return its `pipeline_run_id` immediately (no waiting). | `POST /platform/v1/runs` |
-| **Poll for Result** | Poll an existing run by `pipeline_run_id` until it finishes, then return the result. | `GET …/by-id/{run_id}/result` |
-| **Get Result** | Fetch a run's result **once** by `pipeline_run_id` (no polling). `done: false` while still running. | `GET …/by-id/{run_id}/result` |
+| **Start & Wait for Result** (default) | Start a durable run and poll internally until it finishes, then return the result. The polling is invisible — no Wait-node loop to assemble. | `POST /v1/start` → `GET /v1/runs/{pipeline_run_id}/results` |
+| **Start Pipeline** | Start a durable run and return **immediately** with the StartAck — `{ pipeline_run_id, state, created_at }`. No waiting. | `POST /v1/start` |
+| **Poll & Get Result** | Wait for an **already-started** run by `pipeline_run_id`: poll until it finishes or Max Wait is exceeded. | `GET /v1/runs/{pipeline_run_id}/results` (polled) |
+| **Get Run Result** | Fetch a run's result **once** by `pipeline_run_id` (no polling). `status: "RUNNING"` while still running. | `GET /v1/runs/{pipeline_run_id}/results` |
 
-Use **Execute** for quick pipelines that finish inside the ~30s public-API window. Use **Start & Poll** for anything longer (it polls a durable run, so it never hits that ceiling). Use **Start Run** + **Poll for Result** when you want to kick off a run in one place and collect it elsewhere — the `pipeline_run_id` is the handle. Use **Get Result** for a single non-blocking status check (e.g. on a schedule or behind your own wait logic) — it returns `done: false` while the run is still in flight instead of waiting.
+**Which one to use?**
 
-The polling operations honor the server's `Retry-After` and expose a **Max Wait (Seconds)** control: `0` (default) waits indefinitely; a positive value caps the wait and, on exceed, returns the `pipeline_run_id` + a "still running" message so you can fetch the result later with **Poll for Result**.
+- **Quick runs** → **Start & Wait for Result**: the common case end to end. It starts the run (a durable, server-side run that survives any gateway timeout) and polls until the result is ready, honoring the server's `Retry-After` (5s cadence when absent). **Max Wait (Seconds)** (default **300**) caps how long the node blocks the n8n execution: on exceed it returns the `pipeline_run_id` + a "still running" message — a usable output, not an error. `0` waits indefinitely (only sensible on self-hosted n8n without execution timeouts).
+- **Long runs** → **Start Pipeline** now, then **Poll & Get Result** later — in the same workflow after other work, on another workflow branch, or in a different workflow entirely. Poll & Get Result uses the exact same poll loop and Max Wait semantics, just fed by your `pipeline_run_id` instead of a fresh start.
+- **Webhook-style / fire-and-collect** → **Start Pipeline**, store the `pipeline_run_id`, and check in with **Get Run Result** on a schedule: it fetches once, returning `status: "RUNNING"` until the run completes — no blocking anywhere.
+
+Both start operations carry an `Idempotency-Key` derived from the n8n execution, node, and item, so an n8n "Retry On Fail" replays the same run instead of creating a duplicate paid run.
+
+> ℹ️ **Upgrading from 0.0.x?** The old `execute` operation value ("Execute Pipeline") still executes as a hidden alias of **Start & Wait for Result** — saved workflows keep running without edits. And there is no more injected **Custom API Call** entry in the dropdown: the credential no longer declares a generic `authenticate` block (the node sends its own `Authorization` header), which is the trigger n8n uses to inject that raw-HTTP escape hatch.
+
+> ℹ️ **Hosted-only:** the run-lifecycle polling routes (`/v1/runs/*`) and the `Method ID` field are hosted-API extensions, not part of the bare MTHDS Protocol — a bare runner does not implement them.
 
 ## Credential: Base URL
 
@@ -22,20 +29,20 @@ The Pipelex API base URL is configured on the credential, not on the node. Open 
 
 **Examples:**
 
-- Hosted platform (default): `https://api.pipelex.com` — run access is gated for now; join the [waitlist](https://go.pipelex.com/waitlist).
-- Your own server exposing the platform run surface (`/platform/v1/runs*`) and/or the runner (`/runner/v1/pipeline/*`): `https://your-pipelex-host.example.com` (a self-hosting guide is in the works).
+- Hosted API (default): `https://api.pipelex.com` — run access is gated for now; join the [waitlist](https://go.pipelex.com/waitlist).
+- Your own server exposing the same hosted surface (`/v1/start`, `/v1/runs/{pipeline_run_id}/results`, `/v1/auth/verify`): `https://your-pipelex-host.example.com` (a self-hosting guide is in the works).
 
 > ⚠️ **Running on n8n Cloud or any deployed n8n instance?** `localhost`/`127.0.0.1` URLs won't be reachable from n8n. Use a Base URL that n8n can reach over the network.
 
-The credential test hits `GET <Base URL>/platform/v1/auth/verify` to verify both reachability and the Bearer Token. Note it only checks the token is **valid** — not that it can **start runs**. On the hosted API, running a pipeline currently needs an admin / `runs:execute`-scoped key, so a valid-but-unscoped key passes the test and then returns an actionable "lacks runs access" error on Start/Execute.
+The credential test hits `GET <Base URL>/v1/auth/verify` to verify both reachability and the Bearer Token. Note it only checks the token is **valid** — not that it can **start runs**. On the hosted API, running a pipeline currently needs an admin / `runs:execute`-scoped key, so a valid-but-unscoped key passes the test and then returns an actionable "lacks runs access" error when you start a run.
 
 ---
 
 ## Understanding `pipe_code` and `mthds_contents`
 
-The Pipelex node offers flexibility in how you define and execute pipelines. You can either reference a pre-registered pipeline, provide an inline MTHDS bundle, or combine both approaches. These fields apply to **Execute**, **Start**, and **Start & Poll** (the operations that submit a pipeline).
+The Pipelex node offers flexibility in how you define and execute pipelines. You can reference a pre-registered pipeline, provide an inline MTHDS bundle, combine both, or run a **stored method** by ID. These fields apply to the two start operations — **Start & Wait for Result** and **Start Pipeline** (the operations that submit a pipeline).
 
-Inline bundles are set in the **MTHDS Bundles** field and sent as `mthds_contents` (a `string[]` — add one entry per bundle).
+Inline bundles are set in the **MTHDS Bundles** field and sent as `mthds_contents` (a `string[]` — add one entry per bundle). Alternatively, set **Method ID** (`method_id`) to run a method stored in your org's catalog on the hosted API — its MTHDS source supplies the bundle. Setting both is allowed: the inline MTHDS Bundles are what runs, and `method_id` links the run to the stored method in your run history.
 
 ### Case 1: Only `pipe_code` (Pipeline Library)
 
@@ -208,7 +215,7 @@ Pass data from previous nodes:
 
 ## Optional output controls
 
-These optional fields are surfaced at the top level on the **Execute**, **Start**, and **Start & Poll** operations (they are forwarded verbatim to the runner).
+These optional fields are surfaced at the top level on both start operations (they are forwarded verbatim to the runner).
 
 ### Output Name (`output_name`)
 Specify the name you want to give to the main pipe.
@@ -225,13 +232,10 @@ Controls whether the pipeline returns a single item or multiple items (array).
 ### Dynamic Output Concept Ref (`dynamic_output_concept_ref`)
 Override the output concept. See more [here](https://docs.pipelex.com/pages/build-reliable-ai-workflows-with-pipelex/define_your_concepts/#dynamiccontent).
 
-## Polling controls (Poll for Result / Start & Poll)
+## Polling control (Start & Wait for Result / Poll & Get Result)
 
 ### Max Wait (Seconds) (`maxWaitSeconds`)
-Maximum seconds to wait for the run to finish. **`0` (default) waits indefinitely.** If set above 0 and exceeded, the node returns the `pipeline_run_id` with a "still running" message — fetch the result later with the **Poll for Result** operation.
-
-### Poll Interval (Seconds) (`pollIntervalSeconds`)
-How often to check whether the run has finished (default 2). The server's `Retry-After` overrides this when it asks for a longer wait.
+Maximum seconds to wait for the run to finish (**default 300** — safely under typical n8n Cloud execution caps). If exceeded, the node returns the `pipeline_run_id` with a "still running" message — fetch the result later with the **Get Run Result** operation, or keep waiting with **Poll & Get Result**. `0` waits indefinitely (only sensible on self-hosted n8n without execution timeouts). The poll cadence follows the server's `Retry-After` header (5s when absent).
 
 ---
 

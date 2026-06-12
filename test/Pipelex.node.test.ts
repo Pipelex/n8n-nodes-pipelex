@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { IExecuteFunctions, IN8nHttpFullResponse } from 'n8n-workflow';
+import type { IExecuteFunctions, IN8nHttpFullResponse, INodeProperties } from 'n8n-workflow';
 
 // Make the internal poll loop instant — replace the real (timer-backed)
 // sleepWithAbort with a no-op, keep everything else (NodeApiError, etc.) real.
@@ -8,7 +8,11 @@ vi.mock('n8n-workflow', async (importOriginal) => {
 	return { ...actual, sleepWithAbort: vi.fn(async () => {}) };
 });
 
-import { EXECUTE_TIMEOUT_MESSAGE, FORBIDDEN_MESSAGE } from '../nodes/Pipelex/GenericFunctions';
+import {
+	FORBIDDEN_MESSAGE,
+	NOT_FOUND_MESSAGE,
+	SERVICE_UNAVAILABLE_MESSAGE,
+} from '../nodes/Pipelex/GenericFunctions';
 import { Pipelex } from '../nodes/Pipelex/Pipelex.node';
 
 type HttpImpl = (options: {
@@ -30,13 +34,13 @@ function makeContext(opts: ContextOptions): {
 	httpFn: ReturnType<typeof vi.fn>;
 } {
 	const params = opts.params ?? {};
-	const httpFn = vi.fn(async (_credentialsName: string, options: { url: string }) =>
-		opts.httpImpl(options),
-	);
+	// The node uses ctx.helpers.httpRequest (manual Authorization header — the
+	// credential has no `authenticate` block; see PiplexApi.credentials.ts).
+	const httpFn = vi.fn(async (options: { url: string }) => opts.httpImpl(options));
 
 	const ctx = {
 		getInputData: () => opts.items ?? [{ json: {} }],
-		getCredentials: async () => ({ baseUrl: 'https://api.test' }),
+		getCredentials: async () => ({ baseUrl: 'https://api.test', apiKey: 'secret-token' }),
 		getNodeParameter: (name: string, _itemIndex: number, fallback?: unknown) => {
 			if (name === 'operation') return opts.operation;
 			return name in params ? params[name] : fallback;
@@ -45,7 +49,7 @@ function makeContext(opts: ContextOptions): {
 		getExecutionCancelSignal: () => undefined,
 		continueOnFail: () => opts.continueOnFail ?? false,
 		getNode: () => ({ id: 'node-1', name: 'Pipelex', type: 'pipelex', typeVersion: 1 }),
-		helpers: { httpRequestWithAuthentication: httpFn },
+		helpers: { httpRequest: httpFn },
 	} as unknown as IExecuteFunctions;
 
 	return { ctx, httpFn };
@@ -59,121 +63,189 @@ function fullResponse(
 	return { statusCode, body, headers } as IN8nHttpFullResponse;
 }
 
+const START_ACK = { pipeline_run_id: 'run-1', state: 'STARTED', created_at: '2026-06-10T00:00:00Z' };
+
 const COMPLETED_RESULT = {
 	pipeline_run_id: 'run-1',
 	main_stuff: { answer: 42 },
 	graph_spec: { nodes: [] },
 };
 
+/** start → 202 StartAck; results → whatever `resultImpl` says. */
+function startThenResults(resultImpl: HttpImpl): HttpImpl {
+	return (options) => (options.method === 'POST' ? fullResponse(202, START_ACK) : resultImpl(options));
+}
+
 afterEach(() => vi.restoreAllMocks());
 
-describe('Pipelex node — Execute (one-shot)', () => {
+describe('Pipelex node — Start & Wait for Result (start + internal poll)', () => {
 	beforeEach(() => vi.clearAllMocks());
 
-	it('returns the runner response body verbatim', async () => {
+	it('starts via POST /v1/start (with idempotency key + manual auth header) then polls /v1/runs/{id}/results to completion', async () => {
 		const { ctx, httpFn } = makeContext({
-			operation: 'execute',
+			operation: 'startAndPoll',
 			params: { pipeCode: 'my-pipe', inputs: '{"a":1}' },
-			httpImpl: () => fullResponse(200, { pipe_output: { result: 'ok' } }),
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
 		});
 
 		const result = await Pipelex.prototype.execute.call(ctx);
-		expect(result[0][0].json.pipe_output).toEqual({ result: 'ok' });
-		expect(httpFn.mock.calls[0][1].url).toBe('https://api.test/runner/v1/pipeline/execute');
+		const json = result[0][0].json;
+		expect(json.status).toBe('COMPLETED');
+		expect(json.main_stuff).toEqual({ answer: 42 });
+		// n8n output strips the heavy graph_spec artifact and the legacy `done`
+		// flag; `status` is the single completion signal.
+		expect(json.graph_spec).toBeUndefined();
+		expect(json.done).toBeUndefined();
+
+		const startCall = httpFn.mock.calls[0][0];
+		expect(startCall.url).toBe('https://api.test/v1/start');
+		expect(startCall.headers['Idempotency-Key']).toBe('exec-1:node-1:0');
+		expect(startCall.headers.Authorization).toBe('Bearer secret-token');
+		expect(startCall.body).toEqual({ pipe_code: 'my-pipe', inputs: { a: 1 } });
+		const resultCall = httpFn.mock.calls[1][0];
+		expect(resultCall.url).toBe('https://api.test/v1/runs/run-1/results');
+		expect(resultCall.headers.Authorization).toBe('Bearer secret-token');
 	});
 
-	it('translates a ~30s gateway timeout into an actionable message', async () => {
-		// startedAt = 0, elapsed = 30s → past the gateway threshold.
-		vi.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValue(30_000);
-		const { ctx } = makeContext({
-			operation: 'execute',
-			params: { pipeCode: 'p', inputs: '{}' },
-			httpImpl: () => fullResponse(504, { detail: 'gateway timeout' }),
-		});
-
-		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(EXECUTE_TIMEOUT_MESSAGE);
-	});
-
-	it('surfaces a non-timeout error with its server detail', async () => {
-		const { ctx } = makeContext({
-			operation: 'execute',
-			params: { pipeCode: 'p', inputs: '{}' },
-			httpImpl: () => fullResponse(400, { detail: 'bad pipe' }),
-		});
-
-		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow('bad pipe');
-	});
-});
-
-describe('Pipelex node — Start', () => {
-	beforeEach(() => vi.clearAllMocks());
-
-	it('returns the pipeline_run_id without polling', async () => {
+	it('sends method_id in the start body (stored-method alternative to inline bundles)', async () => {
 		const { ctx, httpFn } = makeContext({
-			operation: 'start',
+			operation: 'startAndPoll',
+			params: { methodId: 'method-42', inputs: '{}' },
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		expect(httpFn.mock.calls[0][0].body).toEqual({ method_id: 'method-42', inputs: {} });
+	});
+
+	it('sends method_id + MTHDS bundles together (inline bundles run; method_id links run history)', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: { methodId: 'method-42', mthdsContents: ['bundle'], inputs: '{}' },
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		expect(httpFn.mock.calls[0][0].body).toEqual({
+			method_id: 'method-42',
+			mthds_contents: ['bundle'],
+			inputs: {},
+		});
+	});
+
+	it('keeps polling while running (202), honoring Retry-After, then returns when completed', async () => {
+		let resultCalls = 0;
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
 			params: { pipeCode: 'p', inputs: '{}' },
-			httpImpl: () => fullResponse(201, { pipeline_run_id: 'run-1', status: 'RUNNING' }),
+			httpImpl: startThenResults(() => {
+				resultCalls += 1;
+				return resultCalls < 3
+					? fullResponse(202, {}, { 'retry-after': '1' })
+					: fullResponse(200, COMPLETED_RESULT);
+			}),
 		});
 
 		const result = await Pipelex.prototype.execute.call(ctx);
-		expect(result[0][0].json.pipeline_run_id).toBe('run-1');
-		expect(httpFn).toHaveBeenCalledTimes(1);
-		expect(httpFn.mock.calls[0][1].url).toBe('https://api.test/platform/v1/runs');
-		expect(httpFn.mock.calls[0][1].headers['Idempotency-Key']).toBe('exec-1:node-1:0');
+		expect(resultCalls).toBe(3);
+		expect(result[0][0].json.status).toBe('COMPLETED');
 	});
 
-	it('raises an actionable NodeApiError on a 403 start', async () => {
+	it('treats a 503 mid-poll as still running (keeps polling, run is not lost)', async () => {
+		let resultCalls = 0;
 		const { ctx } = makeContext({
-			operation: 'start',
+			operation: 'startAndPoll',
+			params: { pipeCode: 'p', inputs: '{}' },
+			httpImpl: startThenResults(() => {
+				resultCalls += 1;
+				return resultCalls < 3 ? fullResponse(503, {}) : fullResponse(200, COMPLETED_RESULT);
+			}),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(resultCalls).toBe(3);
+		expect(result[0][0].json.status).toBe('COMPLETED');
+	});
+
+	it('trips the consecutive-503 ceiling on a sustained outage (even unbounded), surfacing the run_id', async () => {
+		let resultCalls = 0;
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			// maxWaitSeconds: 0 = unbounded; only the consecutive-503 ceiling can stop this.
+			params: { pipeCode: 'p', inputs: '{}', maxWaitSeconds: 0 },
+			httpImpl: startThenResults(() => {
+				resultCalls += 1;
+				return fullResponse(503, {});
+			}),
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(SERVICE_UNAVAILABLE_MESSAGE);
+		// 5 tolerated, the 6th consecutive trips the ceiling.
+		expect(resultCalls).toBe(6);
+	});
+
+	it('resets the 503 counter on a healthy 202 between blips (no false outage trip)', async () => {
+		let resultCalls = 0;
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: { pipeCode: 'p', inputs: '{}', maxWaitSeconds: 0 },
+			httpImpl: startThenResults(() => {
+				resultCalls += 1;
+				// 3x503, then a 202 (resets), then 3x503, then completed — never 6 in a row.
+				if (resultCalls === 4) return fullResponse(202, {});
+				if (resultCalls >= 8) return fullResponse(200, COMPLETED_RESULT);
+				return fullResponse(503, {});
+			}),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json.status).toBe('COMPLETED');
+		expect(resultCalls).toBe(8);
+	});
+
+	it('returns the pipeline_run_id with a "still running" output (not an error) when Max Wait is exceeded', async () => {
+		// deadline = 0 + 1*1000; remaining check sees now = 100_000 → exceeded.
+		vi.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValue(100_000);
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: { pipeCode: 'p', inputs: '{}', maxWaitSeconds: 1 },
+			httpImpl: startThenResults(() => fullResponse(202, {})),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		const json = result[0][0].json;
+		expect(json.status).toBe('RUNNING');
+		expect(json.pipeline_run_id).toBe('run-1');
+		expect(String(json.message)).toContain('Get Run Result');
+	});
+
+	it('raises an actionable NodeApiError on a 403 start (D3: unscoped key)', async () => {
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
 			params: { pipeCode: 'p', inputs: '{}' },
 			httpImpl: () => fullResponse(403, { detail: 'forbidden' }),
 		});
 
 		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(FORBIDDEN_MESSAGE);
 	});
-});
 
-describe('Pipelex node — Poll for Result', () => {
-	beforeEach(() => vi.clearAllMocks());
-
-	it('returns the completed result for a run id', async () => {
-		const { ctx, httpFn } = makeContext({
-			operation: 'poll',
-			params: { runId: 'run-1', maxWaitSeconds: 0 },
-			httpImpl: () => fullResponse(200, COMPLETED_RESULT),
+	it('surfaces a failed start with its problem detail', async () => {
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: { pipeCode: 'p', inputs: '{}' },
+			httpImpl: () => fullResponse(503, { detail: 'Failed to start pipeline' }),
 		});
 
-		const result = await Pipelex.prototype.execute.call(ctx);
-		const json = result[0][0].json;
-		expect(json.done).toBe(true);
-		expect(json.status).toBe('COMPLETED');
-		expect(json.main_stuff).toEqual({ answer: 42 });
-		expect(httpFn.mock.calls[0][1].url).toBe(
-			'https://api.test/platform/v1/runs/by-id/run-1/result',
-		);
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow('Failed to start pipeline');
 	});
 
-	it('keeps polling while running, then returns when completed (unbounded)', async () => {
-		let calls = 0;
+	it('raises on a failed (409) run with the server problem detail', async () => {
 		const { ctx } = makeContext({
-			operation: 'poll',
-			params: { runId: 'run-1', maxWaitSeconds: 0, pollIntervalSeconds: 1 },
-			httpImpl: () => {
-				calls += 1;
-				return calls < 3 ? fullResponse(202, {}, { 'retry-after': '1' }) : fullResponse(200, COMPLETED_RESULT);
-			},
-		});
-
-		const result = await Pipelex.prototype.execute.call(ctx);
-		expect(calls).toBe(3);
-		expect(result[0][0].json.status).toBe('COMPLETED');
-	});
-
-	it('raises on a failed (409) run', async () => {
-		const { ctx } = makeContext({
-			operation: 'poll',
-			params: { runId: 'run-1', maxWaitSeconds: 0 },
-			httpImpl: () => fullResponse(409, { detail: 'Run finished with status FAILED' }),
+			operation: 'startAndPoll',
+			params: { pipeCode: 'p', inputs: '{}' },
+			httpImpl: startThenResults(() =>
+				fullResponse(409, { detail: 'Run finished with status FAILED; no result available' }),
+			),
 		});
 
 		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(
@@ -181,115 +253,24 @@ describe('Pipelex node — Poll for Result', () => {
 		);
 	});
 
-	it('requires a run id', async () => {
-		const { ctx, httpFn } = makeContext({
-			operation: 'poll',
-			params: { runId: '' },
-			continueOnFail: true,
-			httpImpl: () => fullResponse(200, COMPLETED_RESULT),
-		});
-
-		const result = await Pipelex.prototype.execute.call(ctx);
-		expect(String(result[0][0].json.error)).toContain('Run ID is required');
-		expect(httpFn).not.toHaveBeenCalled();
-	});
-});
-
-describe('Pipelex node — Get Result (single-shot)', () => {
-	beforeEach(() => vi.clearAllMocks());
-
-	it('returns the completed result in one call', async () => {
-		const { ctx, httpFn } = makeContext({
-			operation: 'getResult',
-			params: { runId: 'run-1' },
-			httpImpl: () => fullResponse(200, COMPLETED_RESULT),
-		});
-
-		const result = await Pipelex.prototype.execute.call(ctx);
-		expect(result[0][0].json.status).toBe('COMPLETED');
-		expect(httpFn).toHaveBeenCalledTimes(1);
-		expect(httpFn.mock.calls[0][1].url).toBe(
-			'https://api.test/platform/v1/runs/by-id/run-1/result',
-		);
-	});
-
-	it('reports still-running without looping', async () => {
-		const { ctx, httpFn } = makeContext({
-			operation: 'getResult',
-			params: { runId: 'run-1' },
-			httpImpl: () => fullResponse(202, {}),
-		});
-
-		const result = await Pipelex.prototype.execute.call(ctx);
-		const json = result[0][0].json;
-		expect(json.done).toBe(false);
-		expect(json.status).toBe('RUNNING');
-		expect(httpFn).toHaveBeenCalledTimes(1);
-	});
-
-	it('raises on a failed (409) run', async () => {
-		const { ctx } = makeContext({
-			operation: 'getResult',
-			params: { runId: 'run-1' },
-			httpImpl: () => fullResponse(409, { detail: 'Run finished with status FAILED' }),
-		});
-
-		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(
-			'Run finished with status FAILED',
-		);
-	});
-
-	it('requires a run id', async () => {
-		const { ctx, httpFn } = makeContext({
-			operation: 'getResult',
-			params: { runId: '' },
-			continueOnFail: true,
-			httpImpl: () => fullResponse(200, COMPLETED_RESULT),
-		});
-
-		const result = await Pipelex.prototype.execute.call(ctx);
-		expect(String(result[0][0].json.error)).toContain('Run ID is required');
-		expect(httpFn).not.toHaveBeenCalled();
-	});
-});
-
-describe('Pipelex node — Start & Poll', () => {
-	beforeEach(() => vi.clearAllMocks());
-
-	it('starts a run (with idempotency key) then polls to completion', async () => {
-		const { ctx, httpFn } = makeContext({
-			operation: 'startAndPoll',
-			params: { pipeCode: 'p', inputs: '{}', maxWaitSeconds: 0 },
-			httpImpl: (options) =>
-				options.method === 'POST'
-					? fullResponse(201, { pipeline_run_id: 'run-1' })
-					: fullResponse(200, COMPLETED_RESULT),
-		});
-
-		const result = await Pipelex.prototype.execute.call(ctx);
-		expect(result[0][0].json.status).toBe('COMPLETED');
-		const startCall = httpFn.mock.calls.find((call) => call[1].method === 'POST');
-		expect(startCall?.[1].headers['Idempotency-Key']).toBe('exec-1:node-1:0');
-	});
-
-	it('returns the run id with a "still running" message when Max Wait is exceeded', async () => {
-		// deadline = 0 + 1*1000; remaining check sees now = 100_000 → exceeded.
-		vi.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValue(100_000);
+	it('passes a completed result without graph_spec/done through unchanged', async () => {
+		// sanitizeResult must be strip-only: a body that never had graph_spec/done
+		// keeps every field (notably main_stuff). Whole-object equality catches an
+		// accidental allowlist refactor that drops kept fields.
 		const { ctx } = makeContext({
 			operation: 'startAndPoll',
-			params: { pipeCode: 'p', inputs: '{}', maxWaitSeconds: 1 },
-			httpImpl: (options) =>
-				options.method === 'POST'
-					? fullResponse(201, { pipeline_run_id: 'run-1' })
-					: fullResponse(202, {}),
+			params: { pipeCode: 'p', inputs: '{}' },
+			httpImpl: startThenResults(() =>
+				fullResponse(200, { pipeline_run_id: 'run-1', main_stuff: { answer: 7 } }),
+			),
 		});
 
-		const result = await Pipelex.prototype.execute.call(ctx);
-		const json = result[0][0].json;
-		expect(json.done).toBe(false);
-		expect(json.status).toBe('RUNNING');
-		expect(json.pipeline_run_id).toBe('run-1');
-		expect(String(json.message)).toContain('Poll for Result');
+		const json = (await Pipelex.prototype.execute.call(ctx))[0][0].json;
+		expect(json).toEqual({
+			status: 'COMPLETED',
+			pipeline_run_id: 'run-1',
+			main_stuff: { answer: 7 },
+		});
 	});
 
 	it('captures the error as an item when continueOnFail is on', async () => {
@@ -304,12 +285,12 @@ describe('Pipelex node — Start & Poll', () => {
 		expect(result[0][0].json.error).toBe(FORBIDDEN_MESSAGE);
 	});
 
-	it('fails fast (no run) when neither pipe code nor bundles are provided', async () => {
+	it('fails fast (no run) when no run source is provided', async () => {
 		const { ctx, httpFn } = makeContext({
 			operation: 'startAndPoll',
-			params: { pipeCode: '', mthdsContents: [], inputs: '{}' },
+			params: { pipeCode: '', mthdsContents: [], methodId: '', inputs: '{}' },
 			continueOnFail: true,
-			httpImpl: () => fullResponse(201, { pipeline_run_id: 'run-1' }),
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
 		});
 
 		const result = await Pipelex.prototype.execute.call(ctx);
@@ -318,49 +299,302 @@ describe('Pipelex node — Start & Poll', () => {
 	});
 });
 
-describe('Pipelex node — outage (5xx) handling', () => {
+describe('Pipelex node — legacy `execute` operation value (published 0.0.x)', () => {
 	beforeEach(() => vi.clearAllMocks());
 
-	it('Poll tolerates a few transient 503s, then completes when the backend recovers', async () => {
-		let calls = 0;
+	it('maps to Start & Wait for Result: starts then polls to completion', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'execute',
+			params: { pipeCode: 'my-pipe', inputs: '{"a":1}' },
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json.status).toBe('COMPLETED');
+		expect(httpFn.mock.calls[0][0].url).toBe('https://api.test/v1/start');
+		expect(httpFn.mock.calls[1][0].url).toBe('https://api.test/v1/runs/run-1/results');
+	});
+
+	it('is hidden from the Operation dropdown (not offered to new workflows)', () => {
+		const operationProperty = new Pipelex().description.properties.find(
+			(property) => property.name === 'operation',
+		);
+		const values = (operationProperty?.options ?? []).map(
+			(option) => (option as { value: string }).value,
+		);
+		expect(values).not.toContain('execute');
+	});
+});
+
+describe('Pipelex node — Start Pipeline (start only, no polling)', () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	it('POSTs /v1/start once and returns the StartAck (pipeline_run_id, state, created_at)', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: { pipeCode: 'my-pipe', inputs: '{"a":1}' },
+			httpImpl: () => fullResponse(202, START_ACK),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json).toEqual({
+			pipeline_run_id: 'run-1',
+			state: 'STARTED',
+			created_at: '2026-06-10T00:00:00Z',
+		});
+		// One HTTP call only — no results poll.
+		expect(httpFn).toHaveBeenCalledTimes(1);
+		const startCall = httpFn.mock.calls[0][0];
+		expect(startCall.url).toBe('https://api.test/v1/start');
+		expect(startCall.headers['Idempotency-Key']).toBe('exec-1:node-1:0');
+		expect(startCall.headers.Authorization).toBe('Bearer secret-token');
+		expect(startCall.body).toEqual({ pipe_code: 'my-pipe', inputs: { a: 1 } });
+	});
+
+	it('shapes the start body identically to Start & Wait for Result (method_id + bundles)', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: { methodId: 'method-42', mthdsContents: ['bundle'], inputs: '{}' },
+			httpImpl: () => fullResponse(202, START_ACK),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		expect(httpFn.mock.calls[0][0].body).toEqual({
+			method_id: 'method-42',
+			mthds_contents: ['bundle'],
+			inputs: {},
+		});
+	});
+
+	it('fails fast (no run) when no run source is provided', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: { pipeCode: '', mthdsContents: [], methodId: '', inputs: '{}' },
+			continueOnFail: true,
+			httpImpl: () => fullResponse(202, START_ACK),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('Pipe Code');
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('raises the actionable 403 message on an unscoped key', async () => {
 		const { ctx } = makeContext({
+			operation: 'start',
+			params: { pipeCode: 'p', inputs: '{}' },
+			httpImpl: () => fullResponse(403, { detail: 'forbidden' }),
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(FORBIDDEN_MESSAGE);
+	});
+
+	it('raises when the server acks without a pipeline_run_id', async () => {
+		const { ctx } = makeContext({
+			operation: 'start',
+			params: { pipeCode: 'p', inputs: '{}' },
+			httpImpl: () => fullResponse(202, { state: 'STARTED' }),
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow('no pipeline_run_id');
+	});
+});
+
+describe('Pipelex node — Poll & Get Result (waitForResult by id)', () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	it('polls /v1/runs/{id}/results, honoring Retry-After, until completed', async () => {
+		let resultCalls = 0;
+		const { ctx, httpFn } = makeContext({
 			operation: 'poll',
-			params: { runId: 'run-1', maxWaitSeconds: 0, pollIntervalSeconds: 1 },
+			params: { runId: 'run-9' },
 			httpImpl: () => {
-				calls += 1;
-				return calls < 3 ? fullResponse(503, {}) : fullResponse(200, COMPLETED_RESULT);
+				resultCalls += 1;
+				return resultCalls < 3
+					? fullResponse(202, {}, { 'retry-after': '1' })
+					: fullResponse(200, { pipeline_run_id: 'run-9', main_stuff: { ok: true } });
 			},
 		});
 
 		const result = await Pipelex.prototype.execute.call(ctx);
-		expect(calls).toBe(3);
-		expect(result[0][0].json.status).toBe('COMPLETED');
+		expect(resultCalls).toBe(3);
+		const json = result[0][0].json;
+		expect(json.status).toBe('COMPLETED');
+		expect(json.main_stuff).toEqual({ ok: true });
+		const call = httpFn.mock.calls[0][0];
+		expect(call.url).toBe('https://api.test/v1/runs/run-9/results');
+		expect(call.headers.Authorization).toBe('Bearer secret-token');
 	});
 
-	it('Poll fails (does not hang) after too many consecutive 503s', async () => {
-		let calls = 0;
+	it('treats a 503 mid-poll as still running (keeps polling)', async () => {
+		let resultCalls = 0;
 		const { ctx } = makeContext({
 			operation: 'poll',
-			params: { runId: 'run-1', maxWaitSeconds: 0, pollIntervalSeconds: 1 },
+			params: { runId: 'run-9' },
 			httpImpl: () => {
-				calls += 1;
-				return fullResponse(503, {});
+				resultCalls += 1;
+				return resultCalls < 2
+					? fullResponse(503, {})
+					: fullResponse(200, { pipeline_run_id: 'run-9', main_stuff: {} });
 			},
 		});
 
-		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(/repeatedly unavailable/i);
-		// bounded: MAX_CONSECUTIVE_TRANSIENT (5) tolerated, then the 6th fails.
-		expect(calls).toBe(6);
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(resultCalls).toBe(2);
+		expect(result[0][0].json.status).toBe('COMPLETED');
 	});
 
-	it('Get Result surfaces a 503 as an error, not "still running"', async () => {
+	it('returns the same graceful "still running" output (not an error) when Max Wait is exceeded', async () => {
+		vi.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValue(100_000);
 		const { ctx } = makeContext({
+			operation: 'poll',
+			params: { runId: 'run-9', maxWaitSeconds: 1 },
+			httpImpl: () => fullResponse(202, {}),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		const json = result[0][0].json;
+		expect(json.status).toBe('RUNNING');
+		expect(json.pipeline_run_id).toBe('run-9');
+		expect(String(json.message)).toContain('Get Run Result');
+	});
+
+	it('raises on a failed (409) run with the server problem detail', async () => {
+		const { ctx } = makeContext({
+			operation: 'poll',
+			params: { runId: 'run-9' },
+			httpImpl: () => fullResponse(409, { detail: 'Run finished with status FAILED' }),
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(
+			'Run finished with status FAILED',
+		);
+	});
+
+	it('requires a run id', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'poll',
+			params: { runId: '   ' },
+			continueOnFail: true,
+			httpImpl: () => fullResponse(202, {}),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('Run ID is required');
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('URL-encodes the pipeline_run_id', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'poll',
+			params: { runId: 'run/../9' },
+			httpImpl: () => fullResponse(200, { pipeline_run_id: 'run/../9', main_stuff: {} }),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		expect(httpFn.mock.calls[0][0].url).toBe('https://api.test/v1/runs/run%2F..%2F9/results');
+	});
+});
+
+describe('Pipelex node — Get Run Result (single-shot fetch)', () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	it('returns the completed result in one call to /v1/runs/{id}/results', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'getResult',
+			params: { runId: 'run-1' },
+			httpImpl: () => fullResponse(200, COMPLETED_RESULT),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		const json = result[0][0].json;
+		expect(json.status).toBe('COMPLETED');
+		expect(json.main_stuff).toEqual({ answer: 42 });
+		expect(json.graph_spec).toBeUndefined();
+		expect(httpFn).toHaveBeenCalledTimes(1);
+		expect(httpFn.mock.calls[0][0].url).toBe('https://api.test/v1/runs/run-1/results');
+	});
+
+	it('URL-encodes the pipeline_run_id', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'getResult',
+			params: { runId: 'run/../1' },
+			httpImpl: () => fullResponse(200, COMPLETED_RESULT),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		expect(httpFn.mock.calls[0][0].url).toBe('https://api.test/v1/runs/run%2F..%2F1/results');
+	});
+
+	it('reports still-running (202) without looping', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'getResult',
+			params: { runId: 'run-1' },
+			httpImpl: () => fullResponse(202, {}),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		const json = result[0][0].json;
+		expect(json.status).toBe('RUNNING');
+		expect(json.pipeline_run_id).toBe('run-1');
+		expect(httpFn).toHaveBeenCalledTimes(1);
+	});
+
+	it('maps a 503 to still-running too (mirrors mthds-js getRunResult)', async () => {
+		const { ctx, httpFn } = makeContext({
 			operation: 'getResult',
 			params: { runId: 'run-1' },
 			httpImpl: () => fullResponse(503, {}),
 		});
 
-		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(/repeatedly unavailable/i);
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json.status).toBe('RUNNING');
+		expect(httpFn).toHaveBeenCalledTimes(1);
+	});
+
+	it('raises on a failed (409) run', async () => {
+		const { ctx } = makeContext({
+			operation: 'getResult',
+			params: { runId: 'run-1' },
+			httpImpl: () => fullResponse(409, { detail: 'Run finished with status FAILED' }),
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(
+			'Run finished with status FAILED',
+		);
+	});
+
+	it('raises the actionable 403 message on an unscoped key', async () => {
+		const { ctx } = makeContext({
+			operation: 'getResult',
+			params: { runId: 'run-1' },
+			httpImpl: () => fullResponse(403, { detail: 'forbidden' }),
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(FORBIDDEN_MESSAGE);
+	});
+
+	it('raises the actionable 404 message (bad run_id or non-hosted Base URL)', async () => {
+		const { ctx } = makeContext({
+			operation: 'getResult',
+			params: { runId: 'run-1' },
+			httpImpl: () => fullResponse(404, { detail: 'not found' }),
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(NOT_FOUND_MESSAGE);
+	});
+
+	it('requires a run id', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'getResult',
+			params: { runId: '' },
+			continueOnFail: true,
+			httpImpl: () => fullResponse(200, COMPLETED_RESULT),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('Run ID is required');
+		expect(httpFn).not.toHaveBeenCalled();
 	});
 });
 
@@ -370,10 +604,10 @@ describe('Pipelex node — inputs validation', () => {
 	it('rejects non-object inputs (array / null / scalar) before any call', async () => {
 		for (const badInputs of ['[]', 'null', '"text"', '42']) {
 			const { ctx, httpFn } = makeContext({
-				operation: 'start',
+				operation: 'startAndPoll',
 				params: { pipeCode: 'p', inputs: badInputs },
 				continueOnFail: true,
-				httpImpl: () => fullResponse(201, { pipeline_run_id: 'run-1' }),
+				httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
 			});
 			const result = await Pipelex.prototype.execute.call(ctx);
 			expect(String(result[0][0].json.error)).toContain('must be a JSON object');
@@ -383,14 +617,68 @@ describe('Pipelex node — inputs validation', () => {
 
 	it('treats a whitespace-only bundle as empty (guard fires, no call)', async () => {
 		const { ctx, httpFn } = makeContext({
-			operation: 'start',
+			operation: 'startAndPoll',
 			params: { pipeCode: '', mthdsContents: ['   \n  '], inputs: '{}' },
 			continueOnFail: true,
-			httpImpl: () => fullResponse(201, { pipeline_run_id: 'run-1' }),
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
 		});
 
 		const result = await Pipelex.prototype.execute.call(ctx);
 		expect(String(result[0][0].json.error)).toContain('Pipe Code');
 		expect(httpFn).not.toHaveBeenCalled();
+	});
+});
+
+describe('Pipelex node — operation surface (description sanity)', () => {
+	const description = new Pipelex().description;
+	const properties = description.properties;
+
+	const showOperations = (name: string): string[] => {
+		const property = properties.find((p: INodeProperties) => p.name === name);
+		return (property?.displayOptions?.show?.operation ?? []) as string[];
+	};
+
+	it('offers the four operations in usage order, defaulting to Start & Wait for Result', () => {
+		const operationProperty = properties.find((p: INodeProperties) => p.name === 'operation');
+		expect(operationProperty?.default).toBe('startAndPoll');
+		const options = (operationProperty?.options ?? []) as Array<{ name: string; value: string }>;
+		expect(options.map((o) => o.value)).toEqual(['startAndPoll', 'start', 'poll', 'getResult']);
+		expect(options.map((o) => o.name)).toEqual([
+			'Start & Wait for Result',
+			'Start Pipeline',
+			'Poll & Get Result',
+			'Get Run Result',
+		]);
+	});
+
+	it('shows the run-definition fields on both start operations (and the legacy execute value)', () => {
+		for (const field of [
+			'mthdsContents',
+			'methodId',
+			'inputs',
+			'pipeCode',
+			'outputName',
+			'outputMultiplicity',
+			'dynamicOutputConceptRef',
+		]) {
+			const operations = showOperations(field);
+			expect(operations, field).toContain('startAndPoll');
+			expect(operations, field).toContain('start');
+			expect(operations, field).toContain('execute');
+			expect(operations, field).not.toContain('poll');
+			expect(operations, field).not.toContain('getResult');
+		}
+	});
+
+	it('shows the run id only on the run-targeting operations', () => {
+		expect(showOperations('runId')).toEqual(['poll', 'getResult']);
+	});
+
+	it('shows Max Wait only on the polling operations', () => {
+		const operations = showOperations('maxWaitSeconds');
+		expect(operations).toContain('startAndPoll');
+		expect(operations).toContain('poll');
+		expect(operations).not.toContain('start');
+		expect(operations).not.toContain('getResult');
 	});
 });
