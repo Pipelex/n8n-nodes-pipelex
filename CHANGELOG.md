@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [v0.1.0] - 2026-06-12
 
 - **Breaking — migrated to the unified MTHDS API surface (`/v1/*`).** The legacy `/runner/v1/*` and `/platform/v1/*` prefixes are gone: start → `POST /v1/start` (202 `StartAck { pipeline_run_id, state, created_at }`), result → `GET /v1/runs/{pipeline_run_id}/results` (202 + `Retry-After` while running / 200 result / 409 terminal failure), credential test → `GET /v1/auth/verify`. The wire shapes are copy-pasted from `mthds-js` v0.10.0 into `nodes/Pipelex/MthdsShapes.ts` (n8n community nodes cannot ship runtime dependencies, so the SDK is vendored, not imported — sync against the source files named in that header when the contract moves).
 - **Breaking — node is now a four-operation node**, mirroring the mthds-js client surface (`start` / `waitForResult` / `getRunResult` — SDK conveniences over the MTHDS Protocol routes). The blocking `Execute` operation (old `POST /runner/v1/pipeline/execute`, which died at the public API's ~30s gateway ceiling) is **deleted**, superseded by durable runs:
