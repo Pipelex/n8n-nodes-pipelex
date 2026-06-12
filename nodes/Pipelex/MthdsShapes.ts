@@ -74,10 +74,15 @@ export interface StartAck {
  */
 export interface RunResults {
 	pipeline_run_id: string;
-	/** Method graph spec (`graphspec.json`); null if missing mid-write. */
+	/** Method graph spec (`graphspec.json`); null if missing mid-write. The n8n
+	 * node strips this from its output (heavy visualization artifact). */
 	graph_spec?: unknown;
 	/** Main output stuff (`main_stuff.json`); null if missing mid-write. */
 	main_stuff?: unknown;
+	/** Full working memory of the run — every named stuff, not just the main
+	 * output (`working_memory.json`); null if missing mid-write. Relayed to the
+	 * n8n output (unlike `graph_spec`). */
+	working_memory?: unknown;
 }
 
 /** Default poll backoff when the server sends no `Retry-After` — matches the
