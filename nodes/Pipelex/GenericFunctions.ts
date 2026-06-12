@@ -21,6 +21,15 @@ import {
 export const FORBIDDEN_MESSAGE =
 	'This API key lacks runs access. Running a pipeline needs an admin / `runs:execute`-scoped key — the credential test only checks that the token is valid, not that it can start runs.';
 
+// A 404 on the results endpoint is overloaded: either the pipeline_run_id is
+// wrong/expired (the common case), or the credential Base URL points at a
+// runner that has no durable run lifecycle (e.g. a bare/self-hosted
+// pipelex-api) — the contract's RunLifecycleUnavailableError case. The node is
+// hosted-only by design and deliberately skips the /v1/version handshake, so a
+// single message naming both real causes is the actionable middle ground.
+export const NOT_FOUND_MESSAGE =
+	'Run not found. Check the pipeline_run_id is correct and not expired — or, if you changed the credential Base URL, it may point at a runner that does not expose the durable run lifecycle (point it at the hosted Pipelex API).';
+
 /**
  * Resolved connection to the Pipelex API — the credential, read once per
  * execution and turned into ready-to-send request pieces.
@@ -107,6 +116,7 @@ export type ResultOutcome =
 	| { kind: 'running'; retryAfterSeconds: number }
 	| { kind: 'failed'; message: string; body: IDataObject }
 	| { kind: 'forbidden'; message: string; body: IDataObject }
+	| { kind: 'notFound'; message: string; body: IDataObject }
 	| { kind: 'unexpected'; statusCode: number; message: string; body: IDataObject };
 
 function extractProblemDetail(body: IDataObject): string | undefined {
@@ -131,6 +141,8 @@ function extractProblemDetail(body: IDataObject): string | undefined {
  *         fail a poller; bounded by the caller's Max Wait)
  *   409 → failed: terminal non-COMPLETED (FAILED / CANCELLED / TERMINATED /
  *         TIMED_OUT), with the status in the problem detail
+ *   404 → not found: bad/expired pipeline_run_id, or a Base URL with no run
+ *         lifecycle (actionable; see NOT_FOUND_MESSAGE)
  *   403 → unscoped key (actionable; see FORBIDDEN_MESSAGE)
  *   other → unexpected (→ NodeApiError)
  */
@@ -150,6 +162,8 @@ export function mapResultResponse(
 			return { kind: 'completed', body };
 		case 403:
 			return { kind: 'forbidden', message: FORBIDDEN_MESSAGE, body };
+		case 404:
+			return { kind: 'notFound', message: NOT_FOUND_MESSAGE, body };
 		case 409:
 			return {
 				kind: 'failed',

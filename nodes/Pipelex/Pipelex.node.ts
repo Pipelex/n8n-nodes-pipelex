@@ -168,6 +168,12 @@ function throwResultError(
 				httpCode: '403',
 				itemIndex,
 			});
+		case 'notFound':
+			throw new NodeApiError(ctx.getNode(), outcome.body as JsonObject, {
+				message: outcome.message,
+				httpCode: '404',
+				itemIndex,
+			});
 		case 'unexpected':
 			throw new NodeApiError(ctx.getNode(), outcome.body as JsonObject, {
 				message: outcome.message,

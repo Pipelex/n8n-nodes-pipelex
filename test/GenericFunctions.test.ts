@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	FORBIDDEN_MESSAGE,
+	NOT_FOUND_MESSAGE,
 	buildApiConnection,
 	buildStartBody,
 	idempotencyKey,
@@ -156,6 +157,12 @@ describe('mapResultResponse (mirrors mthds-js getRunResult)', () => {
 		const body = { detail: 'nope' };
 		const outcome = mapResultResponse(403, body, {});
 		expect(outcome).toEqual({ kind: 'forbidden', message: FORBIDDEN_MESSAGE, body });
+	});
+
+	it('404 → notFound with the actionable message (bad run_id or non-hosted Base URL)', () => {
+		const body = { detail: 'not found' };
+		const outcome = mapResultResponse(404, body, {});
+		expect(outcome).toEqual({ kind: 'notFound', message: NOT_FOUND_MESSAGE, body });
 	});
 
 	it('409 with a problem detail → failed using detail', () => {

@@ -8,7 +8,7 @@ vi.mock('n8n-workflow', async (importOriginal) => {
 	return { ...actual, sleepWithAbort: vi.fn(async () => {}) };
 });
 
-import { FORBIDDEN_MESSAGE } from '../nodes/Pipelex/GenericFunctions';
+import { FORBIDDEN_MESSAGE, NOT_FOUND_MESSAGE } from '../nodes/Pipelex/GenericFunctions';
 import { Pipelex } from '../nodes/Pipelex/Pipelex.node';
 
 type HttpImpl = (options: {
@@ -532,6 +532,16 @@ describe('Pipelex node — Get Run Result (single-shot fetch)', () => {
 		});
 
 		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(FORBIDDEN_MESSAGE);
+	});
+
+	it('raises the actionable 404 message (bad run_id or non-hosted Base URL)', async () => {
+		const { ctx } = makeContext({
+			operation: 'getResult',
+			params: { runId: 'run-1' },
+			httpImpl: () => fullResponse(404, { detail: 'not found' }),
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(NOT_FOUND_MESSAGE);
 	});
 
 	it('requires a run id', async () => {
