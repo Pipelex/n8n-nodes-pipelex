@@ -8,7 +8,11 @@ vi.mock('n8n-workflow', async (importOriginal) => {
 	return { ...actual, sleepWithAbort: vi.fn(async () => {}) };
 });
 
-import { FORBIDDEN_MESSAGE, NOT_FOUND_MESSAGE } from '../nodes/Pipelex/GenericFunctions';
+import {
+	FORBIDDEN_MESSAGE,
+	NOT_FOUND_MESSAGE,
+	SERVICE_UNAVAILABLE_MESSAGE,
+} from '../nodes/Pipelex/GenericFunctions';
 import { Pipelex } from '../nodes/Pipelex/Pipelex.node';
 
 type HttpImpl = (options: {
@@ -161,6 +165,42 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		const result = await Pipelex.prototype.execute.call(ctx);
 		expect(resultCalls).toBe(3);
 		expect(result[0][0].json.status).toBe('COMPLETED');
+	});
+
+	it('trips the consecutive-503 ceiling on a sustained outage (even unbounded), surfacing the run_id', async () => {
+		let resultCalls = 0;
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			// maxWaitSeconds: 0 = unbounded; only the consecutive-503 ceiling can stop this.
+			params: { pipeCode: 'p', inputs: '{}', maxWaitSeconds: 0 },
+			httpImpl: startThenResults(() => {
+				resultCalls += 1;
+				return fullResponse(503, {});
+			}),
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(SERVICE_UNAVAILABLE_MESSAGE);
+		// 5 tolerated, the 6th consecutive trips the ceiling.
+		expect(resultCalls).toBe(6);
+	});
+
+	it('resets the 503 counter on a healthy 202 between blips (no false outage trip)', async () => {
+		let resultCalls = 0;
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: { pipeCode: 'p', inputs: '{}', maxWaitSeconds: 0 },
+			httpImpl: startThenResults(() => {
+				resultCalls += 1;
+				// 3x503, then a 202 (resets), then 3x503, then completed — never 6 in a row.
+				if (resultCalls === 4) return fullResponse(202, {});
+				if (resultCalls >= 8) return fullResponse(200, COMPLETED_RESULT);
+				return fullResponse(503, {});
+			}),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json.status).toBe('COMPLETED');
+		expect(resultCalls).toBe(8);
 	});
 
 	it('returns the pipeline_run_id with a "still running" output (not an error) when Max Wait is exceeded', async () => {

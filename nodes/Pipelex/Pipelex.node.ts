@@ -12,6 +12,7 @@ import {
 } from 'n8n-workflow';
 
 import {
+	SERVICE_UNAVAILABLE_MESSAGE,
 	buildApiConnection,
 	buildStartBody,
 	idempotencyKey,
@@ -34,6 +35,11 @@ const DEFAULT_MAX_WAIT_SECONDS = 300;
 // ever sends `Retry-After: 0`. (When the header is absent, the mapper already
 // defaults to 5s.)
 const MIN_POLL_SLEEP_MS = 250;
+// How many CONSECUTIVE 503 (degraded) responses the poll loop tolerates before
+// surfacing the run as unavailable. A healthy run polls with 202s, which reset
+// the counter — so this only trips on a sustained backend outage, independent
+// of Max Wait (it bounds the otherwise-infinite poll when maxWaitSeconds is 0).
+const MAX_CONSECUTIVE_DEGRADED = 5;
 
 // Operations that submit a run (and therefore show the pipeline-definition
 // fields). `execute` is the published 0.0.x legacy value — see the execute()
@@ -189,10 +195,12 @@ function throwResultError(
  * Poll & Get Result (fed by the user-supplied pipeline_run_id); the n8n
  * equivalent of mthds-js `waitForResult`. Honors the server's `Retry-After`
  * (default 5s when absent; a 503 mid-poll also reads as "keep polling",
- * mirroring mthds-js — never fail a poller on a blip). With
- * `maxWaitSeconds <= 0` this polls indefinitely (the n8n execution's own
- * timeout is the only ceiling); with a positive cap it returns the
- * pipeline_run_id + a "still running" payload on exceed so the run isn't lost.
+ * mirroring mthds-js — never fail a poller on a single blip). A SUSTAINED 503
+ * outage trips the consecutive-503 ceiling (MAX_CONSECUTIVE_DEGRADED) so an
+ * unbounded poll can't spin forever on a down backend. With `maxWaitSeconds <= 0`
+ * this otherwise polls indefinitely (the n8n execution's own timeout is the only
+ * ceiling); with a positive cap it returns the pipeline_run_id + a "still
+ * running" payload on exceed so the run isn't lost.
  */
 async function pollForResultLoop(
 	ctx: IExecuteFunctions,
@@ -204,6 +212,7 @@ async function pollForResultLoop(
 	const abortSignal = ctx.getExecutionCancelSignal();
 	const unbounded = !maxWaitSeconds || maxWaitSeconds <= 0;
 	const deadline = unbounded ? Number.POSITIVE_INFINITY : Date.now() + maxWaitSeconds * 1000;
+	let consecutiveDegraded = 0;
 
 	for (;;) {
 		const response = await requestResult(ctx, conn, runId);
@@ -218,6 +227,23 @@ async function pollForResultLoop(
 		}
 		if (outcome.kind !== 'running') {
 			throwResultError(ctx, outcome, itemIndex);
+		}
+
+		// A 503 (degraded) is tolerated as "keep polling", but a sustained outage
+		// must not spin forever (esp. unbounded). A normal in-flight 202 resets
+		// the counter; consecutive 503s trip the ceiling into an actionable error
+		// that still hands back the pipeline_run_id for a later Get Run Result.
+		if (outcome.degraded) {
+			consecutiveDegraded += 1;
+			if (consecutiveDegraded > MAX_CONSECUTIVE_DEGRADED) {
+				throw new NodeApiError(ctx.getNode(), (response.body ?? {}) as JsonObject, {
+					message: `${SERVICE_UNAVAILABLE_MESSAGE} Fetch it later with the "Get Run Result" operation and pipeline_run_id "${runId}".`,
+					httpCode: '503',
+					itemIndex,
+				});
+			}
+		} else {
+			consecutiveDegraded = 0;
 		}
 
 		const remainingMs = deadline - Date.now();

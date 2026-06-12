@@ -30,6 +30,16 @@ export const FORBIDDEN_MESSAGE =
 export const NOT_FOUND_MESSAGE =
 	'Run not found. Check the pipeline_run_id is correct and not expired — or, if you changed the credential Base URL, it may point at a runner that does not expose the durable run lifecycle (point it at the hosted Pipelex API).';
 
+// A 503 mid-poll is treated as "still running" (a transient gateway/backend blip
+// must not lose a poller — mirrors mthds-js). But a backend that is genuinely
+// down returns 503 indefinitely; without a ceiling, an unbounded poll
+// (maxWaitSeconds: 0) would spin until the n8n execution itself times out. The
+// poll loop counts CONSECUTIVE 503s (a healthy run polls with 202s, which reset
+// the counter) and surfaces this message once the ceiling trips, so an outage
+// becomes an actionable failure instead of a silent hang.
+export const SERVICE_UNAVAILABLE_MESSAGE =
+	'The Pipelex API was unavailable (HTTP 503) for several consecutive polls — the backend appears down. The run may still finish later.';
+
 /**
  * Resolved connection to the Pipelex API — the credential, read once per
  * execution and turned into ready-to-send request pieces.
@@ -113,7 +123,11 @@ export function idempotencyKey(executionId: string, nodeId: string, itemIndex: n
  * value makes the status→meaning logic testable in isolation. */
 export type ResultOutcome =
 	| { kind: 'completed'; body: IDataObject }
-	| { kind: 'running'; retryAfterSeconds: number }
+	// `degraded` is true when the running signal came from a 503 (transient
+	// outage) rather than a 202 (normal in-flight). The poll loop keeps polling
+	// either way, but only counts `degraded` responses toward the
+	// consecutive-503 ceiling (see SERVICE_UNAVAILABLE_MESSAGE).
+	| { kind: 'running'; retryAfterSeconds: number; degraded: boolean }
 	| { kind: 'failed'; message: string; body: IDataObject }
 	| { kind: 'forbidden'; message: string; body: IDataObject }
 	| { kind: 'notFound'; message: string; body: IDataObject }
@@ -137,8 +151,9 @@ function extractProblemDetail(body: IDataObject): string | undefined {
  *   200 → completed (body has main_stuff + graph_spec)
  *   202 → running (+ `Retry-After`, default 5s when absent); the server signals
  *         in-flight — including degraded Temporal reads — only via 202
- *   503 → running too (transient gateway/backend blip mid-poll — retry, never
- *         fail a poller; bounded by the caller's Max Wait)
+ *   503 → running too, but flagged `degraded` (transient gateway/backend blip
+ *         mid-poll — retry, never fail a poller; the loop bounds CONSECUTIVE
+ *         503s via SERVICE_UNAVAILABLE_MESSAGE on top of the caller's Max Wait)
  *   409 → failed: terminal non-COMPLETED (FAILED / CANCELLED / TERMINATED /
  *         TIMED_OUT), with the status in the problem detail
  *   404 → not found: bad/expired pipeline_run_id, or a Base URL with no run
@@ -155,6 +170,7 @@ export function mapResultResponse(
 		return {
 			kind: 'running',
 			retryAfterSeconds: parseRetryAfter(headers) ?? DEFAULT_DEGRADED_RETRY_SECONDS,
+			degraded: statusCode === 503,
 		};
 	}
 	switch (statusCode) {

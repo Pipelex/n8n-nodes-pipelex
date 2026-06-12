@@ -121,9 +121,9 @@ describe('mapResultResponse (mirrors mthds-js getRunResult)', () => {
 		expect(outcome).toEqual({ kind: 'completed', body });
 	});
 
-	it('202 with Retry-After → running with parsed seconds', () => {
+	it('202 with Retry-After → running (not degraded) with parsed seconds', () => {
 		const outcome = mapResultResponse(202, {}, { 'retry-after': '8' });
-		expect(outcome).toEqual({ kind: 'running', retryAfterSeconds: 8 });
+		expect(outcome).toEqual({ kind: 'running', retryAfterSeconds: 8, degraded: false });
 	});
 
 	it('202 without Retry-After → running with the 5s degraded default', () => {
@@ -131,6 +131,7 @@ describe('mapResultResponse (mirrors mthds-js getRunResult)', () => {
 		expect(outcome).toEqual({
 			kind: 'running',
 			retryAfterSeconds: DEFAULT_DEGRADED_RETRY_SECONDS,
+			degraded: false,
 		});
 	});
 
@@ -139,17 +140,20 @@ describe('mapResultResponse (mirrors mthds-js getRunResult)', () => {
 		expect(outcome).toEqual({
 			kind: 'running',
 			retryAfterSeconds: DEFAULT_DEGRADED_RETRY_SECONDS,
+			degraded: false,
 		});
 	});
 
-	it('503 → running too (transient blip mid-poll never fails a poller)', () => {
+	it('503 → running but flagged degraded (transient blip never fails a poller; loop bounds consecutive 503s)', () => {
 		expect(mapResultResponse(503, {}, { 'retry-after': '10' })).toEqual({
 			kind: 'running',
 			retryAfterSeconds: 10,
+			degraded: true,
 		});
 		expect(mapResultResponse(503, {}, {})).toEqual({
 			kind: 'running',
 			retryAfterSeconds: DEFAULT_DEGRADED_RETRY_SECONDS,
+			degraded: true,
 		});
 	});
 
