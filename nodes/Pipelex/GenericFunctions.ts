@@ -1,5 +1,6 @@
 import {
 	NodeApiError,
+	sleep,
 	type ICredentialDataDecryptedObject,
 	type IDataObject,
 	type IExecuteFunctions,
@@ -71,6 +72,51 @@ export const MISSING_MAIN_STUFF_MESSAGE =
 /** The transient reading of the same response, used while the poll loop retries. */
 export const RESULT_MID_WRITE_MESSAGE =
 	'The run is complete but its result is still being written — fetch it again in a moment with this pipeline_run_id.';
+
+/**
+ * Sleep `ms`, rejecting if `signal` aborts (an n8n execution cancelled mid-poll).
+ *
+ * Built on n8n-workflow's `sleep`, NOT its `sleepWithAbort`. Both exist in
+ * n8n-workflow 1.x, but `sleepWithAbort` was **removed in 2.x** while `sleep`
+ * survived. `n8n-workflow` is a `peerDependency` (`"*"`) satisfied by whatever
+ * version the host n8n ships, so importing the abortable one compiled fine
+ * against the 1.x in this repo's dev tree and then threw
+ * `sleepWithAbort is not a function` at runtime on any n8n carrying
+ * n8n-workflow 2 — i.e. on every poll of a current n8n. See
+ * `test/WireContract.test.ts` for the allowlist that now guards this.
+ *
+ * The abort half is layered here rather than owned outright because a community
+ * node may not use a timer at all: `@n8n/community-nodes/no-restricted-globals`
+ * bans `setTimeout` (along with `process`, `__dirname`, and friends) and
+ * `no-restricted-imports` bans `node:timers/promises`, since n8n Cloud runs
+ * community nodes without dependencies. Racing the host's `sleep` against the
+ * signal needs no timer of our own.
+ */
+export async function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted) throw abortReason(signal);
+	if (ms <= 0) return;
+	if (!signal) {
+		await sleep(ms);
+		return;
+	}
+	// The losing `sleep` stays pending until its own delay elapses; it holds no
+	// resource beyond that one timer, which the host owns.
+	await Promise.race([
+		sleep(ms),
+		new Promise<never>((_resolve, reject) => {
+			signal.addEventListener('abort', () => reject(abortReason(signal)), { once: true });
+		}),
+	]);
+}
+
+/**
+ * The error a cancelled sleep rejects with: the signal's own reason when it is an
+ * Error (so a cancelled execution reports why), else a readable fallback.
+ */
+function abortReason(signal?: AbortSignal): Error {
+	const reason: unknown = signal?.reason;
+	return reason instanceof Error ? reason : new Error('The Pipelex run poll was cancelled.');
+}
 
 /** Append the run id when the response body carries one, so the message is self-contained. */
 export function withRunId(message: string, body: IDataObject): string {

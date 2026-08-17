@@ -24,9 +24,17 @@
  * the change, update the pin, note it in the changelog), or you made a typo.
  */
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
-import { buildStartBody, mapResultResponse, runSourceError } from '../nodes/Pipelex/GenericFunctions';
+import {
+	abortableSleep,
+	buildStartBody,
+	mapResultResponse,
+	runSourceError,
+} from '../nodes/Pipelex/GenericFunctions';
 import type { HostedStartBody } from '../nodes/Pipelex/PipelexApiShapes';
 
 describe('POST /v1/start — the exact body this node sends', () => {
@@ -174,5 +182,86 @@ describe('run-source rules — replicated from the MTHDS Protocol', () => {
 		for (const body of illegal) {
 			expect(runSourceError(body), JSON.stringify(body)).not.toBeNull();
 		}
+	});
+});
+
+describe('n8n-workflow runtime surface', () => {
+	// `n8n-workflow` is a peerDependency (`"*"`), satisfied at runtime by whatever
+	// version the host n8n ships — which is NOT the version this repo compiles
+	// against. So `tsc` passing proves nothing about the host: importing a helper
+	// that a newer n8n-workflow dropped compiles clean and throws at runtime.
+	//
+	// That is not hypothetical. v0.1.0 imported `sleepWithAbort`, which exists in
+	// n8n-workflow 1.x and was REMOVED in 2.x — so every poll on a current n8n died
+	// with `sleepWithAbort is not a function`, while lint, tsc and the whole suite
+	// stayed green (the test mock stubbed it, which only asserted it existed).
+	//
+	// This pins the VALUE imports (types are erased and cannot fail at runtime) to
+	// a small allowlist of long-stable, universally-present surface. Adding to the
+	// list is a deliberate act: verify the symbol exists across the n8n-workflow
+	// majors this node supports, or own the helper locally instead.
+	const ALLOWED_VALUE_IMPORTS = [
+		'NodeApiError',
+		'NodeConnectionTypes',
+		'NodeOperationError',
+		// `sleep` survived the 1.x → 2.x transition that removed `sleepWithAbort`.
+		// A community node cannot own a timer (restricted globals + no node:
+		// imports), so the host has to provide this one.
+		'sleep',
+	];
+
+	it.each(['nodes/Pipelex/Pipelex.node.ts', 'nodes/Pipelex/GenericFunctions.ts'])(
+		'%s imports only allowlisted values from n8n-workflow',
+		(relativePath) => {
+			const source = readFileSync(resolve(relativePath), 'utf8');
+			const block = /import\s*\{([^}]*)\}\s*from\s*'n8n-workflow';/.exec(source);
+			if (!block) return; // No import at all is fine.
+			const valueImports = block[1]
+				.split(',')
+				.map((entry) => entry.trim())
+				.filter((entry) => entry.length > 0 && !entry.startsWith('type '));
+
+			expect(valueImports.sort()).toEqual(
+				valueImports.filter((name) => ALLOWED_VALUE_IMPORTS.includes(name)).sort(),
+			);
+		},
+	);
+
+	it('never imports the removed sleepWithAbort', () => {
+		// The specific regression. `abortableSleep` layers abort handling over the
+		// host's `sleep`, which exists in both n8n-workflow majors.
+		const source = readFileSync(resolve('nodes/Pipelex/GenericFunctions.ts'), 'utf8');
+		// The allowlist test above is what actually forbids importing it; this pins
+		// that the replacement exists and is ours. (The file mentions the old name in
+		// prose deliberately, so assert on the import list, not on the text.)
+		const importBlock = /import\s*\{([^}]*)\}\s*from\s*'n8n-workflow';/.exec(source)?.[1] ?? '';
+		expect(importBlock).not.toContain('sleepWithAbort');
+		expect(importBlock).toContain('sleep');
+		expect(source).toContain('export async function abortableSleep');
+		expect(abortableSleep).toBeTypeOf('function');
+	});
+
+	it('abortableSleep resolves promptly and rejects on abort', async () => {
+		await expect(abortableSleep(0)).resolves.toBeUndefined();
+		await expect(abortableSleep(1)).resolves.toBeUndefined();
+	});
+
+	it('abortableSleep propagates the abort reason when there is one', async () => {
+		// `controller.abort()` sets an AbortError as the reason. Preserve it rather
+		// than replacing it, so a cancelled execution reports why it was cancelled.
+		const controller = new AbortController();
+		const pending = abortableSleep(5_000, controller.signal);
+		controller.abort();
+		await expect(pending).rejects.toThrow();
+
+		// An already-aborted signal rejects without arming a timer.
+		await expect(abortableSleep(5_000, controller.signal)).rejects.toThrow();
+	});
+
+	it('abortableSleep falls back to its own message for a non-Error reason', async () => {
+		const controller = new AbortController();
+		const pending = abortableSleep(5_000, controller.signal);
+		controller.abort('user stopped the workflow');
+		await expect(pending).rejects.toThrow(/cancelled/);
 	});
 });

@@ -2,7 +2,6 @@ import {
 	NodeApiError,
 	NodeConnectionTypes,
 	NodeOperationError,
-	sleepWithAbort,
 	type IDataObject,
 	type IExecuteFunctions,
 	type INodeExecutionData,
@@ -15,6 +14,7 @@ import {
 	MISSING_MAIN_STUFF_MESSAGE,
 	RESULT_MID_WRITE_MESSAGE,
 	SERVICE_UNAVAILABLE_MESSAGE,
+	abortableSleep,
 	assembleRunSources,
 	buildApiConnection,
 	buildStartBody,
@@ -392,7 +392,7 @@ async function pollForResultLoop(
 		// the anti-busy-loop floor applies only when the deadline allows it.
 		const requestedMs = outcome.retryAfterSeconds * 1000;
 		const sleepMs = Math.min(Math.max(requestedMs, MIN_POLL_SLEEP_MS), remainingMs);
-		await sleepWithAbort(sleepMs, abortSignal);
+		await abortableSleep(sleepMs, abortSignal);
 	}
 }
 

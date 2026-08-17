@@ -2,10 +2,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IExecuteFunctions, IN8nHttpFullResponse, INodeProperties } from 'n8n-workflow';
 
 // Make the internal poll loop instant — replace the real (timer-backed)
-// sleepWithAbort with a no-op, keep everything else (NodeApiError, etc.) real.
-vi.mock('n8n-workflow', async (importOriginal) => {
-	const actual = await importOriginal<typeof import('n8n-workflow')>();
-	return { ...actual, sleepWithAbort: vi.fn(async () => {}) };
+// `abortableSleep` with a no-op, keep every other export real.
+//
+// This mocks OUR module, not `n8n-workflow`. It used to stub n8n-workflow's
+// `sleepWithAbort`, and that is precisely what hid a shipped bug: the helper
+// exists in n8n-workflow 1.x (this repo's dev tree) but was removed in 2.x, so
+// the mock kept the suite green while every real poll on a current n8n threw
+// `sleepWithAbort is not a function`. Mocking a dependency's API asserts that
+// the API exists; mocking our own asserts nothing about the host.
+vi.mock('../nodes/Pipelex/GenericFunctions', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('../nodes/Pipelex/GenericFunctions')>();
+	return { ...actual, abortableSleep: vi.fn(async () => {}) };
 });
 
 import {
