@@ -11,6 +11,7 @@ import {
 	buildStartBody,
 	idempotencyKey,
 	mapResultResponse,
+	runFailureMessage,
 	runSourceError,
 	withRunId,
 } from '../nodes/Pipelex/GenericFunctions';
@@ -438,5 +439,45 @@ describe('mapResultResponse (mirrors mthds-js getRunResult)', () => {
 			statusCode: 418,
 			message: 'Unexpected response status 418',
 		});
+	});
+});
+
+describe('runFailureMessage (recovering WHY a run failed)', () => {
+	it('builds the message from the run row\'s stored error report', () => {
+		// The real shape, taken from a Temporal failure the results 409 reduced to
+		// "Run finished with status FAILED; no result available".
+		const message =
+			"Live run of PipeSequence 'build_client_quote': missing required inputs: illustrations. These optional inputs may be omitted: comments.";
+		expect(
+			runFailureMessage({ status: 'FAILED', error: { message, error_type: 'PipeRunInputsError' } }),
+		).toBe(`Run FAILED: ${message} [PipeRunInputsError]`);
+	});
+
+	it('keeps the terminal status, which distinguishes a timeout from a failure', () => {
+		expect(runFailureMessage({ status: 'TIMED_OUT', error: { message: 'took too long' } })).toBe(
+			'Run TIMED_OUT: took too long',
+		);
+	});
+
+	it('does not repeat an error_type already named in the message', () => {
+		expect(
+			runFailureMessage({
+				status: 'FAILED',
+				error: { message: 'PipeRunInputsError: bad inputs', error_type: 'PipeRunInputsError' },
+			}),
+		).toBe('Run FAILED: PipeRunInputsError: bad inputs');
+	});
+
+	it('returns undefined when there is no usable report, so the caller keeps its fallback', () => {
+		expect(runFailureMessage({})).toBeUndefined();
+		expect(runFailureMessage({ error: null })).toBeUndefined();
+		expect(runFailureMessage({ error: {} })).toBeUndefined();
+		expect(runFailureMessage({ error: { message: '' } })).toBeUndefined();
+		expect(runFailureMessage({ error: 'boom' })).toBeUndefined();
+		expect(runFailureMessage({ error: ['boom'] })).toBeUndefined();
+	});
+
+	it('defaults the status when the run read omits it', () => {
+		expect(runFailureMessage({ error: { message: 'why' } })).toBe('Run FAILED: why');
 	});
 });

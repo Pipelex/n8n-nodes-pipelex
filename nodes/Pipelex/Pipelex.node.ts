@@ -21,7 +21,9 @@ import {
 	idempotencyKey,
 	mapResultResponse,
 	requestResult,
+	requestRunStatus,
 	requestStart,
+	runFailureMessage,
 	runSourceError,
 	withRunId,
 	type ApiConnection,
@@ -302,6 +304,43 @@ function throwResultError(
 }
 
 /**
+ * Enrich a terminal outcome with the reason a run failed, when there is one.
+ *
+ * The results route's 409 body says only "Run finished with status FAILED; no
+ * result available", so the workflow author is told a run failed but never why —
+ * while the real cause ("missing required inputs: illustrations") sits on the run
+ * row. One extra light read recovers it.
+ *
+ * Returns a (possibly unchanged) outcome rather than throwing, so the caller's
+ * `throwResultError` stays the single `never`-returning exit — `await`ing a
+ * throwing helper would not narrow control flow, and the compiler would stop
+ * believing the branch ends.
+ *
+ * Best-effort by construction: any problem fetching or parsing leaves the
+ * original 409 message in place. A failure to explain a failure must never
+ * replace it.
+ */
+async function enrichFailureOutcome(
+	ctx: IExecuteFunctions,
+	conn: ApiConnection,
+	runId: string,
+	outcome: Exclude<ResultOutcome, { kind: 'completed' } | { kind: 'running' }>,
+): Promise<Exclude<ResultOutcome, { kind: 'completed' } | { kind: 'running' }>> {
+	if (outcome.kind !== 'failed') return outcome;
+	try {
+		const response = await requestRunStatus(ctx, conn, runId);
+		if (response.statusCode < 200 || response.statusCode >= 300) return outcome;
+		const body = (response.body ?? {}) as IDataObject;
+		const reason = runFailureMessage(body);
+		// Attach the run read as the error body too, so n8n's "Error details"
+		// exposes error_type / pipe_code / finished_at beside the message.
+		return reason ? { ...outcome, message: reason, body } : outcome;
+	} catch {
+		return outcome;
+	}
+}
+
+/**
  * Poll a run's results endpoint until it reaches a terminal state — the one
  * loop shared by Start & Wait for Result (fed by its own StartAck) and
  * Poll & Get Result (fed by the user-supplied pipeline_run_id); the n8n
@@ -345,7 +384,7 @@ async function pollForResultLoop(
 		const isDegraded = outcome.kind === 'running' && outcome.degraded;
 		const isMidWrite = outcome.kind === 'missingMainStuff';
 		if (outcome.kind !== 'running' && !isMidWrite) {
-			throwResultError(ctx, outcome, itemIndex);
+			throwResultError(ctx, await enrichFailureOutcome(ctx, conn, runId, outcome), itemIndex);
 		}
 
 		// A 200 with no main_stuff is the mid-write window, not a failure: the run
@@ -356,7 +395,7 @@ async function pollForResultLoop(
 		if (isMidWrite) {
 			consecutiveMidWrite += 1;
 			if (consecutiveMidWrite > MAX_CONSECUTIVE_MID_WRITE) {
-				throwResultError(ctx, outcome, itemIndex);
+				throwResultError(ctx, await enrichFailureOutcome(ctx, conn, runId, outcome), itemIndex);
 			}
 		} else {
 			consecutiveMidWrite = 0;
@@ -544,7 +583,7 @@ async function getRunResult(
 			message: RESULT_MID_WRITE_MESSAGE,
 		};
 	}
-	throwResultError(ctx, outcome, itemIndex);
+	throwResultError(ctx, await enrichFailureOutcome(ctx, conn, runId, outcome), itemIndex);
 }
 
 export class Pipelex implements INodeType {

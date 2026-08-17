@@ -163,6 +163,20 @@ A completed run **always** delivers a `main_stuff` — but not always the instan
 
 Either way you never receive an empty `COMPLETED` item that breaks a later node instead.
 
+### When a run fails
+
+A failed run raises an error on the item (or, with **Continue On Fail**, lands in `error`) carrying the reason, not just the fact:
+
+```
+Run FAILED: Live run of PipeSequence 'build_client_quote': missing required
+inputs: illustrations. These optional inputs may be omitted: comments.
+[PipeRunInputsError]
+```
+
+The terminal status is kept because it matters — `TIMED_OUT` and `CANCELLED` read very differently from `FAILED`. n8n's **Error details** panel additionally shows the run row, so `error_type`, `pipe_code` and `finished_at` are there beside the message.
+
+If Pipelex cannot supply a reason — the report has not landed yet, or the extra read fails — you get the generic *"Run finished with status FAILED; no result available"* plus the `pipeline_run_id`. The run still failed; only the explanation is missing.
+
 ### Token usage and cost
 
 `tokens_usages` carries one record per inference call — LLM, image generation, extraction and search alike:

@@ -1096,3 +1096,123 @@ describe('Pipelex node — operation surface (description sanity)', () => {
 		expect(operations).not.toContain('getResult');
 	});
 });
+
+describe('Pipelex node — explaining a failed run', () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	const FAILURE_MESSAGE =
+		"Live run of PipeSequence 'build_client_quote': missing required inputs: illustrations. These optional inputs may be omitted: comments.";
+	const RUN_ROW = {
+		pipeline_run_id: 'run-1',
+		status: 'FAILED',
+		pipe_code: 'build_client_quote',
+		error: { message: FAILURE_MESSAGE, error_type: 'PipeRunInputsError' },
+	};
+
+	/** results → 409 (the generic body); status → the run row carrying the reason. */
+	function failedRunImpl(statusResponse: IN8nHttpFullResponse): HttpImpl {
+		return (options) => {
+			if (options.method === 'POST') return fullResponse(202, START_ACK);
+			if (String(options.url).endsWith('/status')) return statusResponse;
+			return fullResponse(409, { detail: 'Run finished with status FAILED; no result available' });
+		};
+	}
+
+	it('surfaces the real reason instead of "no result available"', async () => {
+		// The 409 knows only THAT the run failed. The reason lives on the run row,
+		// so a failure costs one extra light read to become explicable.
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: { methodId: 'm', inputs: '{}' },
+			continueOnFail: true,
+			httpImpl: failedRunImpl(fullResponse(200, RUN_ROW)),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		const error = String(result[0][0].json.error);
+		expect(error).toContain('missing required inputs: illustrations');
+		expect(error).toContain('PipeRunInputsError');
+		expect(error).not.toContain('no result available');
+
+		// It reads /status (light), never /runs/{id} (which drags mthds_contents).
+		const urls = httpFn.mock.calls.map((call) => String(call[0].url));
+		expect(urls.some((url) => url.endsWith('/v1/runs/run-1/status'))).toBe(true);
+		expect(urls).not.toContain('https://api.test/v1/runs/run-1');
+	});
+
+	it('falls back to the 409 message when the run row carries no report', async () => {
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: { methodId: 'm', inputs: '{}' },
+			continueOnFail: true,
+			httpImpl: failedRunImpl(fullResponse(200, { pipeline_run_id: 'run-1', status: 'FAILED' })),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('no result available');
+	});
+
+	it.each([
+		['the status read errors', fullResponse(500, { detail: 'boom' })],
+		['the status read 404s', fullResponse(404, {})],
+	])('still reports the failure when %s', async (_label, statusResponse) => {
+		// Best-effort enrichment: a failure to EXPLAIN a failure must never replace
+		// or swallow the failure itself.
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: { methodId: 'm', inputs: '{}' },
+			continueOnFail: true,
+			httpImpl: failedRunImpl(statusResponse),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('no result available');
+	});
+
+	it('survives the status read throwing outright', async () => {
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: { methodId: 'm', inputs: '{}' },
+			continueOnFail: true,
+			httpImpl: (options) => {
+				if (options.method === 'POST') return fullResponse(202, START_ACK);
+				if (String(options.url).endsWith('/status')) throw new Error('network down');
+				return fullResponse(409, { detail: 'Run finished with status FAILED; no result available' });
+			},
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('no result available');
+	});
+
+	it('explains a failure on the single-shot Get Run Result too', async () => {
+		const { ctx } = makeContext({
+			operation: 'getResult',
+			params: { runId: 'run-1' },
+			continueOnFail: true,
+			httpImpl: (options) =>
+				String(options.url).endsWith('/status')
+					? fullResponse(200, RUN_ROW)
+					: fullResponse(409, { detail: 'Run finished with status FAILED; no result available' }),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('missing required inputs: illustrations');
+	});
+
+	it('does not read the run row for a non-failure error (403)', async () => {
+		// Only a terminal FAILED run has a report to fetch; spending a request on a
+		// 403 or 404 would be waste.
+		const { ctx, httpFn } = makeContext({
+			operation: 'getResult',
+			params: { runId: 'run-1' },
+			continueOnFail: true,
+			httpImpl: () => fullResponse(403, { detail: 'forbidden' }),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		expect(httpFn.mock.calls.map((call) => String(call[0].url))).not.toContain(
+			'https://api.test/v1/runs/run-1/status',
+		);
+	});
+});

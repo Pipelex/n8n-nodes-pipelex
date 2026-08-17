@@ -497,6 +497,63 @@ export async function requestStart(
 }
 
 /**
+ * `GET /v1/runs/{pipeline_run_id}/status` — the light run read
+ * (`RunPublic` + `degraded`), used to recover WHY a run failed.
+ *
+ * Deliberately the `/status` route and not `/runs/{id}`: both carry the stored
+ * `error` report, but the latter also drags `mthds_contents` + `inputs` — the
+ * run's whole source, tens of KB — which is pure waste when all we want is a
+ * message.
+ */
+export async function requestRunStatus(
+	ctx: IExecuteFunctions,
+	conn: ApiConnection,
+	runId: string,
+): Promise<IN8nHttpFullResponse> {
+	return (await ctx.helpers.httpRequest({
+		method: 'GET' as IHttpRequestMethods,
+		url: `${conn.baseUrl}/v1/runs/${encodeURIComponent(runId)}/status`,
+		headers: { Authorization: conn.authorization },
+		json: true,
+		returnFullResponse: true,
+		ignoreHttpStatusErrors: true,
+	})) as IN8nHttpFullResponse;
+}
+
+/**
+ * Turn a run read into the reason the run failed.
+ *
+ * The results route's 409 says only *"Run finished with status FAILED; no result
+ * available"* — true, and useless. The actual cause (`PipeRunInputsError:
+ * missing required inputs: illustrations`, and the like) is a separate stored
+ * artifact: the runner posts it on the completion callback and the platform keeps
+ * it as `error` on the run row (`RunPublic.error`, "surfaced so the webapp can
+ * tell the user WHY a run failed instead of a generic message").
+ *
+ * So a failure needs a second read to be explicable, exactly as `pipelex-app`
+ * does it (`use-method-runs.ts`: the terminal signal "carries only the terminal
+ * status, not the reason", so it fetches the run and shows `error.message`).
+ *
+ * Pure and total: returns `undefined` when the read carries no report, so the
+ * caller keeps its generic fallback rather than inventing one.
+ */
+export function runFailureMessage(runBody: IDataObject): string | undefined {
+	const report = runBody.error;
+	if (report === null || typeof report !== 'object' || Array.isArray(report)) return undefined;
+	const { message, error_type: errorType } = report as { message?: unknown; error_type?: unknown };
+	if (typeof message !== 'string' || message.length === 0) return undefined;
+
+	const status = typeof runBody.status === 'string' ? runBody.status : 'FAILED';
+	// Lead with the terminal status (the 409 said it and it is worth keeping — a
+	// TIMED_OUT run reads very differently from a FAILED one), then the real
+	// reason, then the error type when it adds a name the message does not.
+	const named = typeof errorType === 'string' && errorType.length > 0 && !message.includes(errorType)
+		? `${message} [${errorType}]`
+		: message;
+	return `Run ${status}: ${named}`;
+}
+
+/**
  * `GET /v1/runs/{pipeline_run_id}/results`. Returns the full response
  * (status + headers + body) so the caller maps it via `mapResultResponse`.
  */
