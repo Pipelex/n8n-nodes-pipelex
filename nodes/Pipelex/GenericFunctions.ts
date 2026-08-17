@@ -360,7 +360,7 @@ export type ResultOutcome =
 	// either way, but only counts `degraded` responses toward the
 	// consecutive-503 ceiling (see SERVICE_UNAVAILABLE_MESSAGE).
 	| { kind: 'running'; retryAfterSeconds: number; degraded: boolean }
-	| { kind: 'failed'; message: string; body: IDataObject }
+	| { kind: 'failed'; message: string; description?: string; body: IDataObject }
 	| { kind: 'forbidden'; message: string; body: IDataObject }
 	| { kind: 'notFound'; message: string; body: IDataObject }
 	| { kind: 'unexpected'; statusCode: number; message: string; body: IDataObject };
@@ -551,6 +551,90 @@ export function runFailureMessage(runBody: IDataObject): string | undefined {
 		? `${message} [${errorType}]`
 		: message;
 	return `Run ${status}: ${named}`;
+}
+
+/**
+ * Build the `description` n8n shows under the headline in the "From Pipelex"
+ * error panel, out of the run's stored failure report.
+ *
+ * `NodeApiError` renders exactly three things — `message`, `description`, and
+ * `httpCode` — and does NOT dump the attached body. So everything the report
+ * knows beyond the one-line reason has to be folded into `description` or it is
+ * invisible. Left to itself, n8n picks `error.message` out of the body and repeats
+ * it as the description (`node-api.error.js`: `description = data.error.message`),
+ * which is why a failure used to say the same sentence twice.
+ *
+ * The report is the runner's `ErrorReport.to_dict()`, so the fields worth
+ * surfacing are the ones a workflow author can act on:
+ * - `title` — the human name of the failure class
+ * - `user_action` — literally what to do about it (`change_input`,
+ *   `check_billing`, `wait_and_retry`, …) plus its free-form `detail`
+ * - `retryable` — whether n8n's own "Retry On Fail" could ever help
+ * - `error_type` / `error_domain` — for branching and for reporting upstream
+ * - `type_uri` — the docs page for this error
+ * - `validation_errors` — how many structured items came with it
+ *
+ * Every field is optional (older reports carry fewer), so this emits only what is
+ * present and returns `undefined` when there is nothing to add — never an empty
+ * or skeleton block.
+ */
+export function runFailureDescription(runBody: IDataObject): string | undefined {
+	const report = runBody.error;
+	if (report === null || typeof report !== 'object' || Array.isArray(report)) return undefined;
+	const fields = report as Record<string, unknown>;
+
+	const lines: string[] = [];
+	const text = (value: unknown): string | undefined =>
+		typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+
+	const title = text(fields.title);
+	if (title) lines.push(title);
+
+	// The action first — it is the only line that tells the user what to DO.
+	const action = fields.user_action;
+	if (action !== null && typeof action === 'object' && !Array.isArray(action)) {
+		const { kind, detail } = action as { kind?: unknown; detail?: unknown };
+		const kindText = text(kind);
+		const detailText = text(detail);
+		if (kindText || detailText) {
+			lines.push(
+				`What to do: ${[kindText?.replace(/_/g, ' '), detailText].filter(Boolean).join(' — ')}`,
+			);
+		}
+	}
+
+	if (typeof fields.retryable === 'boolean') {
+		lines.push(
+			fields.retryable
+				? 'Retryable: yes — re-running may succeed.'
+				: 'Retryable: no — re-running will fail the same way until the cause is fixed.',
+		);
+	}
+
+	const classification = [text(fields.error_type), text(fields.error_domain), text(fields.error_category)]
+		.filter(Boolean)
+		.join(' · ');
+	if (classification) lines.push(`Error: ${classification}`);
+
+	const model = [text(fields.provider), text(fields.model)].filter(Boolean).join(' / ');
+	if (model) lines.push(`Model: ${model}`);
+
+	const validationErrors = fields.validation_errors;
+	if (Array.isArray(validationErrors) && validationErrors.length > 0) {
+		lines.push(`Validation errors: ${validationErrors.length} (see the run in Pipelex for detail)`);
+	}
+
+	const runContext = [
+		text(runBody.pipeline_run_id) && `run ${text(runBody.pipeline_run_id)}`,
+		text(runBody.pipe_code) && `pipe ${text(runBody.pipe_code)}`,
+		text(runBody.finished_at) && `finished ${text(runBody.finished_at)}`,
+	].filter(Boolean);
+	if (runContext.length > 0) lines.push(`Context: ${runContext.join(' · ')}`);
+
+	const docs = text(fields.type_uri);
+	if (docs) lines.push(`Docs: ${docs}`);
+
+	return lines.length > 0 ? lines.join('\n') : undefined;
 }
 
 /**

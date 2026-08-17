@@ -173,7 +173,20 @@ inputs: illustrations. These optional inputs may be omitted: comments.
 [PipeRunInputsError]
 ```
 
-The terminal status is kept because it matters — `TIMED_OUT` and `CANCELLED` read very differently from `FAILED`. n8n's **Error details** panel additionally shows the run row, so `error_type`, `pipe_code` and `finished_at` are there beside the message.
+The terminal status is kept because it matters — `TIMED_OUT` and `CANCELLED` read very differently from `FAILED`.
+
+n8n's **Error details → From Pipelex** panel carries the rest of the report, when Pipelex supplies it:
+
+```
+Pipe run inputs
+What to do: change input — Provide the illustrations input
+Retryable: no — re-running will fail the same way until the cause is fixed.
+Error: PipeRunInputsError · pipe_run
+Context: run mt_… · pipe build_client_quote · finished 2026-08-17T16:01:54Z
+Docs: https://docs.pipelex.com/latest/errors/pipe-run-inputs-error/
+```
+
+Two lines are worth acting on directly: **What to do** is the runner's own advice for this error class, and **Retryable** tells you whether n8n's *Retry On Fail* could ever help — on a `no`, retrying will fail identically until you change something. An inference failure also names the provider and model.
 
 If Pipelex cannot supply a reason — the report has not landed yet, or the extra read fails — you get the generic *"Run finished with status FAILED; no result available"* plus the `pipeline_run_id`. The run still failed; only the explanation is missing.
 

@@ -11,6 +11,7 @@ import {
 	buildStartBody,
 	idempotencyKey,
 	mapResultResponse,
+	runFailureDescription,
 	runFailureMessage,
 	runSourceError,
 	withRunId,
@@ -479,5 +480,69 @@ describe('runFailureMessage (recovering WHY a run failed)', () => {
 
 	it('defaults the status when the run read omits it', () => {
 		expect(runFailureMessage({ error: { message: 'why' } })).toBe('Run FAILED: why');
+	});
+});
+
+describe('runFailureDescription (the rest of the failure report)', () => {
+	it('surfaces what the author can act on, in priority order', () => {
+		const description = runFailureDescription({
+			pipeline_run_id: 'run-1',
+			pipe_code: 'build_client_quote',
+			finished_at: '2026-08-17T16:01:54Z',
+			error: {
+				message: 'missing required inputs: illustrations',
+				error_type: 'PipeRunInputsError',
+				error_domain: 'pipe_run',
+				title: 'Pipe run inputs',
+				type_uri: 'https://docs.pipelex.com/latest/errors/pipe-run-inputs-error/',
+				retryable: false,
+				user_action: { kind: 'change_input', detail: 'Provide the illustrations input' },
+			},
+		});
+		const lines = (description ?? '').split('\n');
+		expect(lines[0]).toBe('Pipe run inputs');
+		// The action comes before the taxonomy — it is the only line that says
+		// what to DO.
+		expect(lines[1]).toBe('What to do: change input — Provide the illustrations input');
+		expect(description).toContain('Retryable: no');
+		expect(description).toContain('Error: PipeRunInputsError · pipe_run');
+		expect(description).toContain('Context: run run-1 · pipe build_client_quote');
+		expect(description).toContain('Docs: https://docs.pipelex.com/latest/errors/pipe-run-inputs-error/');
+	});
+
+	it('says plainly when retrying could help', () => {
+		expect(
+			runFailureDescription({ error: { message: 'rate limited', retryable: true } }),
+		).toContain('Retryable: yes');
+	});
+
+	it('reports provider and model for an inference failure', () => {
+		expect(
+			runFailureDescription({
+				error: { message: 'bad model', provider: 'openai', model: 'gpt-4o' },
+			}),
+		).toContain('Model: openai / gpt-4o');
+	});
+
+	it('counts structured validation errors', () => {
+		expect(
+			runFailureDescription({
+				error: { message: 'invalid', validation_errors: [{ category: 'dry_run' }, {}] },
+			}),
+		).toContain('Validation errors: 2');
+	});
+
+	it('emits nothing rather than a skeleton when the report is bare', () => {
+		// An older report may carry only a message — which is already the headline,
+		// so there is no description to add.
+		expect(runFailureDescription({ error: { message: 'just a message' } })).toBeUndefined();
+		expect(runFailureDescription({})).toBeUndefined();
+		expect(runFailureDescription({ error: null })).toBeUndefined();
+	});
+
+	it('ignores blank and non-string fields instead of printing empty labels', () => {
+		expect(
+			runFailureDescription({ error: { message: 'm', title: '   ', error_type: 42 } }),
+		).toBeUndefined();
 	});
 });

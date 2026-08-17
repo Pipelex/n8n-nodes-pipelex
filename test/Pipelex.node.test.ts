@@ -1140,6 +1140,50 @@ describe('Pipelex node — explaining a failed run', () => {
 		expect(urls).not.toContain('https://api.test/v1/runs/run-1');
 	});
 
+	it('puts the actionable report in the error description, not a repeat of the message', async () => {
+		// NodeApiError renders message/description/httpCode only. Without an explicit
+		// description, n8n derives one by echoing error.message from the body — the
+		// same sentence twice, which is what the panel used to show.
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: { methodId: 'm', inputs: '{}' },
+			continueOnFail: true,
+			httpImpl: failedRunImpl(
+				fullResponse(200, {
+					...RUN_ROW,
+					finished_at: '2026-08-17T16:01:54Z',
+					error: {
+						...RUN_ROW.error,
+						title: 'Pipe run inputs',
+						type_uri: 'https://docs.pipelex.com/latest/errors/pipe-run-inputs-error/',
+						retryable: false,
+						user_action: { kind: 'change_input', detail: 'Provide the illustrations input' },
+					},
+				}),
+			),
+		});
+
+		// Catch the NodeApiError itself — `continueOnFail` flattens it to a message
+		// string, which would hide the description entirely.
+		let captured: { message?: string; description?: string } | undefined;
+		try {
+			await Pipelex.prototype.execute.call({
+				...ctx,
+				continueOnFail: () => false,
+			} as unknown as IExecuteFunctions);
+		} catch (error) {
+			captured = error as { message?: string; description?: string };
+		}
+
+		expect(captured?.message).toContain('missing required inputs: illustrations');
+		expect(captured?.description).toContain('Pipe run inputs');
+		expect(captured?.description).toContain('What to do: change input');
+		expect(captured?.description).toContain('Retryable: no');
+		expect(captured?.description).toContain('Docs: https://docs.pipelex.com');
+		// The description must add information, not restate the headline.
+		expect(captured?.description).not.toBe(captured?.message);
+	});
+
 	it('falls back to the 409 message when the run row carries no report', async () => {
 		const { ctx } = makeContext({
 			operation: 'startAndPoll',

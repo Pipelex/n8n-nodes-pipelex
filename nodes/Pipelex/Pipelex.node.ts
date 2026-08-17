@@ -23,6 +23,7 @@ import {
 	requestResult,
 	requestRunStatus,
 	requestStart,
+	runFailureDescription,
 	runFailureMessage,
 	runSourceError,
 	withRunId,
@@ -270,6 +271,10 @@ function throwResultError(
 		case 'failed':
 			throw new NodeApiError(ctx.getNode(), outcome.body as JsonObject, {
 				message: outcome.message,
+				// Passing `description` explicitly also stops n8n deriving one by
+				// echoing `error.message` out of the body — which just repeated the
+				// headline sentence verbatim.
+				description: outcome.description,
 				httpCode: '409',
 				itemIndex,
 			});
@@ -332,9 +337,10 @@ async function enrichFailureOutcome(
 		if (response.statusCode < 200 || response.statusCode >= 300) return outcome;
 		const body = (response.body ?? {}) as IDataObject;
 		const reason = runFailureMessage(body);
-		// Attach the run read as the error body too, so n8n's "Error details"
-		// exposes error_type / pipe_code / finished_at beside the message.
-		return reason ? { ...outcome, message: reason, body } : outcome;
+		if (!reason) return outcome;
+		// `description` is the only place the rest of the report can surface —
+		// NodeApiError renders message/description/httpCode and nothing else.
+		return { ...outcome, message: reason, description: runFailureDescription(body), body };
 	} catch {
 		return outcome;
 	}
