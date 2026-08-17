@@ -10,6 +10,9 @@ NC := \033[0m # No Color
 
 # Paths
 N8N_CUSTOM_DIR := $(HOME)/.n8n/custom
+# The port `n8n-node dev` serves on. Used by `stop` (and by `run`'s pre-flight)
+# to find the process by port rather than by command pattern.
+N8N_PORT ?= 5678
 PACKAGE_NAME := n8n-nodes-pipelex
 
 # Required pnpm version
@@ -168,16 +171,44 @@ unlink:
 run: fix-permissions
 	@echo "$(BLUE)Starting the n8n dev server with your node (no global n8n needed)...$(NC)"
 	@echo "$(YELLOW)Uses @n8n/node-cli — downloads/runs n8n in a sandbox and hot-reloads on save.$(NC)"
+	@# An orphaned instance from a previous session holds the port and makes this
+	@# target fail with "port already in use" AFTER a successful compile, which
+	@# reads like a build problem. Clear it first so `make run` is idempotent.
+	@if lsof -nP -iTCP:$(N8N_PORT) -sTCP:LISTEN -t >/dev/null 2>&1; then \
+		echo "$(YELLOW)Port $(N8N_PORT) already in use — stopping the old instance$(NC)"; \
+		$(MAKE) --no-print-directory stop; \
+	fi
 	@if [ -f .env.n8n ]; then \
 		export $$(cat .env.n8n | grep -v '^#' | xargs) && pnpm exec n8n-node dev; \
 	else \
 		pnpm exec n8n-node dev; \
 	fi
 
+# Stop whatever is holding n8n's port. Targets the PORT, not a command pattern:
+# `make run` starts n8n via @n8n/node-cli as `.../.bin/n8n` with NO arguments, so
+# the old `pkill -f "n8n start"` never matched it — which is how orphaned
+# instances kept surviving `make stop` and then failing the next `make run` with
+# "port 5678 is already in use". Sends TERM first, escalates to KILL only if the
+# port is still held, and says so either way.
 stop:
-	@echo "$(BLUE)Stopping n8n...$(NC)"
-	@pkill -f "n8n start" || true
-	@echo "$(GREEN)✓ n8n stopped$(NC)"
+	@echo "$(BLUE)Stopping n8n on port $(N8N_PORT)...$(NC)"
+	@pids=$$(lsof -nP -iTCP:$(N8N_PORT) -sTCP:LISTEN -t 2>/dev/null); \
+	if [ -z "$$pids" ]; then \
+		echo "$(GREEN)✓ nothing listening on $(N8N_PORT)$(NC)"; \
+	else \
+		kill $$pids 2>/dev/null || true; \
+		sleep 2; \
+		pids=$$(lsof -nP -iTCP:$(N8N_PORT) -sTCP:LISTEN -t 2>/dev/null); \
+		if [ -n "$$pids" ]; then \
+			echo "$(YELLOW)Did not exit on TERM — sending KILL$(NC)"; \
+			kill -9 $$pids 2>/dev/null || true; \
+			sleep 1; \
+		fi; \
+		if lsof -nP -iTCP:$(N8N_PORT) -sTCP:LISTEN -t >/dev/null 2>&1; then \
+			echo "$(RED)✗ port $(N8N_PORT) is still in use$(NC)"; exit 1; \
+		fi; \
+		echo "$(GREEN)✓ n8n stopped$(NC)"; \
+	fi
 
 test: link run
 
