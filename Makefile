@@ -61,6 +61,7 @@ check:
 	@pnpm run lint
 	@pnpm run build
 	@pnpm run scan:simulate
+	@pnpm run typecheck:test
 	@pnpm run test
 	@echo "$(GREEN)✓ All checks passed$(NC)"
 

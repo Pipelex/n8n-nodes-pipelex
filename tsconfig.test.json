@@ -1,0 +1,19 @@
+// Typecheck-only config for the test suite.
+//
+// The build's `tsconfig.json` deliberately excludes `test/` — tests must never
+// reach `dist/`. But Vitest runs them through esbuild, which STRIPS types
+// without checking them, so nothing in the suite was type-checked at all: a test
+// could pass while asserting against a shape that does not compile.
+//
+// `pnpm run typecheck:test` closes that hole. Wired into `make check` and the
+// Test workflow.
+{
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"incremental": false,
+		"declaration": false,
+		"sourceMap": false
+	},
+	"include": ["test/**/*", "nodes/**/*", "credentials/**/*"]
+}

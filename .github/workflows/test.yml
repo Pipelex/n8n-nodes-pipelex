@@ -23,5 +23,11 @@ jobs:
       - name: Install dependencies
         run: make install
 
+      # Vitest runs tests through esbuild, which STRIPS types without checking
+      # them — so nothing in the suite was type-checked at all. This step
+      # compiles it for real.
+      - name: Typecheck test suite
+        run: pnpm run typecheck:test
+
       - name: Run unit tests
         run: pnpm run test

@@ -118,19 +118,87 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		expect(httpFn.mock.calls[0][0].body).toEqual({ method_id: 'method-42', inputs: {} });
 	});
 
-	it('sends method_id + MTHDS bundles together (inline bundles run; method_id links run history)', async () => {
+	it('refuses a stored method AND an inline one (no run, no ambiguity)', async () => {
+		// The hosted API would accept both — it runs the inline method and records
+		// method_id as run-history linkage. The node refuses, so there is one
+		// unambiguous answer to what it is running.
 		const { ctx, httpFn } = makeContext({
 			operation: 'startAndPoll',
-			params: { methodId: 'method-42', mthdsContents: ['bundle'], inputs: '{}' },
+			params: {
+				methodId: 'method-42',
+				inlineMethod: true,
+				mthdsContents: ['bundle'],
+				inputs: '{}',
+			},
+			continueOnFail: true,
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toMatch(/Choose one/);
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('reads the MTHDS Bundles fixedCollection shape', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				inlineMethod: true,
+				mthdsContents: {
+					bundle: [
+						{ content: 'domain = "a"' },
+						// The UI persists a row as soon as the add-button is clicked.
+						{ content: '   ' },
+						{ content: 'domain = "b"' },
+					],
+				},
+				inputs: '{}',
+			},
 			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
 		});
 
 		await Pipelex.prototype.execute.call(ctx);
 		expect(httpFn.mock.calls[0][0].body).toEqual({
-			method_id: 'method-42',
-			mthds_contents: ['bundle'],
+			mthds_contents: ['domain = "a"', 'domain = "b"'],
 			inputs: {},
 		});
+	});
+
+	it('still reads a workflow saved with the old string[] MTHDS Bundles field', async () => {
+		// The field changed from a multi-value string to a fixedCollection. An
+		// upgraded workflow still holds the bare array — read it rather than silently
+		// losing the user's pasted method.
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: { inlineMethod: true, mthdsContents: ['legacy bundle', '  '], inputs: '{}' },
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		expect(httpFn.mock.calls[0][0].body).toEqual({
+			mthds_contents: ['legacy bundle'],
+			inputs: {},
+		});
+	});
+
+	it('ignores inline fields left behind when the toggle is off', async () => {
+		// n8n keeps a hidden field's stored value. A user who pastes a method, then
+		// switches back to a stored one, must not trip the either/or error on fields
+		// they can no longer see — nor silently send them.
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'method-42',
+				inlineMethod: false,
+				mthdsContents: ['leftover'],
+				pythonFiles: { file: [{ path: 'funcs/old.py', content: 'stale' }] },
+				inputs: '{}',
+			},
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		expect(httpFn.mock.calls[0][0].body).toEqual({ method_id: 'method-42', inputs: {} });
 	});
 
 	it('keeps polling while running (202), honoring Retry-After, then returns when completed', async () => {
@@ -219,7 +287,7 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		expect(String(json.message)).toContain('Get Run Result');
 	});
 
-	it('raises an actionable NodeApiError on a 403 start (D3: unscoped key)', async () => {
+	it('raises an actionable NodeApiError on a 403 start (account API access not enabled)', async () => {
 		const { ctx } = makeContext({
 			operation: 'startAndPoll',
 			params: { pipeCode: 'p', inputs: '{}' },
@@ -302,7 +370,18 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		});
 
 		const result = await Pipelex.prototype.execute.call(ctx);
-		expect(result[0][0].json.error).toBe(FORBIDDEN_MESSAGE);
+		// The actionable guidance leads; the server's problem detail is appended as
+		// a supporting fact (see `withServerDetail`).
+		expect(result[0][0].json.error).toBe(`${FORBIDDEN_MESSAGE} (Server: forbidden)`);
+	});
+
+	it('403 message names the account-level surface, never a per-key scope', async () => {
+		// Regression guard: an earlier message told users their key needed a
+		// `runs:execute` scope. No such scope exists — the platform gates the run
+		// surface per ACCOUNT (`require_surface_access`), so that wording sent
+		// people hunting for a setting that is not there.
+		expect(FORBIDDEN_MESSAGE).not.toMatch(/runs:execute|scope/i);
+		expect(FORBIDDEN_MESSAGE).toMatch(/account/i);
 	});
 
 	it('fails fast (no run) when no run source is provided', async () => {
@@ -314,8 +393,194 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		});
 
 		const result = await Pipelex.prototype.execute.call(ctx);
-		expect(String(result[0][0].json.error)).toContain('Pipe Code');
+		expect(String(result[0][0].json.error)).toContain('Nothing to run');
 		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('sends the pasted method plus its Python as one files bundle', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				inputs: '{}',
+				inlineMethod: true,
+				mthdsContents: ['domain = "d"'],
+				pythonFiles: {
+					file: [
+						{ path: 'funcs/score.py', content: 'def score(): ...' },
+						// Blank path — the UI persists a row on "Add" before typing.
+						{ path: '   ', content: 'ignored' },
+						// Blank CONTENT is kept: an empty requirements.txt is legitimate.
+						{ path: 'requirements.txt', content: '' },
+					],
+				},
+			},
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		expect(httpFn.mock.calls[0][0].body).toEqual({
+			inputs: {},
+			files: {
+				'main.mthds': 'domain = "d"',
+				'funcs/score.py': 'def score(): ...',
+				'requirements.txt': '',
+			},
+		});
+	});
+
+	it('ships inline MTHDS Bundles together with Python Files as one bundle', async () => {
+		// The headline flow: paste the method, attach its Python, run. The protocol
+		// forbids `mthds_contents` beside a bundle, so the node folds the inline
+		// contents INTO the bundle rather than rejecting the combination.
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				inputs: '{}',
+				inlineMethod: true,
+				mthdsContents: ['domain = "d"'],
+				pythonFiles: { file: [{ path: 'funcs/score.py', content: 'def score(): ...' }] },
+			},
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		expect(httpFn.mock.calls[0][0].body).toEqual({
+			inputs: {},
+			files: {
+				'main.mthds': 'domain = "d"',
+				'funcs/score.py': 'def score(): ...',
+			},
+		});
+	});
+
+	it('fails fast (no run) when Python is supplied with no method', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				inputs: '{}',
+				inlineMethod: true,
+				pythonFiles: { file: [{ path: 'funcs/score.py', content: 'def score(): ...' }] },
+			},
+			continueOnFail: true,
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toMatch(/needs the method/);
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('fails fast (no run) on an unsafe Python path', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				inputs: '{}',
+				inlineMethod: true,
+				mthdsContents: ['m'],
+				pythonFiles: { file: [{ path: '../escape.py', content: 'x' }] },
+			},
+			continueOnFail: true,
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toMatch(/escapes the bundle root/);
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('relays tokens_usages and usage_assembly_error to the item', async () => {
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: { pipeCode: 'p', inputs: '{}' },
+			httpImpl: startThenResults(() =>
+				fullResponse(200, {
+					...COMPLETED_RESULT,
+					tokens_usages: [{ pipe_code: 'p', cost: 0.0012, model_type: 'llm' }],
+					usage_assembly_error: null,
+				}),
+			),
+		});
+
+		const json = (await Pipelex.prototype.execute.call(ctx))[0][0].json;
+		expect(json.tokens_usages).toEqual([{ pipe_code: 'p', cost: 0.0012, model_type: 'llm' }]);
+		expect(json.usage_assembly_error).toBeNull();
+	});
+
+	it('polls through the mid-write window instead of failing a run that completed fine', async () => {
+		// The platform flips a run to COMPLETED and then relays whatever is in S3, so
+		// a poll can land in the window before main_stuff.json exists ("missing files
+		// come back null; the run may be partial mid-write"). Failing there would
+		// break a workflow whose run actually succeeded.
+		let call = 0;
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: { pipeCode: 'p', inputs: '{}' },
+			httpImpl: startThenResults(() => {
+				call += 1;
+				// Two mid-write readings, then the artifact lands.
+				return call <= 2
+					? fullResponse(200, { pipeline_run_id: 'run-1' })
+					: fullResponse(200, COMPLETED_RESULT);
+			}),
+		});
+
+		const json = (await Pipelex.prototype.execute.call(ctx))[0][0].json;
+		expect(json.status).toBe('COMPLETED');
+		expect(json.main_stuff).toEqual({ answer: 42 });
+		expect(call).toBe(3);
+	});
+
+	it('errors once the mid-write state persists past the ceiling, naming the run id', async () => {
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: { pipeCode: 'p', inputs: '{}' },
+			continueOnFail: true,
+			httpImpl: startThenResults(() => fullResponse(200, { pipeline_run_id: 'run-1' })),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		const error = String(result[0][0].json.error);
+		expect(error).toMatch(/never delivered its output/);
+		// The message promises a run id to report — it must actually carry one.
+		expect(error).toContain('run-1');
+		// No `{status: "COMPLETED"}` item slips through either way.
+		expect(result[0][0].json.status).toBeUndefined();
+	});
+
+	it('keeps the two ceilings independent — alternating 503s and mid-writes trips neither', async () => {
+		// Each ceiling counts CONSECUTIVE readings of its own kind, and any other
+		// reading resets it. So a long alternating sequence — far more of each than
+		// either ceiling allows — must still reach completion: a mid-write 200 proves
+		// the backend is reachable, and a 503 says nothing about the artifact.
+		let call = 0;
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: { pipeCode: 'p', inputs: '{}' },
+			httpImpl: startThenResults(() => {
+				call += 1;
+				if (call > 30) return fullResponse(200, COMPLETED_RESULT);
+				return call % 2 === 1
+					? fullResponse(503, {})
+					: fullResponse(200, { pipeline_run_id: 'run-1' });
+			}),
+		});
+
+		const json = (await Pipelex.prototype.execute.call(ctx))[0][0].json;
+		expect(json.status).toBe('COMPLETED');
+		expect(call).toBe(31);
+	});
+
+	it('still trips the 503 ceiling on a genuinely sustained outage', async () => {
+		// The counter reset above must not have defanged the outage guard.
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: { pipeCode: 'p', inputs: '{}' },
+			continueOnFail: true,
+			httpImpl: startThenResults(() => fullResponse(503, {})),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain(SERVICE_UNAVAILABLE_MESSAGE);
 	});
 });
 
@@ -371,16 +636,15 @@ describe('Pipelex node — Start Pipeline (start only, no polling)', () => {
 		expect(startCall.body).toEqual({ pipe_code: 'my-pipe', inputs: { a: 1 } });
 	});
 
-	it('shapes the start body identically to Start & Wait for Result (method_id + bundles)', async () => {
+	it('shapes the start body identically to Start & Wait for Result (inline method)', async () => {
 		const { ctx, httpFn } = makeContext({
 			operation: 'start',
-			params: { methodId: 'method-42', mthdsContents: ['bundle'], inputs: '{}' },
+			params: { inlineMethod: true, mthdsContents: ['bundle'], inputs: '{}' },
 			httpImpl: () => fullResponse(202, START_ACK),
 		});
 
 		await Pipelex.prototype.execute.call(ctx);
 		expect(httpFn.mock.calls[0][0].body).toEqual({
-			method_id: 'method-42',
 			mthds_contents: ['bundle'],
 			inputs: {},
 		});
@@ -395,11 +659,11 @@ describe('Pipelex node — Start Pipeline (start only, no polling)', () => {
 		});
 
 		const result = await Pipelex.prototype.execute.call(ctx);
-		expect(String(result[0][0].json.error)).toContain('Pipe Code');
+		expect(String(result[0][0].json.error)).toContain('Nothing to run');
 		expect(httpFn).not.toHaveBeenCalled();
 	});
 
-	it('raises the actionable 403 message on an unscoped key', async () => {
+	it('raises the actionable 403 message (account API access not enabled)', async () => {
 		const { ctx } = makeContext({
 			operation: 'start',
 			params: { pipeCode: 'p', inputs: '{}' },
@@ -516,6 +780,30 @@ describe('Pipelex node — Poll & Get Result (waitForResult by id)', () => {
 	});
 });
 
+describe('Pipelex node — expression-fed text fields', () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	it('rejects non-text Python file content, naming the offending path', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				inputs: '{}',
+				inlineMethod: true,
+				mthdsContents: ['m'],
+				pythonFiles: { file: [{ path: 'funcs/f.py', content: { nested: true } }] },
+			},
+			continueOnFail: true,
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		const error = String(result[0][0].json.error);
+		expect(error).toContain('funcs/f.py');
+		expect(error).toContain('must be text');
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+});
+
 describe('Pipelex node — Get Run Result (single-shot fetch)', () => {
 	beforeEach(() => vi.clearAllMocks());
 
@@ -578,7 +866,25 @@ describe('Pipelex node — Get Run Result (single-shot fetch)', () => {
 		expect(httpFn).toHaveBeenCalledTimes(1);
 	});
 
-	it('maps a 503 to still-running too (mirrors mthds-js getRunResult)', async () => {
+	it('reports the mid-write window as still-running, not an error', async () => {
+		// Single-shot cannot poll through the window, so it hands back a usable item
+		// telling the caller to fetch again. Erroring would fail a run that is about
+		// to be perfectly retrievable.
+		const { ctx, httpFn } = makeContext({
+			operation: 'getResult',
+			params: { runId: 'run-1' },
+			httpImpl: () => fullResponse(200, { pipeline_run_id: 'run-1', main_stuff: null }),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		const json = result[0][0].json;
+		expect(json.status).toBe('RUNNING');
+		expect(json.pipeline_run_id).toBe('run-1');
+		expect(String(json.message)).toContain('still being written');
+		expect(httpFn).toHaveBeenCalledTimes(1);
+	});
+
+	it('maps a 503 to still-running too (mirrors the SDK getRunResult)', async () => {
 		const { ctx, httpFn } = makeContext({
 			operation: 'getResult',
 			params: { runId: 'run-1' },
@@ -602,7 +908,7 @@ describe('Pipelex node — Get Run Result (single-shot fetch)', () => {
 		);
 	});
 
-	it('raises the actionable 403 message on an unscoped key', async () => {
+	it('raises the actionable 403 message (account API access not enabled)', async () => {
 		const { ctx } = makeContext({
 			operation: 'getResult',
 			params: { runId: 'run-1' },
@@ -656,13 +962,13 @@ describe('Pipelex node — inputs validation', () => {
 	it('treats a whitespace-only bundle as empty (guard fires, no call)', async () => {
 		const { ctx, httpFn } = makeContext({
 			operation: 'startAndPoll',
-			params: { pipeCode: '', mthdsContents: ['   \n  '], inputs: '{}' },
+			params: { pipeCode: '', inlineMethod: true, mthdsContents: ['   \n  '], inputs: '{}' },
 			continueOnFail: true,
 			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
 		});
 
 		const result = await Pipelex.prototype.execute.call(ctx);
-		expect(String(result[0][0].json.error)).toContain('Pipe Code');
+		expect(String(result[0][0].json.error)).toContain('Nothing to run');
 		expect(httpFn).not.toHaveBeenCalled();
 	});
 });
@@ -675,6 +981,69 @@ describe('Pipelex node — operation surface (description sanity)', () => {
 		const property = properties.find((p: INodeProperties) => p.name === name);
 		return (property?.displayOptions?.show?.operation ?? []) as string[];
 	};
+
+	it('orders the start fields: Method ID → inline toggle → the inline pair → Inputs', () => {
+		// Field order IS the explanation of the node: you pick a stored method, or
+		// open the toggle to paste one, and only then fill the inputs. Pinned because
+		// property order is display order and a careless insert reshuffles the UI.
+		const startFields = properties
+			.filter((p: INodeProperties) => showOperations(p.name).includes('startAndPoll'))
+			.map((p: INodeProperties) => p.name);
+		expect(startFields.slice(0, 5)).toEqual([
+			'methodId',
+			'inlineMethod',
+			'mthdsContents',
+			'pythonFiles',
+			'inputs',
+		]);
+	});
+
+	it('renders both halves of the inline method as the same kind of control', () => {
+		// They hold the two halves of one thing, so they must look like one control.
+		// A multi-value `string` renders a wide full-width add-button while a
+		// fixedCollection renders the compact `+ Add …` row; side by side those read
+		// as unrelated widgets, which is exactly how this looked before.
+		for (const name of ['mthdsContents', 'pythonFiles']) {
+			const property = properties.find((p: INodeProperties) => p.name === name);
+			expect(property?.type, name).toBe('fixedCollection');
+			expect(property?.typeOptions?.multipleValues, name).toBe(true);
+			expect(property?.placeholder, name).toMatch(/^Add /);
+		}
+	});
+
+	it('hides the inline pair behind the toggle', () => {
+		for (const name of ['mthdsContents', 'pythonFiles']) {
+			const property = properties.find((p: INodeProperties) => p.name === name);
+			expect(property?.displayOptions?.show?.inlineMethod, name).toEqual([true]);
+		}
+		// The toggle itself must NOT be gated on itself, or it could never be turned on.
+		const toggle = properties.find((p: INodeProperties) => p.name === 'inlineMethod');
+		expect(toggle?.displayOptions?.show?.inlineMethod).toBeUndefined();
+		expect(toggle?.default).toBe(false);
+	});
+
+	it('gives every fixedCollection a placeholder, so its add-button is not invisible', () => {
+		// Regression guard for a bug that shipped past lint AND past unit tests:
+		// `Python Files` and `Bundle Files` were defined with
+		// `typeOptions.multipleValueButtonText`, which labels the add-button only for
+		// simple multi-value types. On a fixedCollection the label comes from
+		// `placeholder`, and without it an empty collection renders as nothing at all
+		// — the fields were in the compiled description but absent from the editor.
+		// Nothing else catches this: the node's behaviour is fully testable through
+		// getNodeParameter, which does not care whether the field is reachable in the
+		// UI. (114 of 122 fixedCollections in n8n-nodes-base set placeholder.)
+		const collections = properties.filter(
+			(p: INodeProperties) => p.type === 'fixedCollection',
+		);
+		expect(collections.length).toBeGreaterThan(0);
+		for (const property of collections) {
+			expect(property.placeholder, `${property.name} needs a placeholder`).toBeTruthy();
+			expect(
+				property.typeOptions?.multipleValueButtonText,
+				`${property.name}: multipleValueButtonText does nothing on a fixedCollection — use placeholder`,
+			).toBeUndefined();
+		}
+	});
 
 	it('offers the four operations in usage order, defaulting to Start & Wait for Result', () => {
 		const operationProperty = properties.find((p: INodeProperties) => p.name === 'operation');

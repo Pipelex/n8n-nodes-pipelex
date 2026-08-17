@@ -1,6 +1,6 @@
 {
 	"name": "n8n-nodes-pipelex",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Pipelex n8n node package",
 	"license": "MIT",
 	"keywords": [
@@ -24,6 +24,7 @@
 		"scan:simulate": "eslint --config eslint.config.scan.mjs 'dist/**/*.js' 'dist/**/*.json' 'package.json'",
 		"test": "vitest run",
 		"test:watch": "vitest",
+		"typecheck:test": "tsc -p tsconfig.test.json --noEmit",
 		"format": "prettier --write .",
 		"prepublishOnly": "pnpm run build",
 		"postpublish": "sleep 10 && make check-published"

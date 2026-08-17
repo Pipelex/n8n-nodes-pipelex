@@ -34,144 +34,46 @@ The Pipelex API base URL is configured on the credential, not on the node. Open 
 
 > ⚠️ **Running on n8n Cloud or any deployed n8n instance?** `localhost`/`127.0.0.1` URLs won't be reachable from n8n. Use a Base URL that n8n can reach over the network.
 
-The credential test hits `GET <Base URL>/v1/auth/verify` to verify both reachability and the Bearer Token. Note it only checks the token is **valid** — not that it can **start runs**. On the hosted API, running a pipeline currently needs an admin / `runs:execute`-scoped key, so a valid-but-unscoped key passes the test and then returns an actionable "lacks runs access" error when you start a run.
+The credential test hits `GET <Base URL>/v1/auth/verify` to verify both reachability and the Bearer Token. Note it only checks the token is **valid** — not that it can **start runs**. Access to the run API is granted per **account**, not per key, so a perfectly valid key can pass the test and still be refused with a `403` on a real run. That is not a key you can re-scope: ask Pipelex to enable API access for your account.
 
 ---
 
-## Understanding `pipe_code` and `mthds_contents`
+## What to run: a stored method, or an inline one
 
-The Pipelex node offers flexibility in how you define and execute pipelines. You can reference a pre-registered pipeline, provide an inline MTHDS bundle, combine both, or run a **stored method** by ID. These fields apply to the two start operations — **Start & Wait for Result** and **Start Pipeline** (the operations that submit a pipeline).
+These fields apply to the two start operations (**Start & Wait for Result** and **Start Pipeline**). The node asks for the method first, and offers exactly two ways to name it — **they are mutually exclusive**:
 
-Inline bundles are set in the **MTHDS Bundles** field and sent as `mthds_contents` (a `string[]` — add one entry per bundle). Alternatively, set **Method ID** (`method_id`) to run a method stored in your org's catalog on the hosted API — its MTHDS source supplies the bundle. Setting both is allowed: the inline MTHDS Bundles are what runs, and `method_id` links the run to the stored method in your run history.
+| | How |
+| --- | --- |
+| **A stored method** (default) | put its id in **Method ID**. It already carries its own Python. |
+| **An inline method** | turn on **Define Method Inline**, then paste the bundle into **MTHDS Bundles** (one entry per bundle file) and add any custom PipeFunc Python under **Python Files**. |
 
-### Case 1: Only `pipe_code` (Pipeline Library)
+Setting a `Method ID` *and* an inline method is an error — "what is this node running?" must have one answer. (The API itself would accept both, running the inline method and filing the run under the stored one in history; the node refuses it deliberately.)
 
-Use this when your pipeline is already registered in your Pipelex API server's library.
+Turning the toggle **off** also removes whatever it holds from the request, so a bundle you pasted and then abandoned is never sent, and never trips the either/or error from a field you can no longer see.
 
-**n8n Node Configuration:**
-- **Pipe Code:** `invoice_extractor`
-- **MTHDS Bundles:** _(leave empty)_
-- **Inputs:** `{ "invoice_text": "..." }`
+### Custom PipeFunc Python
 
-**What happens:**
-The API will look for a pipeline named `invoice_extractor` in your server's library and execute it.
+`MTHDS Bundles` carries `.mthds` text only. If your method's pipes use custom **PipeFunc Python**, add those files under **Python Files** — one row each — and the node ships them together with the pasted method as a single bundle:
 
-**API Request:**
-```json
-{
-  "pipe_code": "invoice_extractor",
-  "inputs": {
-    "invoice_text": "INVOICE #123..."
-  }
-}
-```
+| Path | Content |
+| --- | --- |
+| `funcs/score.py` | the custom PipeFunc |
+| `structures/models.py` | custom structured outputs |
+| `requirements.txt` | extra Python deps (may be empty) |
 
-**Use this when:**
-- You have pipelines uploaded to your server
-- You want to reuse the same pipeline across multiple workflows
-- You prefer centralized pipeline management
+Paths are relative to the bundle root, use forward slashes, and must match what your method references. Leave the field empty unless your method uses PipeFunc.
 
----
+Checked before anything is sent, so you get an immediate error on the item instead of a server `422`: Python Files with nothing pasted in `MTHDS Bundles` (Python is not a method), and unsafe paths like `../x.py`. An empty row is dropped; **blank content is kept**, since an empty `requirements.txt` is legitimate.
 
-### Case 2: Only `mthds_contents` (Inline Pipeline)
+> **Custom Python requires a sandbox-hosted runner.** The hosted Pipelex API is one. A bare self-hosted `pipelex-api` refuses a bundle containing `.py` rather than importing untrusted code into its own process.
 
-Use this when you want to define the pipeline directly in the n8n node.
+Under the hood the node sends one `files` map, with the pasted method folded in as `main.mthds` (then `bundle-2.mthds`, …). That is the same split the server performs on any bundle — `.mthds` entries become the method, everything else is materialized beside it — so the run is identical either way.
 
-**n8n Node Configuration:**
-- **Pipe Code:** _(leave empty)_
-- **MTHDS Bundles:**
-```toml
-domain = "invoice_processing"
-main_pipe = "extract_invoice"
+### Pipe Code
 
-[concept]
-InvoiceText = "Raw invoice text"
-InvoiceData = "Structured invoice data"
+Optional, and independent of the choice above: **Pipe Code** names which pipe to run. Leave it empty to use the method's declared `main_pipe`; set it to pick a different pipe out of the method (or to name a pipe already registered in a self-hosted server's library, which is a run source on its own).
 
-[pipe.extract_invoice]
-type = "PipeLLM"
-inputs = { text = "InvoiceText" }
-output = "InvoiceData"
-model = "llm_to_extract_info"
-prompt = """
-Extract structured data from:
-@text
-"""
-```
-- **Inputs:** `{ "text": "..." }`
-
-**What happens:**
-The API will parse your inline MTHDS bundle and execute the pipeline specified in `main_pipe`.
-
-**API Request:**
-```json
-{
-  "mthds_contents": ["domain = \"invoice_processing\"\nmain_pipe = \"extract_invoice\"..."],
-  "inputs": {
-    "text": "INVOICE #123..."
-  }
-}
-```
-
-**Important:** You **must** specify `main_pipe` in your MTHDS bundle when not providing a `pipe_code`.
-
-**Use this when:**
-- You're prototyping or testing pipelines
-- You want the pipeline definition visible in n8n
-- You don't have access to upload to the server library
-
----
-
-### Case 3: Both `pipe_code` AND `mthds_contents` (Inline with Specific Pipe)
-
-Use this when you have multiple pipes in your inline MTHDS bundle and want to execute a specific one.
-
-**n8n Node Configuration:**
-- **Pipe Code:** `extract_invoice`
-- **MTHDS Bundles:**
-```toml
-domain = "document_processing"
-main_pipe = "analyze_document"
-
-[concept]
-DocumentText = "Raw document text"
-InvoiceData = "Structured invoice data"
-AnalysisResult = "Document analysis"
-
-[pipe.extract_invoice]
-type = "PipeLLM"
-inputs = { text = "DocumentText" }
-output = "InvoiceData"
-model = "llm_to_extract_info"
-prompt = "Extract invoice data from: @text"
-
-[pipe.analyze_document]
-type = "PipeLLM"
-inputs = { text = "DocumentText" }
-output = "AnalysisResult"
-model = "llm_for_analysis"
-prompt = "Analyze: @text"
-```
-- **Inputs:** `{ "text": "..." }`
-
-**What happens:**
-The API will execute the `extract_invoice` pipe from your inline bundle, **ignoring** the `main_pipe` setting.
-
-**API Request:**
-```json
-{
-  "pipe_code": "extract_invoice",
-  "mthds_contents": ["domain = \"document_processing\"..."],
-  "inputs": {
-    "text": "INVOICE #123..."
-  }
-}
-```
-
-**Use this when:**
-- You have an MTHDS bundle with multiple pipes
-- You want to choose which pipe to execute dynamically
-- You want flexibility without modifying the bundle
+An inline method with no `main_pipe` and no **Pipe Code** has nothing to run.
 
 ---
 
@@ -236,6 +138,54 @@ Override the output concept. See more [here](https://docs.pipelex.com/pages/buil
 
 ### Max Wait (Seconds) (`maxWaitSeconds`)
 Maximum seconds to wait for the run to finish (**default 300** — safely under typical n8n Cloud execution caps). If exceeded, the node returns the `pipeline_run_id` with a "still running" message — fetch the result later with the **Get Run Result** operation, or keep waiting with **Poll & Get Result**. `0` waits indefinitely (only sensible on self-hosted n8n without execution timeouts). The poll cadence follows the server's `Retry-After` header (5s when absent).
+
+---
+
+## Reading the result
+
+A completed run produces one item:
+
+| Field | What it is |
+| --- | --- |
+| `status` | always `COMPLETED` on a finished run, or `RUNNING` on a still-running output. This is the **single** completion signal — branch on it, never on anything else |
+| `pipeline_run_id` | the run's id — keep it if you may need to re-fetch |
+| `main_stuff` | your method's output. Polymorphic: a list output arrives as a top-level array, a structured output as an object |
+| `working_memory` | every named value the run produced, not just the main output |
+| `tokens_usages` | one record per inference call — see below |
+| `usage_assembly_error` | non-null only when usage accounting itself failed |
+
+The heavy `graph_spec` visualization artifact is stripped from the n8n item (it only cluttered the item view); the API still returns it.
+
+A completed run **always** delivers a `main_stuff` — but not always the instant it turns COMPLETED. The run is marked complete as soon as it finishes, then its artifacts are written to storage, so a fetch landing in that window sees a complete run with no output yet. The node handles the two cases differently:
+
+- **Start & Wait for Result / Poll & Get Result** keep polling through the window and return the result once it lands. Only if the output never arrives do you get an error, and it names the `pipeline_run_id` to report.
+- **Get Run Result** cannot wait, so it returns `status: "RUNNING"` with a "result is still being written" message — fetch again with the same `pipeline_run_id`.
+
+Either way you never receive an empty `COMPLETED` item that breaks a later node instead.
+
+### Token usage and cost
+
+`tokens_usages` carries one record per inference call — LLM, image generation, extraction and search alike:
+
+```json
+{
+  "model_type": "llm",
+  "inference_model_name": "gpt-4o",
+  "pipe_code": "extract_invoice",
+  "nb_tokens_by_category": { "input": 1240, "input_cached": 1024, "output": 88 },
+  "cost": 0.0031,
+  "started_at": "2026-08-17T10:00:00Z",
+  "completed_at": "2026-08-17T10:00:04Z"
+}
+```
+
+Because `pipe_code` is on each record, per-pipe cost attribution works without any extra lookup. Three things to get right:
+
+- **There is no run-level total.** Sum `cost` across the records yourself.
+- **`nb_tokens_by_category` is not additive.** `input` is already the joined total and `input_cached` is a *subset* of it — adding the categories together double-counts.
+- **`cost: null` and `cost: 0` mean different things.** `null` means the model has no rate table at all (own-GPU, mock, dry run); `0` means it was priced and came to zero.
+
+`tokens_usages` is `null` in three different situations — usage accounting was off, it broke, or the run predates the artifact — and `[]` when it ran but no inference happened. Only `usage_assembly_error` distinguishes "broke" from the others, so branch on that field rather than on the list being empty.
 
 ---
 
