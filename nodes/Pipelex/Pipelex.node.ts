@@ -139,6 +139,17 @@ function readFileCollection(
 	for (const entry of collection.file ?? []) {
 		const path = typeof entry.path === 'string' ? entry.path.trim() : '';
 		if (!path) continue;
+		// Checked BEFORE assigning: `files[path] = …` is last-write-wins, so a
+		// repeated path silently dropped a file and shipped a bundle the author
+		// never configured — the method would then reference a file that is not
+		// there, failing far from the cause.
+		if (Object.prototype.hasOwnProperty.call(files, path)) {
+			throw new NodeOperationError(
+				ctx.getNode(),
+				`Bundle path "${path}" is listed more than once — each path may appear only once. Rename one of the entries or remove the duplicate.`,
+				{ itemIndex },
+			);
+		}
 		const content = entry.content;
 		if (content === undefined || content === null) {
 			files[path] = '';
@@ -183,7 +194,33 @@ function readRunDefinition(ctx: IExecuteFunctions, itemIndex: number): HostedSta
 	// of a hidden field, so a user who fills the bundle, then switches back to a
 	// stored method, would otherwise still send it — and hit the either/or error
 	// pointing at fields they cannot see. What is visible is what is sent.
-	const inlineMethod = ctx.getNodeParameter('inlineMethod', itemIndex, false) === true;
+	//
+	// The default is read as `undefined`, not `false`, so an ABSENT toggle can be
+	// told apart from one explicitly switched off. That distinction is what makes
+	// the migration safe (see below).
+	const inlineToggle = ctx.getNodeParameter('inlineMethod', itemIndex, undefined);
+	const inlineMethod = inlineToggle === true;
+
+	// A workflow saved before this release has no toggle at all, and in 0.1.0 an
+	// inline bundle BEAT a Method ID ("both together is allowed: the inline bundles
+	// run"). Defaulting such a workflow to "toggle off" would drop the inline
+	// content and run the STORED method instead — a different method, with no
+	// error. Refuse instead, and say what to switch on.
+	//
+	// The stored shape is the discriminator, so this never misfires: the pre-0.2.0
+	// field persisted a bare `string[]`, while the current fixedCollection persists
+	// `{ bundle: [...] }`. So leftover content from a user who typed and then
+	// switched the toggle off is still correctly ignored — it is in the new shape.
+	if (inlineToggle === undefined && Array.isArray(mthdsContentsRaw)) {
+		const legacyContents = readMthdsContents(mthdsContentsRaw);
+		if (legacyContents.length > 0) {
+			throw new NodeOperationError(
+				ctx.getNode(),
+				'This node was configured before "Define Method Inline" existed, and its inline MTHDS bundle would no longer run. Switch on "Define Method Inline" to keep running the pasted method (clear "Method ID" if it is also set), or clear the MTHDS Bundles field to run the stored method instead. Refusing rather than guessing, because the two choices run different methods.',
+				{ itemIndex },
+			);
+		}
+	}
 
 	const mthdsContents: string[] = inlineMethod ? readMthdsContents(mthdsContentsRaw) : [];
 	const pythonFiles = inlineMethod ? readFileCollection(ctx, 'pythonFiles', itemIndex) : {};

@@ -188,6 +188,100 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		});
 	});
 
+	it('never silently switches to the stored method on a pre-0.2.0 workflow', async () => {
+		// Regression, greptile P1. In 0.1.0 "both together is allowed: the inline
+		// bundles run, method_id links the run to the stored method" — so a saved
+		// workflow with BOTH ran the INLINE method. After the toggle was introduced,
+		// `inlineMethod` is absent on such a workflow, the inline content is dropped,
+		// and the STORED method runs instead: a different method, with no error.
+		// A migration must not change WHICH method executes.
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'method-42',
+				// The legacy field shape: a bare string[], not { bundle: [...] }.
+				mthdsContents: ['domain = "legacy"'],
+				inputs: '{}',
+				// `inlineMethod` deliberately absent — the workflow predates it.
+			},
+			continueOnFail: true,
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		const error = String(result[0][0].json.error);
+		expect(error).toMatch(/Define Method Inline/);
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('flags a pre-0.2.0 inline-only workflow with migration guidance', async () => {
+		// Same discriminator, without a Method ID. This already failed with "Nothing
+		// to run", which is loud but says nothing about the toggle.
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: { mthdsContents: ['domain = "legacy"'], inputs: '{}' },
+			continueOnFail: true,
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toMatch(/Define Method Inline/);
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('rejects a duplicate Python file path instead of overwriting it', async () => {
+		// Regression, greptile P1. `files[path] = content` is last-write-wins, so a
+		// repeated path silently dropped a file and ran content the author did not
+		// intend as the only version.
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				inlineMethod: true,
+				mthdsContents: { bundle: [{ content: 'domain = "d"' }] },
+				pythonFiles: {
+					file: [
+						{ path: 'funcs/score.py', content: 'def score(): return 1' },
+						{ path: 'funcs/score.py', content: 'def score(): return 2' },
+					],
+				},
+				inputs: '{}',
+			},
+			continueOnFail: true,
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		const error = String(result[0][0].json.error);
+		expect(error).toContain('funcs/score.py');
+		expect(error).toMatch(/more than once|duplicat/i);
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('still accepts the same content at two distinct paths', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				inlineMethod: true,
+				mthdsContents: { bundle: [{ content: 'domain = "d"' }] },
+				pythonFiles: {
+					file: [
+						{ path: 'funcs/a.py', content: 'shared' },
+						{ path: 'funcs/b.py', content: 'shared' },
+					],
+				},
+				inputs: '{}',
+			},
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		expect(httpFn.mock.calls[0][0].body.files).toEqual({
+			'main.mthds': 'domain = "d"',
+			'funcs/a.py': 'shared',
+			'funcs/b.py': 'shared',
+		});
+	});
+
 	it('ignores inline fields left behind when the toggle is off', async () => {
 		// n8n keeps a hidden field's stored value. A user who pastes a method, then
 		// switches back to a stored one, must not trip the either/or error on fields

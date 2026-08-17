@@ -51,6 +51,10 @@ Setting a `Method ID` *and* an inline method is an error — "what is this node 
 
 Turning the toggle **off** also removes whatever it holds from the request, so a bundle you pasted and then abandoned is never sent, and never trips the either/or error from a field you can no longer see.
 
+> **Upgrading from 0.1.0?** A node configured before this toggle existed will refuse to run until you switch it on, with an error saying so. That is deliberate: in 0.1.0 an inline bundle took precedence over a `Method ID`, so quietly defaulting to "toggle off" would have run the *stored* method instead — a different method, with no error. Switch the toggle on to keep running the pasted method, or clear `MTHDS Bundles` to run the stored one.
+
+> **Upgrading from 0.1.0?** A node configured before this toggle existed will refuse to run until you switch it on, with an error saying so. That is deliberate: in 0.1.0 an inline bundle took precedence over a `Method ID`, so quietly defaulting to "toggle off" would have run the *stored* method instead — a different method, with no error. Switch the toggle on to keep running the pasted method, or clear `MTHDS Bundles` to run the stored one.
+
 ### Custom PipeFunc Python
 
 `MTHDS Bundles` carries `.mthds` text only. If your method's pipes use custom **PipeFunc Python**, add those files under **Python Files** — one row each — and the node ships them together with the pasted method as a single bundle:
