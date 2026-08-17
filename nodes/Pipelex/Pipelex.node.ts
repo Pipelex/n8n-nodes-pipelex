@@ -2,7 +2,6 @@ import {
 	NodeApiError,
 	NodeConnectionTypes,
 	NodeOperationError,
-	sleepWithAbort,
 	type IDataObject,
 	type IExecuteFunctions,
 	type INodeExecutionData,
@@ -12,17 +11,27 @@ import {
 } from 'n8n-workflow';
 
 import {
+	MISSING_MAIN_STUFF_MESSAGE,
+	RESULT_MID_WRITE_MESSAGE,
 	SERVICE_UNAVAILABLE_MESSAGE,
+	abortableSleep,
+	assembleRunSources,
 	buildApiConnection,
 	buildStartBody,
 	idempotencyKey,
 	mapResultResponse,
 	requestResult,
+	requestRunStatus,
 	requestStart,
+	runFailureData,
+	runFailureDescription,
+	runFailureMessage,
+	runSourceError,
+	withRunId,
 	type ApiConnection,
 	type ResultOutcome,
 } from './GenericFunctions';
-import type { HostedStartBody, StartAck } from './MthdsShapes';
+import type { HostedStartBody, StartAck } from './PipelexApiShapes';
 
 // Polling defaults. Max Wait caps how long a polling operation blocks the n8n
 // execution — 300s covers the overwhelming majority of runs while staying
@@ -40,6 +49,12 @@ const MIN_POLL_SLEEP_MS = 250;
 // the counter — so this only trips on a sustained backend outage, independent
 // of Max Wait (it bounds the otherwise-infinite poll when maxWaitSeconds is 0).
 const MAX_CONSECUTIVE_DEGRADED = 5;
+// How many CONSECUTIVE "completed but no main_stuff yet" responses to tolerate.
+// The platform flips a run to COMPLETED and then relays whatever is in S3, so a
+// poll can land mid-write and legitimately see a null main_stuff. Retrying is
+// correct; retrying forever is not — past this ceiling the completed-run
+// invariant really is broken and the run is reported as failed.
+const MAX_CONSECUTIVE_MID_WRITE = 5;
 
 // Operations that submit a run (and therefore show the pipeline-definition
 // fields). `execute` is the published 0.0.x legacy value — see the execute()
@@ -70,12 +85,94 @@ function rethrowOpError(ctx: IExecuteFunctions, error: unknown, itemIndex: numbe
 }
 
 /**
+ * Read the `MTHDS Bundles` collection into the `mthds_contents` array.
+ *
+ * Accepts BOTH shapes on purpose. The field is a `fixedCollection` (so it matches
+ * `Python Files` visually), which stores `{ bundle: [{ content }] }` — but a
+ * workflow saved before that change holds a bare `string[]` from the old
+ * multi-value string field. Reading both means an upgraded workflow keeps running
+ * instead of silently losing the pasted method; the field itself only ever writes
+ * the new shape.
+ *
+ * Blank and whitespace-only entries are dropped (the UI persists a row as soon as
+ * the add-button is clicked), so an empty row cannot pass as a run source.
+ */
+function readMthdsContents(raw: unknown): string[] {
+	const entries: unknown[] = Array.isArray(raw)
+		? raw
+		: ((raw as { bundle?: unknown[] } | undefined)?.bundle ?? []).map(
+				(row) => (row as { content?: unknown } | undefined)?.content,
+			);
+	const contents: string[] = [];
+	for (const entry of entries) {
+		const text =
+			typeof entry === 'string'
+				? entry
+				: typeof entry === 'number' || typeof entry === 'boolean'
+					? String(entry)
+					: '';
+		if (text.trim().length > 0) contents.push(text);
+	}
+	return contents;
+}
+
+/**
+ * Read a file fixedCollection into the `{ relativePath: text }` map the `files`
+ * run source takes. Entries with a blank path are dropped (the UI
+ * persists a row as soon as the add button is clicked); a blank CONTENT is kept —
+ * an empty `requirements.txt` or `__init__.py` is a legitimate bundle member.
+ *
+ * Contents are coerced to text rather than forwarded verbatim: `getNodeParameter`
+ * is `unknown` because an expression can resolve to anything, and a non-string
+ * would leave the node and come back as an opaque server 422 instead of a local,
+ * item-scoped error.
+ */
+function readFileCollection(
+	ctx: IExecuteFunctions,
+	paramName: string,
+	itemIndex: number,
+): Record<string, string> {
+	const collection = ctx.getNodeParameter(paramName, itemIndex, {}) as {
+		file?: Array<{ path?: unknown; content?: unknown }>;
+	};
+	const files: Record<string, string> = {};
+	for (const entry of collection.file ?? []) {
+		const path = typeof entry.path === 'string' ? entry.path.trim() : '';
+		if (!path) continue;
+		// Checked BEFORE assigning: `files[path] = …` is last-write-wins, so a
+		// repeated path silently dropped a file and shipped a bundle the author
+		// never configured — the method would then reference a file that is not
+		// there, failing far from the cause.
+		if (Object.prototype.hasOwnProperty.call(files, path)) {
+			throw new NodeOperationError(
+				ctx.getNode(),
+				`Bundle path "${path}" is listed more than once — each path may appear only once. Rename one of the entries or remove the duplicate.`,
+				{ itemIndex },
+			);
+		}
+		const content = entry.content;
+		if (content === undefined || content === null) {
+			files[path] = '';
+		} else if (typeof content === 'string') {
+			files[path] = content;
+		} else if (typeof content === 'number' || typeof content === 'boolean') {
+			files[path] = String(content);
+		} else {
+			throw new NodeOperationError(
+				ctx.getNode(),
+				`The content of bundle file "${path}" must be text, but the expression resolved to ${Array.isArray(content) ? 'an array' : typeof content}. Convert it to a string first.`,
+				{ itemIndex },
+			);
+		}
+	}
+	return files;
+}
+
+/**
  * Collect + validate the pipeline-definition fields of the start operations
- * and map them to the snake_case `POST /v1/start` body. Mirrors the server's
- * run-source rules client-side so the errors are immediate and item-scoped:
- * at least one of pipe_code / mthds_contents / method_id, and method_id is
- * combinable with mthds_contents (inline bundles run; method_id is the
- * run-history linkage on the hosted API).
+ * and map them to the snake_case `POST /v1/start` body. Run-source rules are
+ * checked client-side so the errors are immediate and item-scoped rather than an
+ * opaque server 422.
  */
 function readRunDefinition(ctx: IExecuteFunctions, itemIndex: number): HostedStartBody {
 	// Trimmed so whitespace-only values fail the local required-source check
@@ -93,22 +190,50 @@ function readRunDefinition(ctx: IExecuteFunctions, itemIndex: number): HostedSta
 		'',
 	) as string;
 
-	// `multipleValues: true` on a string field yields a `string[]`; drop the empty
-	// (and whitespace-only) entries the UI persists when "Add Bundle" is clicked
-	// without typing — a blank bundle must not slip past the guards below.
-	const mthdsContents: string[] = Array.isArray(mthdsContentsRaw)
-		? (mthdsContentsRaw as string[]).filter(
-				(entry) => typeof entry === 'string' && entry.trim().length > 0,
-			)
-		: [];
+	// Read the inline pair ONLY when the toggle is on. n8n keeps the stored value
+	// of a hidden field, so a user who fills the bundle, then switches back to a
+	// stored method, would otherwise still send it — and hit the either/or error
+	// pointing at fields they cannot see. What is visible is what is sent.
+	//
+	// The default is read as `undefined`, not `false`, so an ABSENT toggle can be
+	// told apart from one explicitly switched off. That distinction is what makes
+	// the migration safe (see below).
+	const inlineToggle = ctx.getNodeParameter('inlineMethod', itemIndex, undefined);
+	const inlineMethod = inlineToggle === true;
 
-	// Method ID and MTHDS Bundles may both be set: the hosted API runs the
-	// inline bundles (precedence) and records method_id as the run-history
-	// linkage — no client-side exclusion.
-	if (!pipeCode && mthdsContents.length === 0 && !methodId) {
+	// A workflow saved before this release has no toggle at all, and in 0.1.0 an
+	// inline bundle BEAT a Method ID ("both together is allowed: the inline bundles
+	// run"). Defaulting such a workflow to "toggle off" would drop the inline
+	// content and run the STORED method instead — a different method, with no
+	// error. Refuse instead, and say what to switch on.
+	//
+	// The stored shape is the discriminator, so this never misfires: the pre-0.2.0
+	// field persisted a bare `string[]`, while the current fixedCollection persists
+	// `{ bundle: [...] }`. So leftover content from a user who typed and then
+	// switched the toggle off is still correctly ignored — it is in the new shape.
+	if (inlineToggle === undefined && Array.isArray(mthdsContentsRaw)) {
+		const legacyContents = readMthdsContents(mthdsContentsRaw);
+		if (legacyContents.length > 0) {
+			throw new NodeOperationError(
+				ctx.getNode(),
+				'This node was configured before "Define Method Inline" existed, and its inline MTHDS bundle would no longer run. Switch on "Define Method Inline" to keep running the pasted method (clear "Method ID" if it is also set), or clear the MTHDS Bundles field to run the stored method instead. Refusing rather than guessing, because the two choices run different methods.',
+				{ itemIndex },
+			);
+		}
+	}
+
+	const mthdsContents: string[] = inlineMethod ? readMthdsContents(mthdsContentsRaw) : [];
+	const pythonFiles = inlineMethod ? readFileCollection(ctx, 'pythonFiles', itemIndex) : {};
+
+	// Either/or, enforced before anything else so the message is about the choice
+	// the user made rather than about wire fields. NOTE: the hosted API would
+	// ACCEPT both (it runs the inline method and records method_id as run-history
+	// linkage) — the node refuses it on purpose, so there is exactly one answer to
+	// "what is this node running?".
+	if (methodId && (mthdsContents.length > 0 || Object.keys(pythonFiles).length > 0)) {
 		throw new NodeOperationError(
 			ctx.getNode(),
-			'Provide at least one of "Pipe Code", "MTHDS Bundles", or "Method ID"',
+			'Choose one: a stored method or an inline one. Either clear "Method ID", or turn off "Define Method Inline" (which also clears what it holds from the request).',
 			{ itemIndex },
 		);
 	}
@@ -135,15 +260,34 @@ function readRunDefinition(ctx: IExecuteFunctions, itemIndex: number): HostedSta
 	}
 	const inputs = parsedInputs as Record<string, unknown>;
 
-	return buildStartBody({
+	// With Python attached, the pasted method and its Python become one bundle —
+	// so "paste the method, attach the Python" works.
+	const assembled = assembleRunSources({
+		mthdsContents,
+		pythonFiles,
+	});
+	if (assembled.error) {
+		throw new NodeOperationError(ctx.getNode(), assembled.error, { itemIndex });
+	}
+
+	const body = buildStartBody({
 		pipeCode,
 		methodId,
-		mthdsContents,
+		mthdsContents: assembled.mthdsContents,
 		inputs,
 		outputName,
 		outputMultiplicity,
 		dynamicOutputConceptRef,
+		files: assembled.files,
 	});
+
+	// Validate the BUILT body: `buildStartBody` has already dropped empty
+	// encodings, so exclusivity is judged on what would actually be sent.
+	const sourceError = runSourceError(body);
+	if (sourceError) {
+		throw new NodeOperationError(ctx.getNode(), sourceError, { itemIndex });
+	}
+	return body;
 }
 
 /** Read + require the `runId` field (Poll & Get Result / Get Run Result). */
@@ -162,10 +306,30 @@ function throwResultError(
 	itemIndex: number,
 ): never {
 	switch (outcome.kind) {
-		case 'failed':
-			throw new NodeApiError(ctx.getNode(), outcome.body as JsonObject, {
+		case 'failed': {
+			const failure = new NodeApiError(ctx.getNode(), outcome.body as JsonObject, {
 				message: outcome.message,
+				// Passing `description` explicitly also stops n8n deriving one by
+				// echoing `error.message` out of the body — which just repeated the
+				// headline sentence verbatim.
+				description: outcome.description,
 				httpCode: '409',
+				itemIndex,
+			});
+			// `context.data` is the "Error data" row of n8n's Error details panel, and
+			// it renders inside `<pre><code>` — the one surface where the full report
+			// keeps its line breaks. Set after construction because the constructor
+			// options do not expose `context`.
+			if (outcome.data) failure.context = { ...failure.context, data: outcome.data };
+			throw failure;
+		}
+		// Reached only after the poll loop's mid-write ceiling: the transport said
+		// 200 but the body never delivered an output. Keep the 200 so the error
+		// reports what actually happened on the wire.
+		case 'missingMainStuff':
+			throw new NodeApiError(ctx.getNode(), outcome.body as JsonObject, {
+				message: withRunId(MISSING_MAIN_STUFF_MESSAGE, outcome.body),
+				httpCode: '200',
 				itemIndex,
 			});
 		case 'forbidden':
@@ -186,6 +350,50 @@ function throwResultError(
 				httpCode: String(outcome.statusCode),
 				itemIndex,
 			});
+	}
+}
+
+/**
+ * Enrich a terminal outcome with the reason a run failed, when there is one.
+ *
+ * The results route's 409 body says only "Run finished with status FAILED; no
+ * result available", so the workflow author is told a run failed but never why —
+ * while the real cause ("missing required inputs: illustrations") sits on the run
+ * row. One extra light read recovers it.
+ *
+ * Returns a (possibly unchanged) outcome rather than throwing, so the caller's
+ * `throwResultError` stays the single `never`-returning exit — `await`ing a
+ * throwing helper would not narrow control flow, and the compiler would stop
+ * believing the branch ends.
+ *
+ * Best-effort by construction: any problem fetching or parsing leaves the
+ * original 409 message in place. A failure to explain a failure must never
+ * replace it.
+ */
+async function enrichFailureOutcome(
+	ctx: IExecuteFunctions,
+	conn: ApiConnection,
+	runId: string,
+	outcome: Exclude<ResultOutcome, { kind: 'completed' } | { kind: 'running' }>,
+): Promise<Exclude<ResultOutcome, { kind: 'completed' } | { kind: 'running' }>> {
+	if (outcome.kind !== 'failed') return outcome;
+	try {
+		const response = await requestRunStatus(ctx, conn, runId);
+		if (response.statusCode < 200 || response.statusCode >= 300) return outcome;
+		const body = (response.body ?? {}) as IDataObject;
+		const reason = runFailureMessage(body);
+		if (!reason) return outcome;
+		// `description` is the only place the rest of the report can surface —
+		// NodeApiError renders message/description/httpCode and nothing else.
+		return {
+			...outcome,
+			message: reason,
+			description: runFailureDescription(body),
+			data: runFailureData(body),
+			body,
+		};
+	} catch {
+		return outcome;
 	}
 }
 
@@ -213,6 +421,7 @@ async function pollForResultLoop(
 	const unbounded = !maxWaitSeconds || maxWaitSeconds <= 0;
 	const deadline = unbounded ? Number.POSITIVE_INFINITY : Date.now() + maxWaitSeconds * 1000;
 	let consecutiveDegraded = 0;
+	let consecutiveMidWrite = 0;
 
 	for (;;) {
 		const response = await requestResult(ctx, conn, runId);
@@ -225,15 +434,37 @@ async function pollForResultLoop(
 		if (outcome.kind === 'completed') {
 			return { ...outcome.body, status: 'COMPLETED' };
 		}
-		if (outcome.kind !== 'running') {
-			throwResultError(ctx, outcome, itemIndex);
+
+		// Three non-terminal readings keep the loop going: a normal in-flight 202, a
+		// transient 503, and a 200 whose result is still mid-write. Anything else is
+		// terminal and raises now.
+		const isDegraded = outcome.kind === 'running' && outcome.degraded;
+		const isMidWrite = outcome.kind === 'missingMainStuff';
+		if (outcome.kind !== 'running' && !isMidWrite) {
+			throwResultError(ctx, await enrichFailureOutcome(ctx, conn, runId, outcome), itemIndex);
+		}
+
+		// A 200 with no main_stuff is the mid-write window, not a failure: the run
+		// row flips to COMPLETED before the runner has finished writing its
+		// artifacts to S3, and the results route relays whatever is there. Keep
+		// polling — but bounded, since a state that never resolves means the
+		// completed-run invariant is genuinely broken.
+		if (isMidWrite) {
+			consecutiveMidWrite += 1;
+			if (consecutiveMidWrite > MAX_CONSECUTIVE_MID_WRITE) {
+				throwResultError(ctx, await enrichFailureOutcome(ctx, conn, runId, outcome), itemIndex);
+			}
+		} else {
+			consecutiveMidWrite = 0;
 		}
 
 		// A 503 (degraded) is tolerated as "keep polling", but a sustained outage
-		// must not spin forever (esp. unbounded). A normal in-flight 202 resets
-		// the counter; consecutive 503s trip the ceiling into an actionable error
-		// that still hands back the pipeline_run_id for a later Get Run Result.
-		if (outcome.degraded) {
+		// must not spin forever (esp. unbounded). Consecutive 503s trip the ceiling
+		// into an actionable error that still hands back the pipeline_run_id for a
+		// later Get Run Result. ANY other reading resets the counter — a 202 and a
+		// mid-write 200 both prove the backend is reachable, so neither should carry
+		// an outage forward. The two ceilings are independent by construction.
+		if (isDegraded) {
 			consecutiveDegraded += 1;
 			if (consecutiveDegraded > MAX_CONSECUTIVE_DEGRADED) {
 				throw new NodeApiError(ctx.getNode(), (response.body ?? {}) as JsonObject, {
@@ -257,7 +488,7 @@ async function pollForResultLoop(
 		// the anti-busy-loop floor applies only when the deadline allows it.
 		const requestedMs = outcome.retryAfterSeconds * 1000;
 		const sleepMs = Math.min(Math.max(requestedMs, MIN_POLL_SLEEP_MS), remainingMs);
-		await sleepWithAbort(sleepMs, abortSignal);
+		await abortableSleep(sleepMs, abortSignal);
 	}
 }
 
@@ -341,11 +572,14 @@ async function startPipeline(
 	itemIndex: number,
 ): Promise<IDataObject> {
 	const startAck = await startRun(ctx, conn, itemIndex);
-	return {
-		pipeline_run_id: startAck.pipeline_run_id,
-		state: startAck.state,
-		created_at: startAck.created_at,
-	};
+	// `state` and `created_at` are HOSTED extension fields, not protocol
+	// guarantees (the protocol's RunResultStart promises `pipeline_run_id` only),
+	// so emit them only when the server actually sent them rather than planting
+	// `undefined` keys in the item.
+	const json: IDataObject = { pipeline_run_id: startAck.pipeline_run_id };
+	if (startAck.state !== undefined) json.state = startAck.state;
+	if (startAck.created_at !== undefined) json.created_at = startAck.created_at;
+	return json;
 }
 
 /**
@@ -396,7 +630,17 @@ async function getRunResult(
 			message: 'Still running — fetch again later with this pipeline_run_id.',
 		};
 	}
-	throwResultError(ctx, outcome, itemIndex);
+	// Single-shot cannot poll through the mid-write window, so report it the same
+	// way as in-flight: a usable item telling the caller to fetch again. Erroring
+	// here would fail a run that is about to be perfectly retrievable.
+	if (outcome.kind === 'missingMainStuff') {
+		return {
+			status: 'RUNNING',
+			pipeline_run_id: runId,
+			message: RESULT_MID_WRITE_MESSAGE,
+		};
+	}
+	throwResultError(ctx, await enrichFailureOutcome(ctx, conn, runId, outcome), itemIndex);
 }
 
 export class Pipelex implements INodeType {
@@ -471,25 +715,12 @@ export class Pipelex implements INodeType {
 			// runtime, mirroring the server): at least one of Pipe Code / MTHDS
 			// Bundles / Method ID. Method ID combines with MTHDS Bundles —
 			// inline bundles run, method_id links the run to the stored method.
-			{
-				displayName: 'MTHDS Bundles',
-				name: 'mthdsContents',
-				type: 'string',
-				typeOptions: {
-					multipleValues: true,
-					multipleValueButtonText: 'Add Bundle',
-					rows: 10,
-				},
-				default: [],
-				placeholder: 'Enter MTHDS bundle content...',
-				description:
-					'One or more inline MTHDS bundle contents (sent as mthds_contents). Combinable with Method ID — inline bundles run, method_id links the run to the stored method.',
-				displayOptions: {
-					show: {
-						operation: START_OPERATIONS,
-					},
-				},
-			},
+			// Custom PipeFunc Python for the pasted method. There are exactly two
+			// ways to say what to run: a stored Method ID, or MTHDS Bundles (+ these
+			// Python files). The API also accepts a base64-zip bundle and arbitrary
+			// bundle files; both are deliberately NOT exposed — they were a third and
+			// fourth run source in the editor for no user-visible gain. See
+			// `assembleRunSources` for how the two halves are sent as one bundle.
 			{
 				displayName: 'Method ID',
 				name: 'methodId',
@@ -503,6 +734,118 @@ export class Pipelex implements INodeType {
 						operation: START_OPERATIONS,
 					},
 				},
+			},
+			// The toggle that reveals the inline pair. Two ways to say what to run,
+			// and they are mutually exclusive: a stored Method ID (default), or the
+			// method pasted inline together with its Python. Gating the pair behind a
+			// boolean keeps the closed state to a single field instead of three, and
+			// makes the either/or visible in the UI rather than only in an error.
+			{
+				displayName: 'Define Method Inline',
+				name: 'inlineMethod',
+				type: 'boolean',
+				default: false,
+				description:
+					'Whether to paste the method here instead of running a stored one. Turn on to supply the MTHDS bundle and any custom PipeFunc Python; leave off to run the method named by Method ID.',
+				displayOptions: {
+					show: {
+						operation: START_OPERATIONS,
+					},
+				},
+			},
+			{
+				displayName: 'MTHDS Bundles',
+				name: 'mthdsContents',
+				type: 'fixedCollection',
+				// A fixedCollection, matching Python Files — not a multi-value `string`.
+				// Both hold the halves of one inline method, so they must look like one
+				// control: a multi-value string renders a wide full-width add-button
+				// while a fixedCollection renders the compact `+ Add …` row, and the two
+				// side by side read as unrelated widgets.
+				placeholder: 'Add Bundle',
+				typeOptions: {
+					multipleValues: true,
+				},
+				default: {},
+				description:
+					'Your method, pasted inline (sent as mthds_contents) — one entry per bundle file. If the method uses custom PipeFunc Python, add it under Python Files and the two are shipped together.',
+				displayOptions: {
+					show: {
+						operation: START_OPERATIONS,
+						inlineMethod: [true],
+					},
+				},
+				options: [
+					{
+						displayName: 'Bundle',
+						name: 'bundle',
+						values: [
+							{
+								displayName: 'Content',
+								name: 'content',
+								type: 'string',
+								typeOptions: {
+									rows: 10,
+								},
+								default: '',
+								placeholder: 'domain = "my_domain"\nmain_pipe = "my_pipe"\n…',
+								description: 'The MTHDS bundle content',
+							},
+						],
+					},
+				],
+			},
+			{
+				displayName: 'Python Files',
+				name: 'pythonFiles',
+				type: 'fixedCollection',
+				// `placeholder` is what labels a fixedCollection's add-button — NOT
+				// `typeOptions.multipleValueButtonText`, which only applies to simple
+				// multi-value types (the `MTHDS Bundles` string field above). Without
+				// it the button renders unlabelled and an empty collection is
+				// effectively invisible in the editor, which is exactly how this field
+				// went missing the first time.
+				placeholder: 'Add Python File',
+				typeOptions: {
+					multipleValues: true,
+				},
+				default: {},
+				description:
+					'Custom PipeFunc Python for the method pasted above — the funcs/*.py and structures/*.py it needs, plus an optional requirements.txt. The node ships the method and its Python together as one bundle. Leave empty unless your method uses PipeFunc. Requires a sandbox-hosted runner (the hosted Pipelex API is; a bare self-hosted pipelex-api refuses custom Python).',
+				displayOptions: {
+					show: {
+						operation: START_OPERATIONS,
+						inlineMethod: [true],
+					},
+				},
+				options: [
+					{
+						displayName: 'File',
+						name: 'file',
+						values: [
+							{
+								displayName: 'Path',
+								name: 'path',
+								type: 'string',
+								default: '',
+								placeholder: 'e.g., funcs/score.py',
+								description:
+									'Path relative to the bundle root, using forward slashes. Must match what your method references.',
+							},
+							{
+								displayName: 'Content',
+								name: 'content',
+								type: 'string',
+								typeOptions: {
+									rows: 10,
+								},
+								default: '',
+								placeholder: 'def score(text: str) -> float:\n    ...',
+								description: 'The Python source',
+							},
+						],
+					},
+				],
 			},
 			{
 				displayName: 'Inputs',

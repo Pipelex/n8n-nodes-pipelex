@@ -50,7 +50,7 @@ Learn more about Pipelex:
 
 This node runs your pipelines through the **hosted Pipelex API's durable run lifecycle**: it starts a run via `POST /v1/start` and polls `GET /v1/runs/{pipeline_run_id}/results` internally until the result is ready. The credential's **Base URL** defaults to the hosted API at **`https://api.pipelex.com`**.
 
-> 🔑 **On the hosted API (`api.pipelex.com`), run access is gated for now.** Starting runs there currently requires an **admin / `runs:execute`-scoped** key. The credential **Test** only checks that your token is valid, so a non-scoped key will test green but return a clear *"lacks runs access"* error when you actually run a pipeline. Join the [waitlist](https://go.pipelex.com/waitlist) to be notified when self-serve run access opens up.
+> 🔑 **On the hosted API (`api.pipelex.com`), run access is gated for now.** It is granted per **account**, not per key — there is no key scope to set. The credential **Test** only checks that your token is valid, so a key on an account without run access tests green and then returns a clear `403` when you actually run a pipeline. Join the [waitlist](https://go.pipelex.com/waitlist) to be notified when self-serve run access opens up.
 
 > ℹ️ **Hosted-only:** the run-lifecycle polling routes (`/v1/runs/*`) and the `Method ID` field are hosted-API extensions, not part of the bare MTHDS Protocol — a bare runner does not implement them. To use your own backend, point the Base URL at a server exposing the same hosted surface (`/v1/start`, `/v1/runs/{pipeline_run_id}/results`, `/v1/auth/verify`).
 
@@ -73,7 +73,7 @@ This node requires a **Pipelex API credential** to authenticate with your Pipele
    - **Bearer Token** — your Pipelex API token (sent as `Authorization: Bearer <token>`)
 4. (Optional) Click **Test** — the credential is verified against `GET /v1/auth/verify` on your base URL.
 
-> ⚠️ The credential Test only confirms your token is **valid**, not that it can **start runs**. Running a pipeline needs a key with runs access (admin / `runs:execute` scope, see above). A valid-but-unscoped key passes the Test and then returns an actionable error on Run.
+> ⚠️ The credential Test only confirms your token is **valid**, not that it can **start runs**. Run access is granted per account (see above), so a valid key on an account without it passes the Test and then returns an actionable `403` on Run — it is not something you can fix by re-scoping the key.
 
 **Where to get your Bearer Token:** create one at [app.pipelex.com](https://app.pipelex.com/). Hosted run access is gated for now — join the [waitlist](https://go.pipelex.com/waitlist).
 
@@ -102,10 +102,12 @@ The Pipelex node has one **Operation** selector with four operations, mirroring 
 
 | Parameter | API Field | Description |
 |---|---|---|
-| **MTHDS Bundles** | `mthds_contents` | One or more inline MTHDS bundles (a `string[]`). Combinable with Method ID — inline bundles run, `method_id` links the run to the stored method. |
+| **Method ID** | `method_id` | ID of a stored method to run (hosted API only). It already carries its own Python. |
+| **Define Method Inline** | — | Toggle. Turn on to paste the method here instead of running a stored one; it reveals the two fields below. **Mutually exclusive with Method ID.** |
+| **MTHDS Bundles** | `mthds_contents` | Your method, pasted inline — one entry per bundle file. |
+| **Python Files** | `files` | Custom PipeFunc Python for the pasted method (`funcs/*.py`, `structures/*.py`, `requirements.txt`). Shipped together with the bundle as one method bundle; requires a sandbox-hosted runner. |
 | **Inputs** | `inputs` | JSON object whose keys match your pipeline's expected inputs. Defaults to `{}`. |
-| **Pipe Code** | `pipe_code` | Code of the pipe to execute (registered on the server, or defined in the MTHDS Bundles). |
-| **Method ID** | `method_id` | ID of a stored method whose MTHDS source supplies the bundle (hosted API only) — the alternative to pasting bundles inline. |
+| **Pipe Code** | `pipe_code` | Which pipe to run. Empty = the method's `main_pipe`. |
 | **Output Name** | `output_name` | Optional name of the output variable. |
 | **Output Multiplicity** | `output_multiplicity` | Optional output multiplicity. |
 | **Dynamic Output Concept Ref** | `dynamic_output_concept_ref` | Optional override for the dynamic output concept ref. |
@@ -114,7 +116,7 @@ The Pipelex node has one **Operation** selector with four operations, mirroring 
 
 **Polling control** (Start & Wait for Result / Poll & Get Result): **Max Wait (Seconds)** — max seconds to wait for the run to finish (**default 300**, safe under typical n8n Cloud execution caps). On exceed, the node returns the `pipeline_run_id` + a "still running" message so you can fetch it later with **Get Run Result**. `0` waits indefinitely (only sensible on self-hosted n8n without execution timeouts). The server's `Retry-After` drives the poll cadence (5s when absent).
 
-**Note:** Provide at least one of `Pipe Code`, `MTHDS Bundles`, or `Method ID`. Learn more about the Pipelex API [here](https://docs.pipelex.com/pages/api/).
+**Note:** name the method exactly one way — a `Method ID`, **or** an inline method (`Define Method Inline` + `MTHDS Bundles`). Setting both is an error. Learn more about the Pipelex API [here](https://docs.pipelex.com/pages/api/).
 
 **No "Custom API Call" entry:** n8n injects that raw-HTTP operation into nodes whose credential declares a generic `authenticate` block. This node's credential doesn't (the node builds its `Authorization` header itself), so the dropdown contains only the four curated operations above.
 
@@ -131,7 +133,7 @@ The Pipelex node has one **Operation** selector with four operations, mirroring 
    - **Start Pipeline** — start the run and return immediately with its `pipeline_run_id` (collect the result later)
    - **Poll & Get Result** — wait for an already-started run by `pipeline_run_id` until it finishes (or Max Wait)
    - **Get Run Result** — a one-shot, non-blocking fetch by `pipeline_run_id` (returns `status: "RUNNING"` while still running)
-4. **Provide the pipeline:** a `Pipe Code`, inline `MTHDS Bundles`, or a stored `Method ID`
+4. **Name the method:** a stored `Method ID`, or turn on `Define Method Inline` and paste it into `MTHDS Bundles`
 5. **Set Inputs** as a JSON object matching your pipeline's expected inputs
 6. **Run** the workflow
 
