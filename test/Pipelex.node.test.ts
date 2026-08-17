@@ -1180,6 +1180,14 @@ describe('Pipelex node — explaining a failed run', () => {
 		expect(captured?.description).toContain('What to do: change input');
 		expect(captured?.description).toContain('Retryable: no');
 		expect(captured?.description).toContain('Docs: https://docs.pipelex.com');
+		// Single line: n8n collapses newlines, so a multi-line block would render as
+		// a run-on sentence.
+		expect(captured?.description).not.toContain('\n');
+		// ...while the "Error data" row DOES keep them: it renders in <pre><code>.
+		const data = (captured as { context?: { data?: string } }).context?.data;
+		expect(data).toContain('\n');
+		expect(data).toContain('error_type');
+		expect(data).toContain('pipeline_run_id');
 		// The description must add information, not restate the headline.
 		expect(captured?.description).not.toBe(captured?.message);
 	});

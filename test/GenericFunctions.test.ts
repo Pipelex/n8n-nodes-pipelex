@@ -11,6 +11,7 @@ import {
 	buildStartBody,
 	idempotencyKey,
 	mapResultResponse,
+	runFailureData,
 	runFailureDescription,
 	runFailureMessage,
 	runSourceError,
@@ -484,7 +485,10 @@ describe('runFailureMessage (recovering WHY a run failed)', () => {
 });
 
 describe('runFailureDescription (the rest of the failure report)', () => {
-	it('surfaces what the author can act on, in priority order', () => {
+	it('renders one labelled line — n8n collapses newlines in a description', () => {
+		// A `\n`-joined block came out as a run-on sentence in the editor, with the
+		// title running straight into the next label. Every fact carries its own
+		// label and the separators survive collapsing.
 		const description = runFailureDescription({
 			pipeline_run_id: 'run-1',
 			pipe_code: 'build_client_quote',
@@ -499,21 +503,33 @@ describe('runFailureDescription (the rest of the failure report)', () => {
 				user_action: { kind: 'change_input', detail: 'Provide the illustrations input' },
 			},
 		});
-		const lines = (description ?? '').split('\n');
-		expect(lines[0]).toBe('Pipe run inputs');
-		// The action comes before the taxonomy — it is the only line that says
-		// what to DO.
-		expect(lines[1]).toBe('What to do: change input — Provide the illustrations input');
-		expect(description).toContain('Retryable: no');
-		expect(description).toContain('Error: PipeRunInputsError · pipe_run');
-		expect(description).toContain('Context: run run-1 · pipe build_client_quote');
-		expect(description).toContain('Docs: https://docs.pipelex.com/latest/errors/pipe-run-inputs-error/');
+
+		expect(description).not.toContain('\n');
+		expect(description?.split(' | ')).toEqual([
+			'Pipe run inputs',
+			// The action leads — the only fact that says what to DO.
+			'What to do: change input — Provide the illustrations input',
+			'Retryable: no (re-running will fail identically)',
+			'Error: PipeRunInputsError · pipe_run',
+			'Run: run-1',
+			'Pipe: build_client_quote',
+			'Finished: 2026-08-17T16:01:54Z',
+			'Docs: https://docs.pipelex.com/latest/errors/pipe-run-inputs-error/',
+		]);
+	});
+
+	it('never lets a nested list collide with the top-level separator', () => {
+		// Sub-lists join with " · " precisely so they cannot be mistaken for facts.
+		const description = runFailureDescription({
+			error: { message: 'm', error_type: 'A', error_domain: 'B', error_category: 'C' },
+		});
+		expect(description).toBe('Error: A · B · C');
 	});
 
 	it('says plainly when retrying could help', () => {
-		expect(
-			runFailureDescription({ error: { message: 'rate limited', retryable: true } }),
-		).toContain('Retryable: yes');
+		expect(runFailureDescription({ error: { message: 'rate limited', retryable: true } })).toBe(
+			'Retryable: yes (re-running may succeed)',
+		);
 	});
 
 	it('reports provider and model for an inference failure', () => {
@@ -521,7 +537,7 @@ describe('runFailureDescription (the rest of the failure report)', () => {
 			runFailureDescription({
 				error: { message: 'bad model', provider: 'openai', model: 'gpt-4o' },
 			}),
-		).toContain('Model: openai / gpt-4o');
+		).toBe('Model: openai / gpt-4o');
 	});
 
 	it('counts structured validation errors', () => {
@@ -529,12 +545,12 @@ describe('runFailureDescription (the rest of the failure report)', () => {
 			runFailureDescription({
 				error: { message: 'invalid', validation_errors: [{ category: 'dry_run' }, {}] },
 			}),
-		).toContain('Validation errors: 2');
+		).toBe('Validation errors: 2');
 	});
 
 	it('emits nothing rather than a skeleton when the report is bare', () => {
-		// An older report may carry only a message — which is already the headline,
-		// so there is no description to add.
+		// An older report may carry only a message — already the headline, so there
+		// is no description to add.
 		expect(runFailureDescription({ error: { message: 'just a message' } })).toBeUndefined();
 		expect(runFailureDescription({})).toBeUndefined();
 		expect(runFailureDescription({ error: null })).toBeUndefined();
@@ -544,5 +560,74 @@ describe('runFailureDescription (the rest of the failure report)', () => {
 		expect(
 			runFailureDescription({ error: { message: 'm', title: '   ', error_type: 42 } }),
 		).toBeUndefined();
+	});
+});
+
+describe('runFailureData (the "Error data" row — rendered in <pre>, so multi-line)', () => {
+	const REPORT = {
+		pipeline_run_id: 'run-1',
+		pipe_code: 'build_client_quote',
+		status: 'FAILED',
+		finished_at: '2026-08-17T16:01:54Z',
+		error: {
+			message: 'missing required inputs: illustrations',
+			error_type: 'PipeRunInputsError',
+			title: 'Pipe run inputs',
+			type_uri: 'https://docs.pipelex.com/latest/errors/pipe-run-inputs-error/',
+		},
+	};
+
+	it('emits an aligned key/value block in a stable, readable order', () => {
+		const block = runFailureData(REPORT);
+		const keys = (block ?? '').split('\n').map((line) => line.split(/\s{2,}/)[0]);
+		// Curated order: what it is → why → where. Not object order.
+		expect(keys).toEqual([
+			'title',
+			'message',
+			'error_type',
+			'type_uri',
+			'pipeline_run_id',
+			'pipe_code',
+			'status',
+			'finished_at',
+		]);
+		// Aligned: every value starts at the same column.
+		const columns = (block ?? '')
+			.split('\n')
+			.filter((line) => !line.startsWith(' '))
+			.map((line) => line.indexOf(line.trimStart().split(/\s{2,}/)[1] ?? ''));
+		expect(new Set(columns).size).toBe(1);
+	});
+
+	it('keeps newlines — this row is the one surface that preserves them', () => {
+		expect(runFailureData(REPORT)).toContain('\n');
+	});
+
+	it('never drops a report field this node does not know about', () => {
+		// A new ErrorReport field must show up without a node release.
+		const block = runFailureData({
+			error: { message: 'm', a_brand_new_field: 'surprise' },
+		});
+		expect(block).toContain('a_brand_new_field');
+		expect(block).toContain('surprise');
+	});
+
+	it('renders nested values as indented JSON rather than [object Object]', () => {
+		const block = runFailureData({
+			error: { message: 'm', user_action: { kind: 'change_input', detail: 'fix it' } },
+		});
+		expect(block).not.toContain('[object Object]');
+		expect(block).toContain('"kind": "change_input"');
+	});
+
+	it('returns undefined when there is no report at all', () => {
+		expect(runFailureData({})).toBeUndefined();
+		expect(runFailureData({ error: null })).toBeUndefined();
+		expect(runFailureData({ error: 'boom' })).toBeUndefined();
+	});
+
+	it('skips empty values instead of printing bare labels', () => {
+		const block = runFailureData({ error: { message: 'm', title: '', model: null } });
+		expect(block).toBe('message  m');
 	});
 });

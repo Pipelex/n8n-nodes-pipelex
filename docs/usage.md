@@ -175,7 +175,7 @@ inputs: illustrations. These optional inputs may be omitted: comments.
 
 The terminal status is kept because it matters — `TIMED_OUT` and `CANCELLED` read very differently from `FAILED`.
 
-n8n's **Error details → From Pipelex** panel carries the rest of the report, when Pipelex supplies it:
+n8n's **Error details → From Pipelex** panel summarises the rest of the report, when Pipelex supplies it:
 
 ```
 Pipe run inputs
@@ -186,7 +186,20 @@ Context: run mt_… · pipe build_client_quote · finished 2026-08-17T16:01:54Z
 Docs: https://docs.pipelex.com/latest/errors/pipe-run-inputs-error/
 ```
 
-Two lines are worth acting on directly: **What to do** is the runner's own advice for this error class, and **Retryable** tells you whether n8n's *Retry On Fail* could ever help — on a `no`, retrying will fail identically until you change something. An inference failure also names the provider and model.
+Expand **Error data** in the same panel for the complete report — every field the runner sent, as an aligned block:
+
+```
+title            Pipe run inputs
+message          missing required inputs: illustrations
+error_type       PipeRunInputsError
+type_uri         https://docs.pipelex.com/latest/errors/pipe-run-inputs-error/
+pipeline_run_id  run_61fd9c76-f718-4fb3-b5cf-c52b2435538d
+pipe_code        build_client_quote
+status           FAILED
+finished_at      2026-08-17T16:15:45.863069+00:00
+```
+
+Two lines in the summary are worth acting on directly: **What to do** is the runner's own advice for this error class, and **Retryable** tells you whether n8n's *Retry On Fail* could ever help — on a `no`, retrying will fail identically until you change something. An inference failure also names the provider and model.
 
 If Pipelex cannot supply a reason — the report has not landed yet, or the extra read fails — you get the generic *"Run finished with status FAILED; no result available"* plus the `pipeline_run_id`. The run still failed; only the explanation is missing.
 

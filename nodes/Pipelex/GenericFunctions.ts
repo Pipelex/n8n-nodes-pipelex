@@ -360,7 +360,7 @@ export type ResultOutcome =
 	// either way, but only counts `degraded` responses toward the
 	// consecutive-503 ceiling (see SERVICE_UNAVAILABLE_MESSAGE).
 	| { kind: 'running'; retryAfterSeconds: number; degraded: boolean }
-	| { kind: 'failed'; message: string; description?: string; body: IDataObject }
+	| { kind: 'failed'; message: string; description?: string; data?: string; body: IDataObject }
 	| { kind: 'forbidden'; message: string; body: IDataObject }
 	| { kind: 'notFound'; message: string; body: IDataObject }
 	| { kind: 'unexpected'; statusCode: number; message: string; body: IDataObject };
@@ -583,58 +583,130 @@ export function runFailureDescription(runBody: IDataObject): string | undefined 
 	if (report === null || typeof report !== 'object' || Array.isArray(report)) return undefined;
 	const fields = report as Record<string, unknown>;
 
-	const lines: string[] = [];
 	const text = (value: unknown): string | undefined =>
 		typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 
-	const title = text(fields.title);
-	if (title) lines.push(title);
+	// ONE line, joined by " | ". n8n renders this description as plain text inside
+	// HTML, so newlines collapse into spaces — a `\n`-joined block came out as a
+	// run-on sentence where the title ran straight into the next label ("Pipe run
+	// inputs Error: ..." reading as one phrase). Every fact therefore carries its
+	// own label and the separators are visible after collapsing. Nested lists use
+	// " · " so they can never be confused with the top-level separator.
+	const facts: string[] = [];
+	const add = (label: string, value: string | undefined): void => {
+		if (value) facts.push(`${label}: ${value}`);
+	};
 
-	// The action first — it is the only line that tells the user what to DO.
+	const title = text(fields.title);
+	if (title) facts.push(title);
+
+	// The action first — the only fact that says what to DO rather than what happened.
 	const action = fields.user_action;
 	if (action !== null && typeof action === 'object' && !Array.isArray(action)) {
 		const { kind, detail } = action as { kind?: unknown; detail?: unknown };
-		const kindText = text(kind);
-		const detailText = text(detail);
-		if (kindText || detailText) {
-			lines.push(
-				`What to do: ${[kindText?.replace(/_/g, ' '), detailText].filter(Boolean).join(' — ')}`,
-			);
-		}
-	}
-
-	if (typeof fields.retryable === 'boolean') {
-		lines.push(
-			fields.retryable
-				? 'Retryable: yes — re-running may succeed.'
-				: 'Retryable: no — re-running will fail the same way until the cause is fixed.',
+		add(
+			'What to do',
+			[text(kind)?.replace(/_/g, ' '), text(detail)].filter(Boolean).join(' — ') || undefined,
 		);
 	}
 
-	const classification = [text(fields.error_type), text(fields.error_domain), text(fields.error_category)]
-		.filter(Boolean)
-		.join(' · ');
-	if (classification) lines.push(`Error: ${classification}`);
+	if (typeof fields.retryable === 'boolean') {
+		add(
+			'Retryable',
+			fields.retryable ? 'yes (re-running may succeed)' : 'no (re-running will fail identically)',
+		);
+	}
 
-	const model = [text(fields.provider), text(fields.model)].filter(Boolean).join(' / ');
-	if (model) lines.push(`Model: ${model}`);
+	add(
+		'Error',
+		[text(fields.error_type), text(fields.error_domain), text(fields.error_category)]
+			.filter(Boolean)
+			.join(' · ') || undefined,
+	);
+	add('Model', [text(fields.provider), text(fields.model)].filter(Boolean).join(' / ') || undefined);
 
 	const validationErrors = fields.validation_errors;
 	if (Array.isArray(validationErrors) && validationErrors.length > 0) {
-		lines.push(`Validation errors: ${validationErrors.length} (see the run in Pipelex for detail)`);
+		add('Validation errors', String(validationErrors.length));
 	}
 
-	const runContext = [
-		text(runBody.pipeline_run_id) && `run ${text(runBody.pipeline_run_id)}`,
-		text(runBody.pipe_code) && `pipe ${text(runBody.pipe_code)}`,
-		text(runBody.finished_at) && `finished ${text(runBody.finished_at)}`,
-	].filter(Boolean);
-	if (runContext.length > 0) lines.push(`Context: ${runContext.join(' · ')}`);
+	add('Run', text(runBody.pipeline_run_id));
+	add('Pipe', text(runBody.pipe_code));
+	add('Finished', text(runBody.finished_at));
+	add('Docs', text(fields.type_uri));
 
-	const docs = text(fields.type_uri);
-	if (docs) lines.push(`Docs: ${docs}`);
+	return facts.length > 0 ? facts.join(' | ') : undefined;
+}
 
-	return lines.length > 0 ? lines.join('\n') : undefined;
+/**
+ * The failure report as an aligned key/value block, for n8n's **Error data** row.
+ *
+ * Why this exists alongside {@link runFailureDescription}: the two surfaces have
+ * different rules. The description is plain text in an HTML context, so it must
+ * be one collapsed line. The "Error data" row is rendered inside `<pre><code>`
+ * (`error.context.data` in n8n's node-error view), so it preserves newlines and
+ * alignment — which makes it the right place for the WHOLE report rather than a
+ * curated summary.
+ *
+ * Everything the runner sent is emitted, nested values as JSON, so nothing is
+ * hidden from someone debugging. Keys are printed in a stable, useful order
+ * (identity → what → why → where) rather than object order, then any field the
+ * report carries that this node does not know about — a new `ErrorReport` field
+ * ships without a node release and still shows up here.
+ */
+export function runFailureData(runBody: IDataObject): string | undefined {
+	const report = runBody.error;
+	if (report === null || typeof report !== 'object' || Array.isArray(report)) return undefined;
+	const fields = { ...(report as Record<string, unknown>) };
+
+	const rows: Array<[string, unknown]> = [];
+	const take = (key: string): void => {
+		if (key in fields) {
+			const value = fields[key];
+			delete fields[key];
+			if (value !== null && value !== undefined && value !== '') rows.push([key, value]);
+		}
+	};
+
+	// Curated order first: the fields a human reads in this sequence.
+	for (const key of [
+		'title',
+		'message',
+		'error_type',
+		'error_domain',
+		'error_category',
+		'user_action',
+		'retryable',
+		'provider',
+		'model',
+		'validation_errors',
+		'type_uri',
+	]) {
+		take(key);
+	}
+	// Then whatever else the report carried — unknown fields must not vanish.
+	for (const key of Object.keys(fields)) take(key);
+
+	// Run identity last: it frames the report without competing with it.
+	for (const [key, value] of [
+		['pipeline_run_id', runBody.pipeline_run_id],
+		['pipe_code', runBody.pipe_code],
+		['status', runBody.status],
+		['finished_at', runBody.finished_at],
+	] as Array<[string, unknown]>) {
+		if (value !== null && value !== undefined && value !== '') rows.push([key, value]);
+	}
+
+	if (rows.length === 0) return undefined;
+
+	const width = Math.max(...rows.map(([key]) => key.length));
+	return rows
+		.map(([key, value]) => {
+			const rendered =
+				typeof value === 'string' ? value : JSON.stringify(value, null, 2)?.replace(/\n/g, '\n' + ' '.repeat(width + 2));
+			return `${key.padEnd(width)}  ${rendered}`;
+		})
+		.join('\n');
 }
 
 /**

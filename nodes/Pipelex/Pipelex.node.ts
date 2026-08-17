@@ -23,6 +23,7 @@ import {
 	requestResult,
 	requestRunStatus,
 	requestStart,
+	runFailureData,
 	runFailureDescription,
 	runFailureMessage,
 	runSourceError,
@@ -268,8 +269,8 @@ function throwResultError(
 	itemIndex: number,
 ): never {
 	switch (outcome.kind) {
-		case 'failed':
-			throw new NodeApiError(ctx.getNode(), outcome.body as JsonObject, {
+		case 'failed': {
+			const failure = new NodeApiError(ctx.getNode(), outcome.body as JsonObject, {
 				message: outcome.message,
 				// Passing `description` explicitly also stops n8n deriving one by
 				// echoing `error.message` out of the body — which just repeated the
@@ -278,6 +279,13 @@ function throwResultError(
 				httpCode: '409',
 				itemIndex,
 			});
+			// `context.data` is the "Error data" row of n8n's Error details panel, and
+			// it renders inside `<pre><code>` — the one surface where the full report
+			// keeps its line breaks. Set after construction because the constructor
+			// options do not expose `context`.
+			if (outcome.data) failure.context = { ...failure.context, data: outcome.data };
+			throw failure;
+		}
 		// Reached only after the poll loop's mid-write ceiling: the transport said
 		// 200 but the body never delivered an output. Keep the 200 so the error
 		// reports what actually happened on the wire.
@@ -340,7 +348,13 @@ async function enrichFailureOutcome(
 		if (!reason) return outcome;
 		// `description` is the only place the rest of the report can surface —
 		// NodeApiError renders message/description/httpCode and nothing else.
-		return { ...outcome, message: reason, description: runFailureDescription(body), body };
+		return {
+			...outcome,
+			message: reason,
+			description: runFailureDescription(body),
+			data: runFailureData(body),
+			body,
+		};
 	} catch {
 		return outcome;
 	}
