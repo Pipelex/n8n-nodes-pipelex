@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.2.1] - 2026-09-01
+
+### Fixed
+
+- **The node codex file declared the wrong package prefix, which failed n8n's verification review.** `nodes/Pipelex/Pipelex.node.json` named the node `n8n-nodes-base.pipelex` — the prefix reserved for n8n's own built-in nodes — where a community node's codex `node` field must be prefixed with the npm package name. It is now `n8n-nodes-pipelex.pipelex`, matching the `name` in `package.json` as [Node codex files](https://docs.n8n.io/integrations/creating-nodes/build/reference/node-codex-files/) requires.
+
 ## [v0.2.0] - 2026-08-17
 
 ### Upgrading
