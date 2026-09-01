@@ -32,7 +32,12 @@ jobs:
         run: pnpm run build
 
       - name: Upgrade npm (trusted publishing requires 11.5.1+)
-        run: npm install -g npm@latest
+        # Pinned to the 11 line on purpose. `npm@latest` is a moving target:
+        # npm 12 requires Node ^22.22.2 || ^24.15.0 || >=26, so it fails with
+        # EBADENGINE on the Node 20 runner this job uses. The 11 line still
+        # satisfies the 11.5.1+ that trusted publishing needs. Raise this
+        # together with the `node-version` above, never on its own.
+        run: npm install -g npm@11
 
       - name: Publish to npm
         run: npm publish --access public --provenance
