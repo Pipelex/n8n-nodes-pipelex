@@ -1,0 +1,1822 @@
+<!DOCTYPE html><html lang="en" class="no-js"><head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="Official n8n community node for Pipelex - Execute Pipelex pipelines in your n8n workflows">
+      
+      
+      
+        <link rel="canonical" href="https://pipelex.github.io/n8n-nodes-pipelex/usage/">
+      
+      
+        <link rel="prev" href="..">
+      
+      
+        <link rel="next" href="../examples/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="https://pipelex-web.s3.amazonaws.com/logo/pipelex-favicon-32.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+    
+    
+      
+        <title>Usage Guide - Pipelex Docs</title>
+      
+    
+    
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
+      
+        
+        <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+        
+        
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin="">
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&amp;display=fallback">
+        <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
+      
+    
+    
+      <link rel="stylesheet" href="../stylesheets/mermaid.css">
+    
+      <link rel="stylesheet" href="../stylesheets/general.css">
+    
+    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  <link href="../assets/stylesheets/glightbox.min.css" rel="stylesheet"><script src="../assets/javascripts/glightbox.min.js"></script><style id="glightbox-style">
+            html.glightbox-open { overflow: initial; height: 100%; }
+            .gslide-title { margin-top: 0px; user-select: text; }
+            .gslide-desc { color: #666; user-select: text; }
+            .gslide-image img { background: white; }
+            .gscrollbar-fixer { padding-right: 15px; }
+            .gdesc-inner { font-size: 0.75rem; }
+            body[data-md-color-scheme="slate"] .gdesc-inner { background: var(--md-default-bg-color); }
+            body[data-md-color-scheme="slate"] .gslide-title { color: var(--md-default-fg-color); }
+            body[data-md-color-scheme="slate"] .gslide-desc { color: var(--md-default-fg-color); }
+        </style></head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="deep-purple">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#usage-guide" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+  
+
+<header class="md-header md-header--shadow md-header--lifted" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href=".." title="Pipelex Docs" class="md-header__button md-logo" aria-label="Pipelex Docs" data-md-component="logo">
+      
+  <img src="https://pipelex-web.s3.amazonaws.com/logo/Pipelex-logo-wot-mono-560x176.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"></path></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Pipelex Docs
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Usage Guide
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="teal" data-md-color-accent="deep-purple" aria-label="Switch to dark mode" type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden="">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"></path></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="teal" data-md-color-accent="purple" aria-label="Switch to light mode" type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden="">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"></path></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"></path></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required="">
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"></path></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"></path></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"></path></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix="">
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/Pipelex/pipelex" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"></path></svg>
+  </div>
+  <div class="md-source__repository">
+    Pipelex on GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+    
+      
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="https://docs.pipelex.com/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="https://pipelex.github.io/pipelex-api/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  API
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="https://pipelex.github.io/pipelex-mcp/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  MCP
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href=".." class="md-tabs__link">
+          
+  
+  
+  n8n
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="https://docs.pipelex.com/contributing/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Contribute
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="https://docs.pipelex.com/changelog/" class="md-tabs__link">
+        
+  
+  
+    
+  
+  Changelog
+
+      </a>
+    </li>
+  
+
+      
+    </ul>
+  </div>
+</nav>
+    
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation">
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href=".." title="Pipelex Docs" class="md-nav__button md-logo" aria-label="Pipelex Docs" data-md-component="logo">
+      
+  <img src="https://pipelex-web.s3.amazonaws.com/logo/Pipelex-logo-wot-mono-560x176.png" alt="logo">
+
+    </a>
+    Pipelex Docs
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/Pipelex/pipelex" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"></path></svg>
+  </div>
+  <div class="md-source__repository">
+    Pipelex on GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix="">
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://docs.pipelex.com/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://pipelex.github.io/pipelex-api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://pipelex.github.io/pipelex-mcp/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    MCP
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked="">
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    n8n
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    n8n
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href=".." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Getting Started
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Usage Guide
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Usage Guide
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix="">
+      
+        <li class="md-nav__item">
+  <a href="#operations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Operations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#credential-base-url" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Credential: Base URL
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-to-run-a-stored-method-or-an-inline-one" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What to run: a stored method, or an inline one
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="What to run: a stored method, or an inline one">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#custom-pipefunc-python" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Custom PipeFunc Python
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pipe-code" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pipe Code
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#inputs-parameter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Inputs Parameter
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Inputs Parameter">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#basic-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Basic Example
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#using-n8n-expressions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Using n8n Expressions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#from-previous-node" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From Previous Node
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#optional-output-controls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Optional output controls
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Optional output controls">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#output-name-output_name" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Output Name (output_name)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#output-multiplicity-output_multiplicity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Output Multiplicity (output_multiplicity)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#dynamic-output-concept-ref-dynamic_output_concept_ref" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dynamic Output Concept Ref (dynamic_output_concept_ref)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#polling-control-start-wait-for-result-poll-get-result" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Polling control (Start &amp; Wait for Result / Poll &amp; Get Result)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Polling control (Start &amp; Wait for Result / Poll &amp; Get Result)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#max-wait-seconds-maxwaitseconds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Max Wait (Seconds) (maxWaitSeconds)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-the-result" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading the result
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Reading the result">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#when-a-run-fails" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When a run fails
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#token-usage-and-cost" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Token usage and cost
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#learn-more" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Learn More
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../examples/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Examples
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+          
+          
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4_4">
+        
+          
+          <label class="md-nav__link" for="__nav_4_4" id="__nav_4_4_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contribute
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_4_4_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_4_4">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Contribute
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix="">
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contributing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../CODE_OF_CONDUCT/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Code of Conduct
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../license/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    License
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://docs.pipelex.com/contributing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Contribute
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="https://docs.pipelex.com/changelog/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Changelog
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc">
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix="">
+      
+        <li class="md-nav__item">
+  <a href="#operations" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Operations
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#credential-base-url" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Credential: Base URL
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-to-run-a-stored-method-or-an-inline-one" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What to run: a stored method, or an inline one
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="What to run: a stored method, or an inline one">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#custom-pipefunc-python" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Custom PipeFunc Python
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pipe-code" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pipe Code
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#inputs-parameter" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Inputs Parameter
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Inputs Parameter">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#basic-example" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Basic Example
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#using-n8n-expressions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Using n8n Expressions
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#from-previous-node" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        From Previous Node
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#optional-output-controls" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Optional output controls
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Optional output controls">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#output-name-output_name" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Output Name (output_name)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#output-multiplicity-output_multiplicity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Output Multiplicity (output_multiplicity)
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#dynamic-output-concept-ref-dynamic_output_concept_ref" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Dynamic Output Concept Ref (dynamic_output_concept_ref)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#polling-control-start-wait-for-result-poll-get-result" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Polling control (Start &amp; Wait for Result / Poll &amp; Get Result)
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Polling control (Start &amp; Wait for Result / Poll &amp; Get Result)">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#max-wait-seconds-maxwaitseconds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Max Wait (Seconds) (maxWaitSeconds)
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#reading-the-result" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Reading the result
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Reading the result">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#when-a-run-fails" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When a run fails
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#token-usage-and-cost" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Token usage and cost
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#learn-more" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Learn More
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="usage-guide">Usage Guide</h1>
+<h2 id="operations">Operations</h2>
+<p>The Pipelex node has one <strong>Operation</strong> selector with four operations, mirroring the mthds-js client surface (<code>start</code> / <code>waitForResult</code> / <code>getRunResult</code>):</p>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>What it does</th>
+<th>Endpoint</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Start &amp; Wait for Result</strong> (default)</td>
+<td>Start a durable run and poll internally until it finishes, then return the result. The polling is invisible — no Wait-node loop to assemble.</td>
+<td><code>POST /v1/start</code> → <code>GET /v1/runs/{pipeline_run_id}/results</code></td>
+</tr>
+<tr>
+<td><strong>Start Pipeline</strong></td>
+<td>Start a durable run and return <strong>immediately</strong> with the StartAck — <code>{ pipeline_run_id, state, created_at }</code>. No waiting.</td>
+<td><code>POST /v1/start</code></td>
+</tr>
+<tr>
+<td><strong>Poll &amp; Get Result</strong></td>
+<td>Wait for an <strong>already-started</strong> run by <code>pipeline_run_id</code>: poll until it finishes or Max Wait is exceeded.</td>
+<td><code>GET /v1/runs/{pipeline_run_id}/results</code> (polled)</td>
+</tr>
+<tr>
+<td><strong>Get Run Result</strong></td>
+<td>Fetch a run's result <strong>once</strong> by <code>pipeline_run_id</code> (no polling). <code>status: "RUNNING"</code> while still running.</td>
+<td><code>GET /v1/runs/{pipeline_run_id}/results</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Which one to use?</strong></p>
+<ul>
+<li><strong>Quick runs</strong> → <strong>Start &amp; Wait for Result</strong>: the common case end to end. It starts the run (a durable, server-side run that survives any gateway timeout) and polls until the result is ready, honoring the server's <code>Retry-After</code> (5s cadence when absent). <strong>Max Wait (Seconds)</strong> (default <strong>300</strong>) caps how long the node blocks the n8n execution: on exceed it returns the <code>pipeline_run_id</code> + a "still running" message — a usable output, not an error. <code>0</code> waits indefinitely (only sensible on self-hosted n8n without execution timeouts).</li>
+<li><strong>Long runs</strong> → <strong>Start Pipeline</strong> now, then <strong>Poll &amp; Get Result</strong> later — in the same workflow after other work, on another workflow branch, or in a different workflow entirely. Poll &amp; Get Result uses the exact same poll loop and Max Wait semantics, just fed by your <code>pipeline_run_id</code> instead of a fresh start.</li>
+<li><strong>Webhook-style / fire-and-collect</strong> → <strong>Start Pipeline</strong>, store the <code>pipeline_run_id</code>, and check in with <strong>Get Run Result</strong> on a schedule: it fetches once, returning <code>status: "RUNNING"</code> until the run completes — no blocking anywhere.</li>
+</ul>
+<p>Both start operations carry an <code>Idempotency-Key</code> derived from the n8n execution, node, and item, so an n8n "Retry On Fail" replays the same run instead of creating a duplicate paid run.</p>
+<blockquote>
+<p>ℹ️ <strong>Upgrading from 0.0.x?</strong> The old <code>execute</code> operation value ("Execute Pipeline") still executes as a hidden alias of <strong>Start &amp; Wait for Result</strong> — saved workflows keep running without edits. And there is no more injected <strong>Custom API Call</strong> entry in the dropdown: the credential no longer declares a generic <code>authenticate</code> block (the node sends its own <code>Authorization</code> header), which is the trigger n8n uses to inject that raw-HTTP escape hatch.</p>
+<p>ℹ️ <strong>Hosted-only:</strong> the run-lifecycle polling routes (<code>/v1/runs/*</code>) and the <code>Method ID</code> field are hosted-API extensions, not part of the bare MTHDS Protocol — a bare runner does not implement them.</p>
+</blockquote>
+<h2 id="credential-base-url">Credential: Base URL</h2>
+<p>The Pipelex API base URL is configured on the credential, not on the node. Open your <strong>Pipelex Bearer Token</strong> credential and set:</p>
+<p><strong>Examples:</strong></p>
+<ul>
+<li>Hosted API (default): <code>https://api.pipelex.com</code> — run access is gated for now; join the <a href="https://go.pipelex.com/waitlist">waitlist</a>.</li>
+<li>Your own server exposing the same hosted surface (<code>/v1/start</code>, <code>/v1/runs/{pipeline_run_id}/results</code>, <code>/v1/auth/verify</code>): <code>https://your-pipelex-host.example.com</code> (a self-hosting guide is in the works).</li>
+</ul>
+<blockquote>
+<p>⚠️ <strong>Running on n8n Cloud or any deployed n8n instance?</strong> <code>localhost</code>/<code>127.0.0.1</code> URLs won't be reachable from n8n. Use a Base URL that n8n can reach over the network.</p>
+</blockquote>
+<p>The credential test hits <code>GET &lt;Base URL&gt;/v1/auth/verify</code> to verify both reachability and the Bearer Token. Note it only checks the token is <strong>valid</strong> — not that it can <strong>start runs</strong>. Access to the run API is granted per <strong>account</strong>, not per key, so a perfectly valid key can pass the test and still be refused with a <code>403</code> on a real run. That is not a key you can re-scope: ask Pipelex to enable API access for your account.</p>
+<hr>
+<h2 id="what-to-run-a-stored-method-or-an-inline-one">What to run: a stored method, or an inline one</h2>
+<p>These fields apply to the two start operations (<strong>Start &amp; Wait for Result</strong> and <strong>Start Pipeline</strong>). The node asks for the method first, and offers exactly two ways to name it — <strong>they are mutually exclusive</strong>:</p>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>How</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>A stored method</strong> (default)</td>
+<td>put its id in <strong>Method ID</strong>. It already carries its own Python.</td>
+</tr>
+<tr>
+<td><strong>An inline method</strong></td>
+<td>turn on <strong>Define Method Inline</strong>, then paste the bundle into <strong>MTHDS Bundles</strong> (one entry per bundle file) and add any custom PipeFunc Python under <strong>Python Files</strong>.</td>
+</tr>
+</tbody>
+</table>
+<p>Setting a <code>Method ID</code> <em>and</em> an inline method is an error — "what is this node running?" must have one answer. (The API itself would accept both, running the inline method and filing the run under the stored one in history; the node refuses it deliberately.)</p>
+<p>Turning the toggle <strong>off</strong> also removes whatever it holds from the request, so a bundle you pasted and then abandoned is never sent, and never trips the either/or error from a field you can no longer see.</p>
+<blockquote>
+<p><strong>Upgrading from 0.1.0?</strong> A node configured before this toggle existed will refuse to run until you switch it on, with an error saying so. That is deliberate: in 0.1.0 an inline bundle took precedence over a <code>Method ID</code>, so quietly defaulting to "toggle off" would have run the <em>stored</em> method instead — a different method, with no error. Switch the toggle on to keep running the pasted method, or clear <code>MTHDS Bundles</code> to run the stored one.</p>
+<p><strong>Upgrading from 0.1.0?</strong> A node configured before this toggle existed will refuse to run until you switch it on, with an error saying so. That is deliberate: in 0.1.0 an inline bundle took precedence over a <code>Method ID</code>, so quietly defaulting to "toggle off" would have run the <em>stored</em> method instead — a different method, with no error. Switch the toggle on to keep running the pasted method, or clear <code>MTHDS Bundles</code> to run the stored one.</p>
+</blockquote>
+<h3 id="custom-pipefunc-python">Custom PipeFunc Python</h3>
+<p><code>MTHDS Bundles</code> carries <code>.mthds</code> text only. If your method's pipes use custom <strong>PipeFunc Python</strong>, add those files under <strong>Python Files</strong> — one row each — and the node ships them together with the pasted method as a single bundle:</p>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Content</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>funcs/score.py</code></td>
+<td>the custom PipeFunc</td>
+</tr>
+<tr>
+<td><code>structures/models.py</code></td>
+<td>custom structured outputs</td>
+</tr>
+<tr>
+<td><code>requirements.txt</code></td>
+<td>extra Python deps (may be empty)</td>
+</tr>
+</tbody>
+</table>
+<p>Paths are relative to the bundle root, use forward slashes, and must match what your method references. Leave the field empty unless your method uses PipeFunc.</p>
+<p>Checked before anything is sent, so you get an immediate error on the item instead of a server <code>422</code>: Python Files with nothing pasted in <code>MTHDS Bundles</code> (Python is not a method), and unsafe paths like <code>../x.py</code>. An empty row is dropped; <strong>blank content is kept</strong>, since an empty <code>requirements.txt</code> is legitimate.</p>
+<blockquote>
+<p><strong>Custom Python requires a sandbox-hosted runner.</strong> The hosted Pipelex API is one. A bare self-hosted <code>pipelex-api</code> refuses a bundle containing <code>.py</code> rather than importing untrusted code into its own process.</p>
+</blockquote>
+<p>Under the hood the node sends one <code>files</code> map, with the pasted method folded in as <code>main.mthds</code> (then <code>bundle-2.mthds</code>, …). That is the same split the server performs on any bundle — <code>.mthds</code> entries become the method, everything else is materialized beside it — so the run is identical either way.</p>
+<h3 id="pipe-code">Pipe Code</h3>
+<p>Optional, and independent of the choice above: <strong>Pipe Code</strong> names which pipe to run. Leave it empty to use the method's declared <code>main_pipe</code>; set it to pick a different pipe out of the method (or to name a pipe already registered in a self-hosted server's library, which is a run source on its own).</p>
+<p>An inline method with no <code>main_pipe</code> and no <strong>Pipe Code</strong> has nothing to run.</p>
+<hr>
+<h2 id="inputs-parameter">Inputs Parameter</h2>
+<blockquote>
+<p><strong>📚 For comprehensive input format documentation</strong>, including all cases and advanced usage patterns, see the <strong><a href="https://docs.pipelex.com/pages/api/#input-format-implicitmemory">Pipelex API Guide: Input Format (PipelineInputs)</a></strong>.</p>
+</blockquote>
+<p>The <code>inputs</code> parameter must be a JSON object where keys match the concept names in your pipeline.</p>
+<h3 id="basic-example">Basic Example</h3>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"invoice_text"</span><span class="p">:</span><span class="w"> </span><span class="s2">"INVOICE #INV-001\nAmount: $500"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"customer_name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Acme Corp"</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3 id="using-n8n-expressions">Using n8n Expressions</h3>
+<p>Pass data from previous nodes:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"document_text"</span><span class="p">:</span><span class="w"> </span><span class="s2">"{{ $json.content }}"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"file_name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"{{ $json.filename }}"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"timestamp"</span><span class="p">:</span><span class="w"> </span><span class="s2">"{{ $now }}"</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3 id="from-previous-node">From Previous Node</h3>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"text"</span><span class="p">:</span><span class="w"> </span><span class="s2">"{{ $('HTTP Request').item.json.body }}"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"metadata"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">"source"</span><span class="p">:</span><span class="w"> </span><span class="s2">"{{ $json.source }}"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"user"</span><span class="p">:</span><span class="w"> </span><span class="s2">"{{ $json.user_id }}"</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<hr>
+<h2 id="optional-output-controls">Optional output controls</h2>
+<p>These optional fields are surfaced at the top level on both start operations (they are forwarded verbatim to the runner).</p>
+<h3 id="output-name-output_name">Output Name (<code>output_name</code>)</h3>
+<p>Specify the name you want to give to the main pipe.</p>
+<p><strong>Example:</strong> <code>extracted_data</code></p>
+<h3 id="output-multiplicity-output_multiplicity">Output Multiplicity (<code>output_multiplicity</code>)</h3>
+<p>Controls whether the pipeline returns a single item or multiple items (array).</p>
+<blockquote>
+<p><strong>📚 For comprehensive multiplicity documentation</strong>, see <strong><a href="https://docs.pipelex.com/pages/build-reliable-ai-workflows-with-pipelex/understanding-multiplicity/">Understanding Multiplicity</a></strong>.</p>
+</blockquote>
+<p><strong>Example:</strong> If your pipeline extracts keywords from text and is configured with <code>output = "Keyword[]"</code> in the MTHDS bundle, set <code>output_multiplicity</code> to <code>true</code> to receive an array of all extracted keywords, <code>n</code> for a specific number of items.</p>
+<h3 id="dynamic-output-concept-ref-dynamic_output_concept_ref">Dynamic Output Concept Ref (<code>dynamic_output_concept_ref</code>)</h3>
+<p>Override the output concept. See more <a href="https://docs.pipelex.com/pages/build-reliable-ai-workflows-with-pipelex/define_your_concepts/#dynamiccontent">here</a>.</p>
+<h2 id="polling-control-start-wait-for-result-poll-get-result">Polling control (Start &amp; Wait for Result / Poll &amp; Get Result)</h2>
+<h3 id="max-wait-seconds-maxwaitseconds">Max Wait (Seconds) (<code>maxWaitSeconds</code>)</h3>
+<p>Maximum seconds to wait for the run to finish (<strong>default 300</strong> — safely under typical n8n Cloud execution caps). If exceeded, the node returns the <code>pipeline_run_id</code> with a "still running" message — fetch the result later with the <strong>Get Run Result</strong> operation, or keep waiting with <strong>Poll &amp; Get Result</strong>. <code>0</code> waits indefinitely (only sensible on self-hosted n8n without execution timeouts). The poll cadence follows the server's <code>Retry-After</code> header (5s when absent).</p>
+<hr>
+<h2 id="reading-the-result">Reading the result</h2>
+<p>A completed run produces one item:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>What it is</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>status</code></td>
+<td>always <code>COMPLETED</code> on a finished run, or <code>RUNNING</code> on a still-running output. This is the <strong>single</strong> completion signal — branch on it, never on anything else</td>
+</tr>
+<tr>
+<td><code>pipeline_run_id</code></td>
+<td>the run's id — keep it if you may need to re-fetch</td>
+</tr>
+<tr>
+<td><code>main_stuff</code></td>
+<td>your method's output. Polymorphic: a list output arrives as a top-level array, a structured output as an object</td>
+</tr>
+<tr>
+<td><code>working_memory</code></td>
+<td>every named value the run produced, not just the main output</td>
+</tr>
+<tr>
+<td><code>tokens_usages</code></td>
+<td>one record per inference call — see below</td>
+</tr>
+<tr>
+<td><code>usage_assembly_error</code></td>
+<td>non-null only when usage accounting itself failed</td>
+</tr>
+</tbody>
+</table>
+<p>The heavy <code>graph_spec</code> visualization artifact is stripped from the n8n item (it only cluttered the item view); the API still returns it.</p>
+<p>A completed run <strong>always</strong> delivers a <code>main_stuff</code> — but not always the instant it turns COMPLETED. The run is marked complete as soon as it finishes, then its artifacts are written to storage, so a fetch landing in that window sees a complete run with no output yet. The node handles the two cases differently:</p>
+<ul>
+<li><strong>Start &amp; Wait for Result / Poll &amp; Get Result</strong> keep polling through the window and return the result once it lands. Only if the output never arrives do you get an error, and it names the <code>pipeline_run_id</code> to report.</li>
+<li><strong>Get Run Result</strong> cannot wait, so it returns <code>status: "RUNNING"</code> with a "result is still being written" message — fetch again with the same <code>pipeline_run_id</code>.</li>
+</ul>
+<p>Either way you never receive an empty <code>COMPLETED</code> item that breaks a later node instead.</p>
+<h3 id="when-a-run-fails">When a run fails</h3>
+<p>A failed run raises an error on the item (or, with <strong>Continue On Fail</strong>, lands in <code>error</code>) carrying the reason, not just the fact:</p>
+<div class="highlight"><pre><span></span><code>Run FAILED: Live run of PipeSequence 'build_client_quote': missing required
+inputs: illustrations. These optional inputs may be omitted: comments.
+[PipeRunInputsError]
+</code></pre></div>
+<p>The terminal status is kept because it matters — <code>TIMED_OUT</code> and <code>CANCELLED</code> read very differently from <code>FAILED</code>.</p>
+<p>n8n's <strong>Error details → From Pipelex</strong> panel summarises the rest of the report, when Pipelex supplies it:</p>
+<div class="highlight"><pre><span></span><code>Pipe run inputs
+What to do: change input — Provide the illustrations input
+Retryable: no — re-running will fail the same way until the cause is fixed.
+Error: PipeRunInputsError · pipe_run
+Context: run mt_… · pipe build_client_quote · finished 2026-08-17T16:01:54Z
+Docs: https://docs.pipelex.com/latest/errors/pipe-run-inputs-error/
+</code></pre></div>
+<p>Expand <strong>Error data</strong> in the same panel for the complete report — every field the runner sent, as an aligned block:</p>
+<div class="highlight"><pre><span></span><code>title            Pipe run inputs
+message          missing required inputs: illustrations
+error_type       PipeRunInputsError
+type_uri         https://docs.pipelex.com/latest/errors/pipe-run-inputs-error/
+pipeline_run_id  run_61fd9c76-f718-4fb3-b5cf-c52b2435538d
+pipe_code        build_client_quote
+status           FAILED
+finished_at      2026-08-17T16:15:45.863069+00:00
+</code></pre></div>
+<p>Two lines in the summary are worth acting on directly: <strong>What to do</strong> is the runner's own advice for this error class, and <strong>Retryable</strong> tells you whether n8n's <em>Retry On Fail</em> could ever help — on a <code>no</code>, retrying will fail identically until you change something. An inference failure also names the provider and model.</p>
+<p>If Pipelex cannot supply a reason — the report has not landed yet, or the extra read fails — you get the generic <em>"Run finished with status FAILED; no result available"</em> plus the <code>pipeline_run_id</code>. The run still failed; only the explanation is missing.</p>
+<h3 id="token-usage-and-cost">Token usage and cost</h3>
+<p><code>tokens_usages</code> carries one record per inference call — LLM, image generation, extraction and search alike:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"model_type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"llm"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"inference_model_name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"gpt-4o"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"pipe_code"</span><span class="p">:</span><span class="w"> </span><span class="s2">"extract_invoice"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"nb_tokens_by_category"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="nt">"input"</span><span class="p">:</span><span class="w"> </span><span class="mi">1240</span><span class="p">,</span><span class="w"> </span><span class="nt">"input_cached"</span><span class="p">:</span><span class="w"> </span><span class="mi">1024</span><span class="p">,</span><span class="w"> </span><span class="nt">"output"</span><span class="p">:</span><span class="w"> </span><span class="mi">88</span><span class="w"> </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">"cost"</span><span class="p">:</span><span class="w"> </span><span class="mf">0.0031</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"started_at"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2026-08-17T10:00:00Z"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"completed_at"</span><span class="p">:</span><span class="w"> </span><span class="s2">"2026-08-17T10:00:04Z"</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Because <code>pipe_code</code> is on each record, per-pipe cost attribution works without any extra lookup. Three things to get right:</p>
+<ul>
+<li><strong>There is no run-level total.</strong> Sum <code>cost</code> across the records yourself.</li>
+<li><strong><code>nb_tokens_by_category</code> is not additive.</strong> <code>input</code> is already the joined total and <code>input_cached</code> is a <em>subset</em> of it — adding the categories together double-counts.</li>
+<li><strong><code>cost: null</code> and <code>cost: 0</code> mean different things.</strong> <code>null</code> means the model has no rate table at all (own-GPU, mock, dry run); <code>0</code> means it was priced and came to zero.</li>
+</ul>
+<p><code>tokens_usages</code> is <code>null</code> in three different situations — usage accounting was off, it broke, or the run predates the artifact — and <code>[]</code> when it ran but no inference happened. Only <code>usage_assembly_error</code> distinguishes "broke" from the others, so branch on that field rather than on the list being empty.</p>
+<hr>
+<h2 id="learn-more">Learn More</h2>
+<ul>
+<li>📖 <a href="https://docs.pipelex.com/pages/api/">Pipelex API Documentation</a></li>
+<li>📚 <a href="https://docs.pipelex.com/">Pipelex Main Docs</a></li>
+<li>🍳 <a href="https://github.com/Pipelex/pipelex-cookbook">Pipelex Cookbook</a></li>
+<li>💬 <a href="https://go.pipelex.com/discord">Discord Community</a></li>
+</ul>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden="">
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"></path></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+    
+      
+      <nav class="md-footer__inner md-grid" aria-label="Footer">
+        
+          
+          <a href=".." class="md-footer__link md-footer__link--prev" aria-label="Previous: Getting Started">
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"></path></svg>
+            </div>
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Previous
+              </span>
+              <div class="md-ellipsis">
+                Getting Started
+              </div>
+            </div>
+          </a>
+        
+        
+          
+          <a href="../examples/" class="md-footer__link md-footer__link--next" aria-label="Next: Examples">
+            <div class="md-footer__title">
+              <span class="md-footer__direction">
+                Next
+              </span>
+              <div class="md-ellipsis">
+                Examples
+              </div>
+            </div>
+            <div class="md-footer__button md-icon">
+              
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 11v2h12l-5.5 5.5 1.42 1.42L19.84 12l-7.92-7.92L10.5 5.5 16 11z"></path></svg>
+            </div>
+          </a>
+        
+      </nav>
+    
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+    <div class="md-copyright__highlight">
+      © 2025 Evotis S.A.S. <br>Pipelex is a trademark of Evotis S.A.S.
+    </div>
+  
+  
+</div>
+      
+        
+<div class="md-social">
+  
+    
+    
+    
+    
+    <a href="https://github.com/Pipelex/pipelex" target="_blank" rel="noopener" title="Pipelex on GitHub" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"></path></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://pypi.org/project/pipelex/" target="_blank" rel="noopener" title="pipelex on PyPI" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.8 200.5c-7.7-30.9-22.3-54.2-53.4-54.2h-40.1v47.4c0 36.8-31.2 67.8-66.8 67.8H172.7c-29.2 0-53.4 25-53.4 54.3v101.8c0 29 25.2 46 53.4 54.3 33.8 9.9 66.3 11.7 106.8 0 26.9-7.8 53.4-23.5 53.4-54.3v-40.7H226.2v-13.6h160.2c31.1 0 42.6-21.7 53.4-54.2 11.2-33.5 10.7-65.7 0-108.6M286.2 444.7a20.4 20.4 0 1 1 0-40.7 20.4 20.4 0 1 1 0 40.7M167.8 248.1h106.8c29.7 0 53.4-24.5 53.4-54.3V91.9c0-29-24.4-50.7-53.4-55.6-35.8-5.9-74.7-5.6-106.8.1-45.2 8-53.4 24.7-53.4 55.6v40.7h106.9v13.6h-147c-31.1 0-58.3 18.7-66.8 54.2-9.8 40.7-10.2 66.1 0 108.6 7.6 31.6 25.7 54.2 56.8 54.2H101v-48.8c0-35.3 30.5-66.4 66.8-66.4m-6.6-183.4a20.4 20.4 0 1 1 0 40.8 20.4 20.4 0 1 1 0-40.8"></path></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://x.com/PipelexAI" target="_blank" rel="noopener" title="Pipelex on X" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M459.4 151.7c.3 4.5.3 9.1.3 13.6 0 138.7-105.6 298.6-298.6 298.6-59.5 0-114.7-17.2-161.1-47.1 8.4 1 16.6 1.3 25.3 1.3 49.1 0 94.2-16.6 130.3-44.8-46.1-1-84.8-31.2-98.1-72.8 6.5 1 13 1.6 19.8 1.6 9.4 0 18.8-1.3 27.6-3.6-48.1-9.7-84.1-52-84.1-103v-1.3c14 7.8 30.2 12.7 47.4 13.3-28.3-18.8-46.8-51-46.8-87.4 0-19.5 5.2-37.4 14.3-53C87.4 130.8 165 172.4 252.1 176.9c-1.6-7.8-2.6-15.9-2.6-24C249.5 95.1 296.3 48 354.4 48c30.2 0 57.5 12.7 76.7 33.1 23.7-4.5 46.5-13.3 66.6-25.3-7.8 24.4-24.4 44.8-46.1 57.8 21.1-2.3 41.6-8.1 60.4-16.2-14.3 20.8-32.2 39.3-52.6 54.3"></path></svg>
+    </a>
+  
+    
+    
+    
+    
+    <a href="https://go.pipelex.com/discord" target="_blank" rel="noopener" title="Pipelex on Discord" class="md-social__link">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M492.5 69.8c-.2-.3-.4-.6-.8-.7-38.1-17.5-78.4-30-119.7-37.1-.4-.1-.8 0-1.1.1s-.6.4-.8.8c-5.5 9.9-10.5 20.2-14.9 30.6-44.6-6.8-89.9-6.8-134.4 0-4.5-10.5-9.5-20.7-15.1-30.6-.2-.3-.5-.6-.8-.8s-.7-.2-1.1-.2C162.5 39 122.2 51.5 84.1 69c-.3.1-.6.4-.8.7C7.1 183.5-13.8 294.6-3.6 404.2c0 .3.1.5.2.8s.3.4.5.6c44.4 32.9 94 58 146.8 74.2.4.1.8.1 1.1 0s.7-.4.9-.7c11.3-15.4 21.4-31.8 30-48.8.1-.2.2-.5.2-.8s0-.5-.1-.8-.2-.5-.4-.6-.4-.3-.7-.4c-15.8-6.1-31.2-13.4-45.9-21.9-.3-.2-.5-.4-.7-.6s-.3-.6-.3-.9 0-.6.2-.9.3-.5.6-.7c3.1-2.3 6.2-4.7 9.1-7.1.3-.2.6-.4.9-.4s.7 0 1 .1c96.2 43.9 200.4 43.9 295.5 0 .3-.1.7-.2 1-.2s.7.2.9.4c2.9 2.4 6 4.9 9.1 7.2.2.2.4.4.6.7s.2.6.2.9-.1.6-.3.9-.4.5-.6.6c-14.7 8.6-30 15.9-45.9 21.8-.2.1-.5.2-.7.4s-.3.4-.4.7-.1.5-.1.8.1.5.2.8c8.8 17 18.8 33.3 30 48.8.2.3.6.6.9.7s.8.1 1.1 0c52.9-16.2 102.6-41.3 147.1-74.2.2-.2.4-.4.5-.6s.2-.5.2-.8c12.3-126.8-20.5-236.9-86.9-334.5zm-302 267.7c-29 0-52.8-26.6-52.8-59.2s23.4-59.2 52.8-59.2c29.7 0 53.3 26.8 52.8 59.2 0 32.7-23.4 59.2-52.8 59.2m195.4 0c-29 0-52.8-26.6-52.8-59.2s23.4-59.2 52.8-59.2c29.7 0 53.3 26.8 52.8 59.2 0 32.7-23.2 59.2-52.8 59.2"></path></svg>
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.footer", "navigation.tabs", "navigation.tabs.sticky", "navigation.sections", "navigation.top"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
+      
+    
+  
+<script id="init-glightbox">const lightbox = GLightbox({"touchNavigation": true, "loop": false, "zoomable": true, "draggable": true, "openEffect": "zoom", "closeEffect": "zoom", "slideEffect": "slide"});
+document$.subscribe(()=>{ lightbox.reload(); });
+</script></body></html>

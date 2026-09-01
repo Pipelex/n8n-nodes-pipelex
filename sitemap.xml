@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+         <loc>https://pipelex.github.io/n8n-nodes-pipelex/</loc>
+         <lastmod>2026-09-01</lastmod>
+    </url>
+    <url>
+         <loc>https://pipelex.github.io/n8n-nodes-pipelex/CODE_OF_CONDUCT/</loc>
+         <lastmod>2026-09-01</lastmod>
+    </url>
+    <url>
+         <loc>https://pipelex.github.io/n8n-nodes-pipelex/changelog/</loc>
+         <lastmod>2026-09-01</lastmod>
+    </url>
+    <url>
+         <loc>https://pipelex.github.io/n8n-nodes-pipelex/contributing/</loc>
+         <lastmod>2026-09-01</lastmod>
+    </url>
+    <url>
+         <loc>https://pipelex.github.io/n8n-nodes-pipelex/examples/</loc>
+         <lastmod>2026-09-01</lastmod>
+    </url>
+    <url>
+         <loc>https://pipelex.github.io/n8n-nodes-pipelex/license/</loc>
+         <lastmod>2026-09-01</lastmod>
+    </url>
+    <url>
+         <loc>https://pipelex.github.io/n8n-nodes-pipelex/usage/</loc>
+         <lastmod>2026-09-01</lastmod>
+    </url>
+    <url>
+         <loc>https://pipelex.github.io/n8n-nodes-pipelex/plans/sdk-sync-20260817/</loc>
+         <lastmod>2026-09-01</lastmod>
+    </url>
+</urlset>
