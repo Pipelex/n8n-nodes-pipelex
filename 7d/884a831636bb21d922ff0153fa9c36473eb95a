@@ -1,0 +1,33 @@
+CHANGELOG.md
+  s_12b2af5fdd964a::t_13276a80a0b667 3-8
+README.md
+  s_12b2af5fdd964a::t_ab7ec84f31c414 57-58
+credentials/PiplexApi.credentials.ts
+  s_12b2af5fdd964a::t_3230b1855f4880 3-4,47-48,56
+docs/usage.md
+  s_12b2af5fdd964a::t_4a8623582bed0d 39-42
+nodes/Pipelex/GenericFunctions.ts
+  s_12b2af5fdd964a::t_6acc63f1b95982 18,147-156,484,527,735
+nodes/Pipelex/UserAgent.ts
+  s_12b2af5fdd964a::t_2d0d08506c3e65 1-20
+test/Pipelex.node.test.ts
+  s_12b2af5fdd964a::t_d5c99887a11af1 1-3,91-155
+test/UserAgent.test.ts
+  s_12b2af5fdd964a::t_dad81c09b81560 1-58
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "7d884a831636bb21d922ff0153fa9c36473eb95a",
+  "prompts": {},
+  "sessions": {
+    "s_12b2af5fdd964a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb75e847-abe4-4171-a2ff-2b263b391b14",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thomashebrard <thomas@pipelex.com>"
+    }
+  }
+}
