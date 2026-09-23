@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IExecuteFunctions, IN8nHttpFullResponse, INodeProperties } from 'n8n-workflow';
 
@@ -84,6 +87,71 @@ function startThenResults(resultImpl: HttpImpl): HttpImpl {
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+// Read from the manifest, independently of `UserAgent.ts`, so a drifted
+// constant fails here (spec: docs/specs/client-identification.md).
+const EXPECTED_USER_AGENT = `n8n-nodes-pipelex/${
+	(JSON.parse(readFileSync(resolve(__dirname, '../package.json'), 'utf8')) as { version: string }).version
+}`;
+
+describe('Pipelex node — client identification (User-Agent on every API request)', () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	it('sends the User-Agent on POST /v1/start and GET /v1/runs/{id}/results', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: { pipeCode: 'my-pipe', inputs: '{}' },
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+
+		const [startCall, resultCall] = httpFn.mock.calls.map((call) => call[0]);
+		expect(startCall.url).toBe('https://api.test/v1/start');
+		expect(startCall.headers['User-Agent']).toBe(EXPECTED_USER_AGENT);
+		expect(startCall.headers['Idempotency-Key']).toBe('exec-1:node-1:0');
+		expect(resultCall.url).toBe('https://api.test/v1/runs/run-1/results');
+		expect(resultCall.headers['User-Agent']).toBe(EXPECTED_USER_AGENT);
+	});
+
+	it('sends the User-Agent on GET /v1/runs/{id}/status (the failed-run explanation read)', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: { pipeCode: 'my-pipe', inputs: '{}' },
+			continueOnFail: true,
+			httpImpl: (options) => {
+				if (options.method === 'POST') return fullResponse(202, START_ACK);
+				if (String(options.url).endsWith('/status'))
+					return fullResponse(200, { pipeline_run_id: 'run-1', status: 'FAILED', error: { message: 'boom' } });
+				return fullResponse(409, { detail: 'Run finished with status FAILED; no result available' });
+			},
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+
+		const statusCall = httpFn.mock.calls
+			.map((call) => call[0])
+			.find((options) => String(options.url).endsWith('/v1/runs/run-1/status'));
+		expect(statusCall).toBeDefined();
+		expect(statusCall.headers['User-Agent']).toBe(EXPECTED_USER_AGENT);
+		expect(statusCall.headers.Authorization).toBe('Bearer secret-token');
+	});
+
+	it('sends the same User-Agent on every request it makes', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: { pipeCode: 'my-pipe', inputs: '{}' },
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+
+		expect(httpFn.mock.calls.length).toBeGreaterThan(0);
+		for (const [options] of httpFn.mock.calls) {
+			expect(options.headers['User-Agent']).toBe(EXPECTED_USER_AGENT);
+		}
+	});
+});
 
 describe('Pipelex node — Start & Wait for Result (start + internal poll)', () => {
 	beforeEach(() => vi.clearAllMocks());

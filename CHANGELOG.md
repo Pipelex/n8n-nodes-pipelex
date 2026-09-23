@@ -1,5 +1,11 @@
 # Changelog
 
+## [v0.2.2] - 2026-09-23
+
+### Added
+
+- **`User-Agent` header on every request**: the start, the result polls, the failed-run status read and the credential test now send `User-Agent: n8n-nodes-pipelex/<package version>`, so the Pipelex API can tell runs started from n8n apart from other clients. The version is read from the package's own `package.json`, so it always matches the installed release.
+
 ## [v0.2.1] - 2026-09-01
 
 ### Fixed
