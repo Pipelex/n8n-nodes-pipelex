@@ -1,5 +1,7 @@
 import type { ICredentialTestRequest, ICredentialType, Icon, INodeProperties } from 'n8n-workflow';
 
+import { USER_AGENT } from '../nodes/Pipelex/UserAgent';
+
 /**
  * NOTE — no `authenticate` block, on purpose. n8n injects a "Custom API Call"
  * entry into the Operation dropdown of every node whose credential declares a
@@ -42,7 +44,8 @@ export class PiplexApi implements ICredentialType {
 
 	// The test request authenticates itself (no `authenticate` block to lean
 	// on — see the class comment). `$credentials` expressions resolve here the
-	// same way the `baseURL` expression already does.
+	// same way the `baseURL` expression already does. It also carries the
+	// node's `User-Agent`, like every other request to the API.
 	test: ICredentialTestRequest = {
 		request: {
 			baseURL: '={{$credentials.baseUrl}}',
@@ -50,6 +53,7 @@ export class PiplexApi implements ICredentialType {
 			method: 'GET',
 			headers: {
 				Authorization: '=Bearer {{$credentials.apiKey}}',
+				'User-Agent': USER_AGENT,
 			},
 		},
 	};

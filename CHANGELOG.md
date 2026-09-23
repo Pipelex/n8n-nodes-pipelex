@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Every request to the Pipelex API now identifies the node with `User-Agent: n8n-nodes-pipelex/<package version>`.** The hosted API could not tell a run started from n8n apart from one started by the web app, an SDK script or a hand-written `curl`. The start, the result polls, the failed-run status read and the credential test all carry the header now, built in one place (`apiHeaders` in `nodes/Pipelex/GenericFunctions.ts`, over `nodes/Pipelex/UserAgent.ts`) so no request path can miss it. The version is imported from `package.json`, so it cannot drift from the published package, and the header is a single product token because a community node cannot read the n8n version. It follows the Pipelex workspace spec `docs/specs/client-identification.md`.
+
 ## [v0.2.1] - 2026-09-01
 
 ### Fixed

@@ -15,6 +15,7 @@ import {
 	type HostedStartBody,
 	type StartAck,
 } from './PipelexApiShapes';
+import { USER_AGENT } from './UserAgent';
 
 // A valid key passes the credential test (`/v1/auth/verify` accepts any valid
 // token) but can still 403 on a real run: the run / build / methods surface is
@@ -141,6 +142,16 @@ export interface ApiConnection {
 	baseUrl: string;
 	/** Full `Authorization` header value (`Bearer <token>`). */
 	authorization: string;
+}
+
+/**
+ * The headers every request to the Pipelex API carries: the manual
+ * `Authorization` and the client-identifying `User-Agent` (see `UserAgent.ts`).
+ * Every request builds its headers here, so no request path can miss one;
+ * request-specific headers (such as `Idempotency-Key`) are layered on top.
+ */
+export function apiHeaders(conn: ApiConnection, extra: IDataObject = {}): IDataObject {
+	return { ...extra, Authorization: conn.authorization, 'User-Agent': USER_AGENT };
 }
 
 /** Build the {@link ApiConnection} from the decrypted `piplexApi` credential. */
@@ -470,7 +481,7 @@ export async function requestStart(
 	const response = (await ctx.helpers.httpRequest({
 		method: 'POST' as IHttpRequestMethods,
 		url: `${conn.baseUrl}/v1/start`,
-		headers: { Authorization: conn.authorization, 'Idempotency-Key': idempotency },
+		headers: apiHeaders(conn, { 'Idempotency-Key': idempotency }),
 		body,
 		json: true,
 		returnFullResponse: true,
@@ -513,7 +524,7 @@ export async function requestRunStatus(
 	return (await ctx.helpers.httpRequest({
 		method: 'GET' as IHttpRequestMethods,
 		url: `${conn.baseUrl}/v1/runs/${encodeURIComponent(runId)}/status`,
-		headers: { Authorization: conn.authorization },
+		headers: apiHeaders(conn),
 		json: true,
 		returnFullResponse: true,
 		ignoreHttpStatusErrors: true,
@@ -721,7 +732,7 @@ export async function requestResult(
 	return (await ctx.helpers.httpRequest({
 		method: 'GET' as IHttpRequestMethods,
 		url: `${conn.baseUrl}/v1/runs/${encodeURIComponent(runId)}/results`,
-		headers: { Authorization: conn.authorization },
+		headers: apiHeaders(conn),
 		json: true,
 		returnFullResponse: true,
 		ignoreHttpStatusErrors: true,

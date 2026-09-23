@@ -54,6 +54,8 @@ This node runs your pipelines through the **hosted Pipelex API's durable run lif
 
 > ℹ️ **Hosted-only:** the run-lifecycle polling routes (`/v1/runs/*`) and the `Method ID` field are hosted-API extensions, not part of the bare MTHDS Protocol — a bare runner does not implement them. To use your own backend, point the Base URL at a server exposing the same hosted surface (`/v1/start`, `/v1/runs/{pipeline_run_id}/results`, `/v1/auth/verify`).
 
+> ℹ️ **Client identification:** every request to the API, the credential test included, carries `User-Agent: n8n-nodes-pipelex/<package version>`, following the Pipelex client-identification spec (`docs/specs/client-identification.md` in the Pipelex workspace). See the [usage guide](docs/usage.md#client-identification-user-agent).
+
 ### Install the n8n Community Node
 
 Follow the [installation guide](https://docs.n8n.io/integrations/community-nodes/installation/) in the n8n community nodes documentation.
