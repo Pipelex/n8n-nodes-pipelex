@@ -36,6 +36,10 @@ The Pipelex API base URL is configured on the credential, not on the node. Open 
 
 The credential test hits `GET <Base URL>/v1/auth/verify` to verify both reachability and the Bearer Token. Note it only checks the token is **valid** — not that it can **start runs**. Access to the run API is granted per **account**, not per key, so a perfectly valid key can pass the test and still be refused with a `403` on a real run. That is not a key you can re-scope: ask Pipelex to enable API access for your account.
 
+## Client identification (`User-Agent`)
+
+Every request the node sends to the Pipelex API — the start, the result polls, the failed-run status read and the credential test — carries `User-Agent: n8n-nodes-pipelex/<package version>` (for example `n8n-nodes-pipelex/0.2.1`), so the platform can tell traffic from n8n apart from the web app, the SDKs or a hand-written call. The value is a single product token because a community node cannot read the n8n version it runs in. It is self-declared and used only for analytics and diagnostics, never for authorization or rate limits. The convention every first-party Pipelex client follows is the Pipelex workspace spec `docs/specs/client-identification.md`.
+
 ---
 
 ## What to run: a stored method, or an inline one
