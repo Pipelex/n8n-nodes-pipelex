@@ -596,4 +596,4 @@ Confidential - HR Internal Use Only
 - Content generation with multiple variations
 - Real-time data enrichment
 
-For more pipeline examples, visit the [Pipelex Cookbook](https://docs.pipelex.com/pages/cookbook-examples/).
+For more pipeline examples, visit the [Pipelex Cookbook](https://github.com/Pipelex/pipelex-cookbook).
