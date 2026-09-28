@@ -22,6 +22,7 @@ import {
 	FORBIDDEN_MESSAGE,
 	NOT_FOUND_MESSAGE,
 	SERVICE_UNAVAILABLE_MESSAGE,
+	UPLOAD_UNAVAILABLE_MESSAGE,
 } from '../nodes/Pipelex/GenericFunctions';
 import { Pipelex } from '../nodes/Pipelex/Pipelex.node';
 
@@ -31,12 +32,20 @@ type HttpImpl = (options: {
 	[key: string]: unknown;
 }) => IN8nHttpFullResponse | Promise<IN8nHttpFullResponse>;
 
+/** An n8n binary as it sits on an item: base64 data plus the metadata n8n keeps. */
+interface TestBinary {
+	data: string;
+	mimeType: string;
+	fileName?: string;
+	fileExtension?: string;
+}
+
 interface ContextOptions {
 	operation: string;
 	params?: Record<string, unknown>;
 	httpImpl: HttpImpl;
 	continueOnFail?: boolean;
-	items?: Array<{ json: Record<string, unknown> }>;
+	items?: Array<{ json: Record<string, unknown>; binary?: Record<string, TestBinary> }>;
 }
 
 function makeContext(opts: ContextOptions): {
@@ -44,12 +53,21 @@ function makeContext(opts: ContextOptions): {
 	httpFn: ReturnType<typeof vi.fn>;
 } {
 	const params = opts.params ?? {};
+	const items = opts.items ?? [{ json: {} }];
 	// The node uses ctx.helpers.httpRequest (manual Authorization header — the
 	// credential has no `authenticate` block; see PiplexApi.credentials.ts).
 	const httpFn = vi.fn(async (options: { url: string }) => opts.httpImpl(options));
+	// n8n's binary helpers, answered from the items. `assertBinaryData` throws the
+	// way the real one does when the field is missing, so a test that reaches it
+	// by mistake fails loudly rather than reading `undefined`.
+	const binaryOf = (itemIndex: number, propertyName: string): TestBinary => {
+		const binary = items[itemIndex]?.binary?.[propertyName];
+		if (!binary) throw new Error(`no binary field "${propertyName}" on item ${itemIndex}`);
+		return binary;
+	};
 
 	const ctx = {
-		getInputData: () => opts.items ?? [{ json: {} }],
+		getInputData: () => items,
 		getCredentials: async () => ({ baseUrl: 'https://api.test', apiKey: 'secret-token' }),
 		getNodeParameter: (name: string, _itemIndex: number, fallback?: unknown) => {
 			if (name === 'operation') return opts.operation;
@@ -59,7 +77,13 @@ function makeContext(opts: ContextOptions): {
 		getExecutionCancelSignal: () => undefined,
 		continueOnFail: () => opts.continueOnFail ?? false,
 		getNode: () => ({ id: 'node-1', name: 'Pipelex', type: 'pipelex', typeVersion: 1 }),
-		helpers: { httpRequest: httpFn },
+		helpers: {
+			httpRequest: httpFn,
+			assertBinaryData: (itemIndex: number, propertyName: string) =>
+				binaryOf(itemIndex, propertyName),
+			getBinaryDataBuffer: async (itemIndex: number, propertyName: string) =>
+				Buffer.from(binaryOf(itemIndex, propertyName).data, 'base64'),
+		},
 	} as unknown as IExecuteFunctions;
 
 	return { ctx, httpFn };
@@ -1158,13 +1182,24 @@ describe('Pipelex node — operation surface (description sanity)', () => {
 		const startFields = properties
 			.filter((p: INodeProperties) => showOperations(p.name).includes('startAndPoll'))
 			.map((p: INodeProperties) => p.name);
-		expect(startFields.slice(0, 5)).toEqual([
+		expect(startFields.slice(0, 6)).toEqual([
 			'methodId',
 			'inlineMethod',
 			'mthdsContents',
 			'pythonFiles',
 			'inputs',
+			'binaryInputs',
 		]);
+	});
+
+	it('offers Binary Inputs as rows of input name + binary field, the field defaulting to data', () => {
+		const property = properties.find((p: INodeProperties) => p.name === 'binaryInputs');
+		expect(property?.type).toBe('fixedCollection');
+		expect(property?.typeOptions?.multipleValues).toBe(true);
+		const row = (property?.options ?? [])[0] as { name: string; values: INodeProperties[] };
+		expect(row.name).toBe('input');
+		expect(row.values.map((value) => value.name)).toEqual(['name', 'binaryPropertyName']);
+		expect(row.values.find((value) => value.name === 'binaryPropertyName')?.default).toBe('data');
 	});
 
 	it('renders both halves of the inline method as the same kind of control', () => {
@@ -1232,6 +1267,7 @@ describe('Pipelex node — operation surface (description sanity)', () => {
 			'mthdsContents',
 			'methodId',
 			'inputs',
+			'binaryInputs',
 			'pipeCode',
 			'outputName',
 			'outputMultiplicity',
@@ -1428,5 +1464,471 @@ describe('Pipelex node — explaining a failed run', () => {
 		expect(httpFn.mock.calls.map((call) => String(call[0].url))).not.toContain(
 			'https://api.test/v1/runs/run-1/status',
 		);
+	});
+});
+
+describe('Pipelex node — binary inputs (an n8n file becomes a method input)', () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	const PDF_BYTES = Buffer.from('%PDF-1.7 a fake invoice');
+	const PDF: TestBinary = {
+		data: PDF_BYTES.toString('base64'),
+		mimeType: 'application/pdf',
+		fileName: 'invoice.pdf',
+		fileExtension: 'pdf',
+	};
+	const PNG_BYTES = Buffer.from('\x89PNG fake receipt');
+	// n8n types a file it could not identify as octet-stream; the extension decides.
+	const PNG: TestBinary = {
+		data: PNG_BYTES.toString('base64'),
+		mimeType: 'application/octet-stream',
+		fileName: 'receipt.png',
+	};
+
+	// A presigned URL carries its credential in the query string: it must never
+	// reach an error message.
+	const STORAGE_ORIGIN = 'https://app-bucket.s3.eu-west-3.amazonaws.com';
+	const grantFor = (n: number) => ({
+		uri: `pipelex-storage://orgs/org-1/assets/file-${n}.pdf`,
+		url: `${STORAGE_ORIGIN}/orgs/org-1/assets/file-${n}.pdf?X-Amz-Credential=AKIASECRET&X-Amz-Signature=deadbeef${n}`,
+		headers: {
+			'If-None-Match': '*',
+			'Content-Type': 'application/pdf',
+			'x-amz-meta-uploaded-by': 'user-1',
+		},
+		expires_at: '2026-09-28T12:05:00Z',
+		max_bytes: 52428800,
+	});
+
+	/** The hosted plane, faked: numbered grants, storage accepting, a start ack, a completed result. */
+	function hostedPlane(overrides: { grant?: HttpImpl; storage?: HttpImpl } = {}): HttpImpl {
+		let granted = 0;
+		return (options) => {
+			const url = String(options.url);
+			if (url === 'https://api.test/v1/upload/grant') {
+				if (overrides.grant) return overrides.grant(options);
+				granted += 1;
+				return fullResponse(200, grantFor(granted));
+			}
+			if (url.startsWith(STORAGE_ORIGIN)) {
+				if (overrides.storage) return overrides.storage(options);
+				return { statusCode: 200, body: '', headers: {} } as unknown as IN8nHttpFullResponse;
+			}
+			if (url === 'https://api.test/v1/start') return fullResponse(202, START_ACK);
+			return fullResponse(200, COMPLETED_RESULT);
+		};
+	}
+
+	const calls = (httpFn: ReturnType<typeof vi.fn>) =>
+		httpFn.mock.calls.map((call) => call[0] as Record<string, unknown> & { url: string });
+
+	it('uploads the mapped binary, then starts the run with its storage reference as the input', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{"language":"fr"}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json.status).toBe('COMPLETED');
+
+		const sent = calls(httpFn);
+		expect(sent.map((call) => `${call.method} ${call.url.split('?')[0]}`)).toEqual([
+			'POST https://api.test/v1/upload/grant',
+			`PUT ${STORAGE_ORIGIN}/orgs/org-1/assets/file-1.pdf`,
+			'POST https://api.test/v1/start',
+			'GET https://api.test/v1/runs/run-1/results',
+		]);
+		const [grantCall, putCall, startCall] = sent as Array<Record<string, any>>;
+
+		// The grant describes the file with the name and type n8n carries; the bytes
+		// are not in it.
+		expect(grantCall.body).toEqual({
+			filename: 'invoice.pdf',
+			content_type: 'application/pdf',
+			size: PDF_BYTES.length,
+		});
+		expect(grantCall.json).toBe(true);
+		expect(grantCall.headers.Authorization).toBe('Bearer secret-token');
+		expect(grantCall.headers['User-Agent']).toBe(EXPECTED_USER_AGENT);
+		// The grant route never replays: a repeated key would be a 409.
+		expect(grantCall.headers['Idempotency-Key']).toBeUndefined();
+
+		// The bytes go straight to storage, with the grant's signed headers and
+		// nothing of the node's own: no API key, no User-Agent override.
+		expect(putCall.url).toBe(grantFor(1).url);
+		expect(putCall.headers).toEqual(grantFor(1).headers);
+		expect(Buffer.isBuffer(putCall.body)).toBe(true);
+		expect((putCall.body as Buffer).equals(PDF_BYTES)).toBe(true);
+		expect(putCall.disableFollowRedirect).toBe(true);
+		expect(putCall.json).toBeUndefined();
+		expect(putCall.timeout).toBe(61_000);
+
+		// The reference replaces nothing: it joins the JSON inputs.
+		expect(startCall.body).toEqual({
+			method_id: 'mt_invoice',
+			inputs: {
+				language: 'fr',
+				document: {
+					url: 'pipelex-storage://orgs/org-1/assets/file-1.pdf',
+					filename: 'invoice.pdf',
+					mime_type: 'application/pdf',
+				},
+			},
+		});
+		// A run carrying fresh uploads gets a key that covers them — see idempotencyKey.
+		expect(startCall.headers['Idempotency-Key']).toMatch(/^exec-1:node-1:0:files-[0-9a-f]{32}$/);
+	});
+
+	it("feeds a Gmail trigger's attachment field on Start Pipeline too", async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'attachment_0' }] },
+			},
+			items: [{ json: { subject: 'Invoice' }, binary: { attachment_0: PDF } }],
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json.pipeline_run_id).toBe('run-1');
+		const startCall = calls(httpFn).find((call) => call.url === 'https://api.test/v1/start') as Record<string, any>;
+		expect(startCall.body.inputs.document.url).toBe('pipelex-storage://orgs/org-1/assets/file-1.pdf');
+	});
+
+	it('uploads every mapped binary of an item, skipping a row left blank', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: {
+				methodId: 'mt_expense',
+				inputs: '{}',
+				binaryInputs: {
+					input: [
+						{ name: 'invoice', binaryPropertyName: 'attachment_0' },
+						// The editor persists a row as soon as its add button is clicked.
+						{ name: '  ', binaryPropertyName: 'data' },
+						{ name: 'receipt', binaryPropertyName: 'attachment_1' },
+					],
+				},
+			},
+			items: [{ json: {}, binary: { attachment_0: PDF, attachment_1: PNG } }],
+			httpImpl: hostedPlane(),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		const sent = calls(httpFn) as Array<Record<string, any>>;
+		const grants = sent.filter((call) => call.url === 'https://api.test/v1/upload/grant');
+		expect(grants.map((call) => call.body)).toEqual([
+			{ filename: 'invoice.pdf', content_type: 'application/pdf', size: PDF_BYTES.length },
+			// n8n said octet-stream; the extension names the type instead.
+			{ filename: 'receipt.png', content_type: 'image/png', size: PNG_BYTES.length },
+		]);
+		const startCall = sent.find((call) => call.url === 'https://api.test/v1/start');
+		expect(startCall?.body.inputs).toEqual({
+			invoice: {
+				url: 'pipelex-storage://orgs/org-1/assets/file-1.pdf',
+				filename: 'invoice.pdf',
+				mime_type: 'application/pdf',
+			},
+			receipt: {
+				url: 'pipelex-storage://orgs/org-1/assets/file-2.pdf',
+				filename: 'receipt.png',
+				mime_type: 'image/png',
+			},
+		});
+	});
+
+	it('uploads each item its own file', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [
+				{ json: {}, binary: { data: PDF } },
+				{ json: {}, binary: { data: PNG } },
+			],
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0]).toHaveLength(2);
+		const starts = calls(httpFn).filter((call) => call.url === 'https://api.test/v1/start') as Array<
+			Record<string, any>
+		>;
+		expect(starts.map((call) => call.body.inputs.document.filename)).toEqual([
+			'invoice.pdf',
+			'receipt.png',
+		]);
+		expect(starts[0].headers['Idempotency-Key']).toMatch(/^exec-1:node-1:0:files-/);
+		expect(starts[1].headers['Idempotency-Key']).toMatch(/^exec-1:node-1:1:files-/);
+	});
+
+	it('names the binary fields the item does carry when the mapped one is missing, before any call', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { attachment_0: PDF, attachment_1: PNG } }],
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		const error = String(result[0][0].json.error);
+		expect(error).toContain('Binary input "document" reads the binary field "data", but this item has no such field.');
+		expect(error).toContain('attachment_0, attachment_1');
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('says so when the item carries no binary data at all', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {} }],
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('carries no binary data at all');
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('refuses an input set both in Inputs and in Binary Inputs, rather than picking one', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{"document": {"url": "https://example.com/invoice.pdf"}}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('Input "document" is set twice');
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('refuses an input mapped twice', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: {
+					input: [
+						{ name: 'document', binaryPropertyName: 'attachment_0' },
+						{ name: 'document', binaryPropertyName: 'attachment_1' },
+					],
+				},
+			},
+			items: [{ json: {}, binary: { attachment_0: PDF, attachment_1: PNG } }],
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('listed more than once');
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('refuses an empty file before uploading anything', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: { ...PDF, data: '' } } }],
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('is empty (0 bytes)');
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	/** Run with Continue On Fail off and hand back the error the node threw. */
+	async function captureError(ctx: IExecuteFunctions): Promise<Record<string, any>> {
+		try {
+			await Pipelex.prototype.execute.call(ctx);
+		} catch (error) {
+			return error as Record<string, any>;
+		}
+		throw new Error('expected the node to throw');
+	}
+
+	it('fails the item with no run when Pipelex refuses the upload as too large', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hostedPlane({
+				grant: () =>
+					fullResponse(413, {
+						title: 'Payload Too Large',
+						detail: 'Declared file size exceeds the 50 MiB limit.',
+					}),
+			}),
+		});
+
+		const error = await captureError(ctx);
+		expect(error.message).toContain('The file "invoice.pdf" for input "document" is too large for Pipelex');
+		expect(error.message).toContain('(Server: Declared file size exceeds the 50 MiB limit.)');
+		expect(error.httpCode).toBe('413');
+		expect(calls(httpFn).map((call) => call.url)).toEqual(['https://api.test/v1/upload/grant']);
+	});
+
+	it('says the Base URL offers no upload when the grant route is missing', async () => {
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hostedPlane({ grant: () => fullResponse(404, { detail: 'Not Found' }) }),
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(UPLOAD_UNAVAILABLE_MESSAGE);
+	});
+
+	it("classifies storage's refusal and never repeats its body or the grant URL", async () => {
+		// S3 echoes the canonical request on a signature mismatch — the credential
+		// included. Only its <Code> and <Message> may surface.
+		const s3Body =
+			'<?xml version="1.0" encoding="UTF-8"?><Error><Code>SignatureDoesNotMatch</Code>' +
+			'<Message>The request signature we calculated does not match the signature you provided.</Message>' +
+			'<CanonicalRequest>PUT /orgs/org-1/assets/file-1.pdf X-Amz-Credential=AKIASECRET</CanonicalRequest></Error>';
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hostedPlane({
+				storage: () => ({ statusCode: 403, body: s3Body, headers: {} }) as unknown as IN8nHttpFullResponse,
+			}),
+		});
+
+		const error = await captureError(ctx);
+		expect(error.message).toContain(
+			'Storage refused the upload of "invoice.pdf" for input "document" (403 SignatureDoesNotMatch): the request differs from what the upload grant signed.',
+		);
+		expect(error.httpCode).toBe('403');
+		expect(JSON.stringify({ ...error, message: error.message, description: error.description })).not.toMatch(
+			/AKIASECRET|X-Amz-Signature|CanonicalRequest/,
+		);
+		expect(calls(httpFn).some((call) => call.url === 'https://api.test/v1/start')).toBe(false);
+	});
+
+	it('names only the storage origin when storage cannot be reached', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hostedPlane({
+				storage: (options) => {
+					// A runtime error can carry the whole presigned URL in its message.
+					const failure = new Error(`getaddrinfo ENOTFOUND ${options.url}`) as Error & { code: string };
+					failure.name = 'AxiosError';
+					failure.code = 'ENOTFOUND';
+					throw failure;
+				},
+			}),
+		});
+
+		const error = await captureError(ctx);
+		expect(error.message).toContain(
+			`The upload of "invoice.pdf" for input "document" could not reach storage at ${STORAGE_ORIGIN}.`,
+		);
+		// The code rides in the description: in the message, n8n would swap the whole
+		// sentence for a generic "incorrect host" one naming neither file nor host.
+		expect(error.description).toBe('Network failure: AxiosError ENOTFOUND.');
+		expect(`${error.message} ${error.description}`).not.toMatch(/AKIASECRET|X-Amz-Signature/);
+		expect(calls(httpFn).some((call) => call.url === 'https://api.test/v1/start')).toBe(false);
+	});
+
+	it('reports a storage upload that ran out of time as unknown, not as refused', async () => {
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hostedPlane({
+				storage: () => {
+					const failure = new Error('timeout of 61000ms exceeded') as Error & { code: string };
+					failure.code = 'ECONNABORTED';
+					throw failure;
+				},
+			}),
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(
+			/did not finish within 61 s, so whether storage stored it is unknown/,
+		);
+	});
+
+	it('turns an upload failure into an error item under Continue On Fail', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			continueOnFail: true,
+			httpImpl: hostedPlane({
+				storage: () =>
+					({
+						statusCode: 503,
+						body: '<Error><Code>SlowDown</Code><Message>Please reduce your request rate.</Message></Error>',
+						headers: {},
+					}) as unknown as IN8nHttpFullResponse,
+			}),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain(
+			'Storage failed to store "invoice.pdf" for input "document" (503 SlowDown): Please reduce your request rate. Whether the file was stored is unknown; retry the item.',
+		);
+		expect(calls(httpFn).some((call) => call.url === 'https://api.test/v1/start')).toBe(false);
 	});
 });

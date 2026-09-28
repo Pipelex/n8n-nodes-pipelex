@@ -1,4 +1,4 @@
-import type { IDataObject } from 'n8n-workflow';
+import type { IBinaryData, IDataObject } from 'n8n-workflow';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -6,18 +6,35 @@ import {
 	MISSING_MAIN_STUFF_MESSAGE,
 	NOT_FOUND_MESSAGE,
 	RESULT_MID_WRITE_MESSAGE,
+	UPLOAD_UNAVAILABLE_MESSAGE,
 	assembleRunSources,
+	binaryInputConflictError,
 	buildApiConnection,
 	buildStartBody,
+	describeBinaryFile,
+	describeNetworkFailure,
 	idempotencyKey,
 	mapResultResponse,
+	missingBinaryMessage,
+	parseStorageError,
+	readBinaryInputMappings,
+	readUploadGrant,
 	runFailureData,
 	runFailureDescription,
 	runFailureMessage,
 	runSourceError,
+	storageRefusalMessage,
+	storedFileInput,
+	storedFileReferences,
+	uploadGrantRefusalMessage,
 	withRunId,
 } from '../nodes/Pipelex/GenericFunctions';
-import { DEFAULT_DEGRADED_RETRY_SECONDS, parseRetryAfter } from '../nodes/Pipelex/PipelexApiShapes';
+import {
+	DEFAULT_DEGRADED_RETRY_SECONDS,
+	guessContentType,
+	parseRetryAfter,
+	uploadTimeoutMs,
+} from '../nodes/Pipelex/PipelexApiShapes';
 
 describe('buildApiConnection (manual auth — credential has no authenticate block)', () => {
 	it('builds the Bearer Authorization header from the credential', () => {
@@ -629,5 +646,297 @@ describe('runFailureData (the "Error data" row — rendered in <pre>, so multi-l
 	it('skips empty values instead of printing bare labels', () => {
 		const block = runFailureData({ error: { message: 'm', title: '', model: null } });
 		expect(block).toBe('message  m');
+	});
+});
+
+describe('idempotencyKey with uploaded files', () => {
+	it('is the bare key when the body carries no uploaded file', () => {
+		expect(idempotencyKey('exec-abc', 'node-1', 0, [])).toBe('exec-abc:node-1:0');
+	});
+
+	it('covers the uploaded references, so a retry that re-uploads never collides with the first attempt', () => {
+		// The platform answers a reused key with a different body with a 409. Every
+		// attempt uploads afresh, so its references — and its body — differ.
+		const first = idempotencyKey('exec-abc', 'node-1', 0, ['document=pipelex-storage://a.pdf']);
+		const retry = idempotencyKey('exec-abc', 'node-1', 0, ['document=pipelex-storage://b.pdf']);
+		expect(first).toMatch(/^exec-abc:node-1:0:files-[0-9a-f]{32}$/);
+		expect(retry).not.toBe(first);
+	});
+
+	it('does not depend on the order the files were uploaded in', () => {
+		const refs = ['invoice=pipelex-storage://a.pdf', 'receipt=pipelex-storage://b.png'];
+		expect(idempotencyKey('e', 'n', 0, refs)).toBe(idempotencyKey('e', 'n', 0, [...refs].reverse()));
+	});
+
+	it('pairs each reference with its input', () => {
+		expect(
+			storedFileReferences({
+				document: { url: 'pipelex-storage://a.pdf', filename: 'a.pdf' },
+			}),
+		).toEqual(['document=pipelex-storage://a.pdf']);
+	});
+});
+
+describe('readBinaryInputMappings (the Binary Inputs rows)', () => {
+	it('reads each row as an input name and the binary field that fills it', () => {
+		expect(
+			readBinaryInputMappings({
+				input: [
+					{ name: 'document', binaryPropertyName: 'attachment_0' },
+					{ name: ' photo ', binaryPropertyName: ' data ' },
+				],
+			}),
+		).toEqual({
+			mappings: [
+				{ inputName: 'document', binaryPropertyName: 'attachment_0' },
+				{ inputName: 'photo', binaryPropertyName: 'data' },
+			],
+		});
+	});
+
+	it('reads an empty or absent collection as no binary inputs', () => {
+		expect(readBinaryInputMappings({})).toEqual({ mappings: [] });
+		expect(readBinaryInputMappings(undefined)).toEqual({ mappings: [] });
+		expect(readBinaryInputMappings({ input: 'not rows' })).toEqual({ mappings: [] });
+	});
+
+	it('drops a row whose input name is blank (the editor persists a row on add)', () => {
+		expect(
+			readBinaryInputMappings({ input: [{ name: '   ', binaryPropertyName: 'data' }, {}] }),
+		).toEqual({ mappings: [] });
+	});
+
+	it('falls back to the "data" field when the stored row has none', () => {
+		expect(readBinaryInputMappings({ input: [{ name: 'document' }] }).mappings).toEqual([
+			{ inputName: 'document', binaryPropertyName: 'data' },
+		]);
+	});
+
+	it('refuses a binary field explicitly cleared, rather than guessing one', () => {
+		const { error } = readBinaryInputMappings({
+			input: [{ name: 'document', binaryPropertyName: '  ' }],
+		});
+		expect(error).toContain('Binary input "document" names no binary field');
+	});
+
+	it('refuses an input named twice, instead of silently keeping one file', () => {
+		const { error } = readBinaryInputMappings({
+			input: [
+				{ name: 'document', binaryPropertyName: 'attachment_0' },
+				{ name: 'document', binaryPropertyName: 'attachment_1' },
+			],
+		});
+		expect(error).toContain('Binary input "document" is listed more than once');
+	});
+});
+
+describe('binaryInputConflictError (no precedence between Inputs and Binary Inputs)', () => {
+	const mappings = [{ inputName: 'document', binaryPropertyName: 'data' }];
+
+	it('refuses an input given both ways', () => {
+		expect(binaryInputConflictError(mappings, { document: { url: 'https://x/y.pdf' } })).toContain(
+			'Input "document" is set twice',
+		);
+	});
+
+	it('accepts disjoint inputs', () => {
+		expect(binaryInputConflictError(mappings, { language: 'fr' })).toBeNull();
+	});
+});
+
+describe('missingBinaryMessage', () => {
+	const mapping = { inputName: 'document', binaryPropertyName: 'data' };
+
+	it('names the binary fields the item does carry', () => {
+		expect(missingBinaryMessage(mapping, ['attachment_0', 'attachment_1'])).toBe(
+			'Binary input "document" reads the binary field "data", but this item has no such field. Its binary fields are: attachment_0, attachment_1.',
+		);
+	});
+
+	it('says when the item carries no binary data at all', () => {
+		expect(missingBinaryMessage(mapping, [])).toContain('It carries no binary data at all');
+	});
+});
+
+describe('describeBinaryFile (the name and type a binary is stored under)', () => {
+	const binary = (fields: Partial<IBinaryData>): IBinaryData =>
+		({ data: '', mimeType: '', ...fields }) as IBinaryData;
+
+	it('keeps the file name and MIME type n8n carries', () => {
+		expect(describeBinaryFile(binary({ fileName: 'invoice.pdf', mimeType: 'application/pdf' }))).toEqual({
+			filename: 'invoice.pdf',
+			contentType: 'application/pdf',
+		});
+	});
+
+	it('asks the extension when n8n typed the file as unknown', () => {
+		for (const mimeType of ['', 'application/octet-stream']) {
+			expect(describeBinaryFile(binary({ fileName: 'scan.PNG', mimeType })).contentType).toBe(
+				'image/png',
+			);
+		}
+	});
+
+	it('keeps octet-stream when neither n8n nor the extension knows the type', () => {
+		expect(
+			describeBinaryFile(binary({ fileName: 'blob.xyz', mimeType: 'application/octet-stream' })),
+		).toEqual({ filename: 'blob.xyz', contentType: 'application/octet-stream' });
+	});
+
+	it('names a nameless file as the SDK does, keeping a known extension', () => {
+		expect(describeBinaryFile(binary({ fileExtension: 'pdf', mimeType: 'application/pdf' })).filename).toBe(
+			'upload.pdf',
+		);
+		expect(describeBinaryFile(binary({ mimeType: 'application/pdf' })).filename).toBe('upload.bin');
+	});
+});
+
+describe('storedFileInput (the value a binary-fed input takes)', () => {
+	it('is the compact Document/Image content: url, filename and mime_type', () => {
+		expect(storedFileInput('pipelex-storage://a.pdf', 'a.pdf', 'application/pdf')).toEqual({
+			url: 'pipelex-storage://a.pdf',
+			filename: 'a.pdf',
+			mime_type: 'application/pdf',
+		});
+	});
+
+	it('leaves mime_type out when the type is unknown, rather than asserting octet-stream', () => {
+		expect(storedFileInput('pipelex-storage://a.bin', 'a.bin', 'application/octet-stream')).toEqual({
+			url: 'pipelex-storage://a.bin',
+			filename: 'a.bin',
+		});
+	});
+});
+
+describe('readUploadGrant (the answer of POST /v1/upload/grant)', () => {
+	const grant = {
+		uri: 'pipelex-storage://orgs/o/assets/f.pdf',
+		url: 'https://bucket.s3.amazonaws.com/orgs/o/assets/f.pdf?X-Amz-Signature=x',
+		headers: { 'If-None-Match': '*', 'Content-Type': 'application/pdf' },
+		expires_at: '2026-09-28T12:05:00Z',
+		max_bytes: 52428800,
+	};
+
+	it('reads a grant', () => {
+		expect(readUploadGrant(grant)).toEqual(grant);
+	});
+
+	it('refuses a grant whose reference is not a storage reference', () => {
+		expect(readUploadGrant({ ...grant, uri: 'https://elsewhere/f.pdf' })).toBeUndefined();
+	});
+
+	it('refuses a URL the node must not send a file to', () => {
+		for (const url of ['/relative/path', 'ftp://bucket/f', 'https://user:pass@bucket/f', 'not a url']) {
+			expect(readUploadGrant({ ...grant, url }), url).toBeUndefined();
+		}
+	});
+
+	it('refuses headers that are not strings, and a body that is not an object', () => {
+		expect(readUploadGrant({ ...grant, headers: { 'Content-Length': 12 } })).toBeUndefined();
+		expect(readUploadGrant({ ...grant, headers: null })).toBeUndefined();
+		expect(readUploadGrant('grant')).toBeUndefined();
+		expect(readUploadGrant(null)).toBeUndefined();
+	});
+});
+
+describe('uploadGrantRefusalMessage (after the SDK mapUploadError)', () => {
+	const file = { inputName: 'document', filename: 'scan.pdf', size: 73400320 };
+
+	it('reads a 413 as a file over the limit, with the server detail', () => {
+		expect(
+			uploadGrantRefusalMessage(413, { detail: 'Declared file size exceeds the 50 MiB limit.' }, file),
+		).toBe(
+			'The file "scan.pdf" for input "document" is too large for Pipelex (73400320 bytes). (Server: Declared file size exceeds the 50 MiB limit.)',
+		);
+	});
+
+	it('reads a 404 as a Base URL without the upload route', () => {
+		expect(uploadGrantRefusalMessage(404, {}, file)).toBe(UPLOAD_UNAVAILABLE_MESSAGE);
+	});
+
+	it('reads a 401 and a 403 as authorization failures', () => {
+		expect(uploadGrantRefusalMessage(401, {}, file)).toContain('did not accept the credential');
+		expect(uploadGrantRefusalMessage(403, {}, file)).toContain('refused to store "scan.pdf"');
+	});
+
+	it('advises a retry on a server fault only', () => {
+		expect(uploadGrantRefusalMessage(502, {}, file)).toContain('Retry the item.');
+		expect(uploadGrantRefusalMessage(422, { detail: 'bad content type' }, file)).toBe(
+			'Pipelex could not prepare the upload of "scan.pdf" for input "document" (HTTP 422). (Server: bad content type)',
+		);
+	});
+});
+
+describe('parseStorageError + storageRefusalMessage (after the SDK uploadWithGrant)', () => {
+	const file = { inputName: 'document', filename: 'scan.pdf' };
+	const s3 = (code: string, message: string) =>
+		`<?xml version="1.0"?><Error><Code>${code}</Code><Message>${message}</Message><RequestId>r</RequestId></Error>`;
+
+	it("reads S3's code and message and nothing else", () => {
+		expect(parseStorageError(s3('AccessDenied', 'Request has expired &amp; is gone'))).toEqual({
+			code: 'AccessDenied',
+			message: 'Request has expired & is gone',
+		});
+		expect(parseStorageError('')).toEqual({});
+		expect(parseStorageError(undefined)).toEqual({});
+	});
+
+	it('classifies each refusal the SDK names', () => {
+		const message = (status: number, body: string) =>
+			storageRefusalMessage(status, parseStorageError(body), file);
+		expect(message(412, s3('PreconditionFailed', 'At least one of the pre-conditions failed'))).toContain(
+			'the upload grant was already used',
+		);
+		expect(message(403, s3('SignatureDoesNotMatch', 'no match'))).toContain(
+			'differs from what the upload grant signed',
+		);
+		expect(message(403, s3('AccessDenied', 'Request has expired'))).toContain('grant expired');
+		expect(message(403, s3('AccessDenied', 'There were headers present in the request which were not signed'))).toContain(
+			'did not sign',
+		);
+		expect(message(400, s3('RequestTimeout', 'Your socket connection timed out'))).toContain(
+			'stopped waiting for the bytes',
+		);
+		expect(message(409, s3('ConditionalRequestConflict', 'conflict'))).toContain(
+			'whether the file was stored is unknown',
+		);
+		expect(message(307, '')).toContain('the redirect was refused');
+		expect(message(400, s3('EntityTooLarge', 'Your proposed upload exceeds the maximum allowed size.'))).toBe(
+			'Storage refused the upload of "scan.pdf" for input "document" (400 EntityTooLarge): Your proposed upload exceeds the maximum allowed size. Retry the item.',
+		);
+		expect(message(500, s3('InternalError', 'We encountered an internal error.'))).toBe(
+			'Storage failed to store "scan.pdf" for input "document" (500 InternalError): We encountered an internal error. Whether the file was stored is unknown; retry the item.',
+		);
+	});
+});
+
+describe('describeNetworkFailure (never the runtime message, which can hold the grant URL)', () => {
+	it('keeps the names and codes along the cause chain', () => {
+		const cause = Object.assign(new Error('getaddrinfo ENOTFOUND bucket'), { code: 'ENOTFOUND' });
+		const error = Object.assign(new TypeError('fetch failed https://bucket/?X-Amz-Signature=s', { cause }), {});
+		expect(describeNetworkFailure(error)).toBe('TypeError, caused by Error ENOTFOUND');
+	});
+
+	it('drops a code that is not a bare identifier', () => {
+		const error = Object.assign(new Error('x'), { code: 'https://bucket/?X-Amz-Signature=s' });
+		expect(describeNetworkFailure(error)).toBe('Error');
+		expect(describeNetworkFailure('not an error')).toBe('a non-Error rejection');
+	});
+});
+
+describe('guessContentType + uploadTimeoutMs (replicated from the SDK)', () => {
+	it("maps the SDK's extensions, case-insensitively, and nothing else", () => {
+		expect(guessContentType('a.PDF')).toBe('application/pdf');
+		expect(guessContentType('a.jpeg')).toBe('image/jpeg');
+		expect(guessContentType('a.docx')).toBe('application/octet-stream');
+		expect(guessContentType('noextension')).toBe('application/octet-stream');
+		expect(guessContentType('trailing.')).toBe('application/octet-stream');
+	});
+
+	it('allows a minute plus a second per started 128 KiB', () => {
+		expect(uploadTimeoutMs(0)).toBe(60_000);
+		expect(uploadTimeoutMs(1)).toBe(61_000);
+		expect(uploadTimeoutMs(128 * 1024 + 1)).toBe(62_000);
+		expect(uploadTimeoutMs(50 * 1024 * 1024)).toBe(460_000);
 	});
 });

@@ -2,10 +2,11 @@ import { version } from '../../package.json';
 
 /**
  * The `User-Agent` this node sends on every request to the Pipelex API — the
- * three run requests in `GenericFunctions.ts` and the credential test in
- * `credentials/PiplexApi.credentials.ts` — so the platform can attribute the
- * traffic to n8n. The convention is the workspace spec
- * `docs/specs/client-identification.md`.
+ * run requests and the upload-grant request in `GenericFunctions.ts` and the
+ * credential test in `credentials/PiplexApi.credentials.ts` — so the platform
+ * can attribute the traffic to n8n. The convention is the workspace spec
+ * `docs/specs/client-identification.md`, which also says what this constant is
+ * NOT sent on: the binary-input `PUT` to a presigned storage URL keeps n8n's own.
  *
  * It is a single product token, `n8n-nodes-pipelex/<package version>`. The n8n
  * version would belong in front of it, but a community node cannot read it:

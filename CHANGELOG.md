@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`Binary Inputs` on the start operations**: a method's `Document` or `Image` input can now be filled with a file from the incoming item, such as a Gmail attachment or a Google Drive download, by adding a row that names the input and its binary field (`data` by default). The node uploads the file to Pipelex storage (up to the hosted API's 50 MiB limit) and passes its `pipelex-storage://` reference with the file name and MIME type, so a file no longer has to sit at a public URL; an input set both there and in `Inputs` is refused, and a retried item with binary inputs starts a new run.
+
 ## [v0.2.2] - 2026-09-23
 
 ### Added
