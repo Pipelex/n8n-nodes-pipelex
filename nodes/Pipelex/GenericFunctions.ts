@@ -402,8 +402,10 @@ function extractProblemDetail(body: IDataObject): string | undefined {
  *
  * Mirrors `@pipelex/sdk` `client.ts` `getRunResult` (the SDK that owns this
  * lifecycle), verified against `pipelex-platform/.../routers/v1/runs.py`:
- *   200 → completed (body has main_stuff + graph_spec + working_memory +
- *         tokens_usages) — UNLESS `main_stuff` is absent, which breaks the
+ *   200 → completed (body has the artifacts `requestResult` selected —
+ *         main_stuff, working_memory, tokens_usages, the I/O artifacts; a
+ *         platform predating `?artifacts=` adds graph_spec) — UNLESS
+ *         `main_stuff` is absent or null, which breaks the
  *         completed-run invariant and maps to `missingMainStuff` (the SDK's
  *         `MissingMainStuffError`)
  *   202 → running (+ `Retry-After`, default 5s when absent); the server signals
@@ -721,8 +723,34 @@ export function runFailureData(runBody: IDataObject): string | undefined {
 }
 
 /**
- * `GET /v1/runs/{pipeline_run_id}/results`. Returns the full response
- * (status + headers + body) so the caller maps it via `mapResultResponse`.
+ * The result artifacts this node reads — every artifact the results route
+ * serves EXCEPT `graph_spec`, sent as `?artifacts=` so the platform neither
+ * reads, re-signs nor transfers the run graph, by far the heaviest artifact
+ * (hundreds of KB on an ordinary run), which this node never shows: every field
+ * a completed-run item carried before still arrives, so the item is unchanged.
+ * `tokens_usages` brings `usage_assembly_error` with it.
+ *
+ * Mirrors `@pipelex/sdk`'s `RUN_RESULT_ARTIFACTS` (v0.28.0) minus `graph_spec`.
+ * A platform that predates the parameter ignores it and returns everything, so
+ * `sanitizeResult` in the node still strips `graph_spec` from the item.
+ * Literal names from a closed vocabulary: no escaping needed, and the commas
+ * stay literal, exactly as the SDK sends them.
+ */
+export const RESULT_ARTIFACTS = [
+	'pipe_io_contracts',
+	'input_form',
+	'output_form',
+	'main_stuff',
+	'working_memory',
+	'tokens_usages',
+] as const;
+
+/**
+ * `GET /v1/runs/{pipeline_run_id}/results?artifacts=…` (see `RESULT_ARTIFACTS`).
+ * Returns the full response (status + headers + body) so the caller maps it via
+ * `mapResultResponse`. `main_stuff` is always in the selection, so the
+ * completed-run invariant `mapResultResponse` enforces still holds: a selected
+ * artifact the run has not written yet arrives as `null`, never absent.
  */
 export async function requestResult(
 	ctx: IExecuteFunctions,
@@ -731,7 +759,7 @@ export async function requestResult(
 ): Promise<IN8nHttpFullResponse> {
 	return (await ctx.helpers.httpRequest({
 		method: 'GET' as IHttpRequestMethods,
-		url: `${conn.baseUrl}/v1/runs/${encodeURIComponent(runId)}/results`,
+		url: `${conn.baseUrl}/v1/runs/${encodeURIComponent(runId)}/results?artifacts=${RESULT_ARTIFACTS.join(',')}`,
 		headers: apiHeaders(conn),
 		json: true,
 		returnFullResponse: true,

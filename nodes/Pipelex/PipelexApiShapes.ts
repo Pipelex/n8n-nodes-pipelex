@@ -167,8 +167,14 @@ export interface TokensUsageRecord {
 
 /**
  * Result artifacts for a completed run — `GET /v1/runs/{pipeline_run_id}/results`
- * 200. Mirrors `@pipelex/sdk`'s `RunResults`, with the hosted route's
- * `working_memory` (see below).
+ * 200. Mirrors `@pipelex/sdk`'s `RunResults` (synced to v0.28.0 for this read),
+ * with the hosted route's `working_memory` (see below).
+ *
+ * **Absent versus null.** The node narrows the read with `?artifacts=`
+ * (`GenericFunctions.RESULT_ARTIFACTS`): an artifact it did not select is ABSENT
+ * from the body, a selected one the run has not written is `null`. So every
+ * field below except `pipeline_run_id` and `main_stuff` is optional, and
+ * `graph_spec` is absent unless the platform predates the parameter.
  */
 export interface RunResults {
 	pipeline_run_id: string;
@@ -181,9 +187,21 @@ export interface RunResults {
 	 * and may be a valid falsy value (`[]`, `0`) — it is never absent.
 	 */
 	main_stuff: unknown;
-	/** Method graph spec (`graphspec.json`); null if missing mid-write. The n8n
-	 * node strips this from its output (heavy visualization artifact). */
+	/** Method graph spec (`graphspec.json`); null if missing mid-write. NOT
+	 * selected by the node's results read, so absent on a current platform; a
+	 * platform predating `?artifacts=` still sends it, and the node strips it
+	 * from its output (heavy visualization artifact). */
 	graph_spec?: unknown;
+	/**
+	 * The run's I/O artifacts — the MTHDS standard's `PipeIOContracts`,
+	 * `InputForm` and `OutputForm`, each keyed by namespaced `pipe_ref`. Opaque
+	 * to this node and relayed to the n8n output as received. `null` when the
+	 * run did not write them (an older run, a declined or failed I/O
+	 * description, or a mid-write read).
+	 */
+	pipe_io_contracts?: unknown;
+	input_form?: unknown;
+	output_form?: unknown;
 	/**
 	 * Full working memory of the run — every named stuff, not just the main
 	 * output (`working_memory.json`); null if missing mid-write. Relayed to the
