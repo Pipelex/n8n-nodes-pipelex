@@ -1,0 +1,31 @@
+CHANGELOG.md
+  s_19015810651d9c::t_08afa27e9050e7 3-8
+docs/usage.md
+  s_19015810651d9c::t_fb603dae0fa3ae 164,166
+nodes/Pipelex/GenericFunctions.ts
+  s_19015810651d9c::t_3cae56cc2070ab 405-408,726-753,762
+nodes/Pipelex/Pipelex.node.ts
+  s_19015810651d9c::t_846b5081b7e890 507-511
+nodes/Pipelex/PipelexApiShapes.ts
+  s_19015810651d9c::t_a272cf63ee0105 170-177,190-193,195-204
+test/Pipelex.node.test.ts
+  s_19015810651d9c::t_9377d4b3acb15b 76-80,118,186,774,883,953,981-1045,1062,1073
+test/WireContract.test.ts
+  s_19015810651d9c::t_8b4183eb44aeb2 36,117-119,129,131-132,140-158
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d55ecce0889002073953fd370e251d599f9f91b1",
+  "prompts": {},
+  "sessions": {
+    "s_19015810651d9c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7c8fe5d-9da1-4ed6-80d4-812084259a9f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thomashebrard <thomas@pipelex.com>"
+    }
+  }
+}
