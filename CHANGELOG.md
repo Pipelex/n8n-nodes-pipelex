@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- **Result reads no longer download the run graph**: `Start & Wait for Result`, `Poll & Get Result` and `Get Run Result` now ask the Pipelex API for every result artifact except `graph_spec` (`?artifacts=` on `GET /v1/runs/{pipeline_run_id}/results`), so each poll skips the heaviest artifact, which the node already left out of its output. The output item is unchanged, and a server that predates the parameter still works: it returns everything and the node strips `graph_spec` as before.
+
 ## [v0.2.2] - 2026-09-23
 
 ### Added

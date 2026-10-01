@@ -73,6 +73,11 @@ function fullResponse(
 	return { statusCode, body, headers } as IN8nHttpFullResponse;
 }
 
+// The results read's artifact selection, pinned literally: everything the
+// route serves except the heavy `graph_spec`, which the node never shows.
+const ARTIFACTS_QUERY =
+	'?artifacts=pipe_io_contracts,input_form,output_form,main_stuff,working_memory,tokens_usages';
+
 const START_ACK = { pipeline_run_id: 'run-1', state: 'STARTED', created_at: '2026-06-10T00:00:00Z' };
 
 const COMPLETED_RESULT = {
@@ -110,7 +115,7 @@ describe('Pipelex node — client identification (User-Agent on every API reques
 		expect(startCall.url).toBe('https://api.test/v1/start');
 		expect(startCall.headers['User-Agent']).toBe(EXPECTED_USER_AGENT);
 		expect(startCall.headers['Idempotency-Key']).toBe('exec-1:node-1:0');
-		expect(resultCall.url).toBe('https://api.test/v1/runs/run-1/results');
+		expect(resultCall.url).toBe(`https://api.test/v1/runs/run-1/results${ARTIFACTS_QUERY}`);
 		expect(resultCall.headers['User-Agent']).toBe(EXPECTED_USER_AGENT);
 	});
 
@@ -178,7 +183,7 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		expect(startCall.headers.Authorization).toBe('Bearer secret-token');
 		expect(startCall.body).toEqual({ pipe_code: 'my-pipe', inputs: { a: 1 } });
 		const resultCall = httpFn.mock.calls[1][0];
-		expect(resultCall.url).toBe('https://api.test/v1/runs/run-1/results');
+		expect(resultCall.url).toBe(`https://api.test/v1/runs/run-1/results${ARTIFACTS_QUERY}`);
 		expect(resultCall.headers.Authorization).toBe('Bearer secret-token');
 	});
 
@@ -766,7 +771,7 @@ describe('Pipelex node — legacy `execute` operation value (published 0.0.x)', 
 		const result = await Pipelex.prototype.execute.call(ctx);
 		expect(result[0][0].json.status).toBe('COMPLETED');
 		expect(httpFn.mock.calls[0][0].url).toBe('https://api.test/v1/start');
-		expect(httpFn.mock.calls[1][0].url).toBe('https://api.test/v1/runs/run-1/results');
+		expect(httpFn.mock.calls[1][0].url).toBe(`https://api.test/v1/runs/run-1/results${ARTIFACTS_QUERY}`);
 	});
 
 	it('is hidden from the Operation dropdown (not offered to new workflows)', () => {
@@ -875,7 +880,7 @@ describe('Pipelex node — Poll & Get Result (waitForResult by id)', () => {
 		expect(json.status).toBe('COMPLETED');
 		expect(json.main_stuff).toEqual({ ok: true });
 		const call = httpFn.mock.calls[0][0];
-		expect(call.url).toBe('https://api.test/v1/runs/run-9/results');
+		expect(call.url).toBe(`https://api.test/v1/runs/run-9/results${ARTIFACTS_QUERY}`);
 		expect(call.headers.Authorization).toBe('Bearer secret-token');
 	});
 
@@ -945,7 +950,7 @@ describe('Pipelex node — Poll & Get Result (waitForResult by id)', () => {
 		});
 
 		await Pipelex.prototype.execute.call(ctx);
-		expect(httpFn.mock.calls[0][0].url).toBe('https://api.test/v1/runs/run%2F..%2F9/results');
+		expect(httpFn.mock.calls[0][0].url).toBe(`https://api.test/v1/runs/run%2F..%2F9/results${ARTIFACTS_QUERY}`);
 	});
 });
 
@@ -973,6 +978,71 @@ describe('Pipelex node — expression-fed text fields', () => {
 	});
 });
 
+describe('Pipelex node — results artifact selection (?artifacts=)', () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	// Every artifact a completed-run item carried before the selection existed.
+	const SELECTED_ARTIFACTS = {
+		pipeline_run_id: 'run-1',
+		pipe_io_contracts: { 'demo.p': { inputs: {} } },
+		input_form: { 'demo.p': { fields: [] } },
+		output_form: { 'demo.p': { kind: 'text' } },
+		main_stuff: { answer: 42 },
+		working_memory: { root: {}, aliases: {} },
+		tokens_usages: [{ pipe_code: 'p', cost: 0.0012 }],
+		usage_assembly_error: null,
+	};
+	const EXPECTED_ITEM = { ...SELECTED_ARTIFACTS, status: 'COMPLETED' };
+
+	it.each([
+		['startAndPoll', { pipeCode: 'p', inputs: '{}' }],
+		['poll', { runId: 'run-1', maxWaitSeconds: 60 }],
+		['getResult', { runId: 'run-1' }],
+	])('%s asks for every artifact but graph_spec', async (operation, params) => {
+		const { ctx, httpFn } = makeContext({
+			operation,
+			params,
+			httpImpl: startThenResults(() => fullResponse(200, SELECTED_ARTIFACTS)),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		const resultCalls = httpFn.mock.calls
+			.map(([options]) => String(options.url))
+			.filter((url) => url.includes('/results'));
+		expect(resultCalls).toEqual([`https://api.test/v1/runs/run-1/results${ARTIFACTS_QUERY}`]);
+		expect(resultCalls[0]).not.toContain('graph_spec');
+	});
+
+	it.each([
+		['a current platform (selection honoured, graph_spec absent)', SELECTED_ARTIFACTS],
+		[
+			'a platform predating ?artifacts= (parameter ignored, graph_spec sent)',
+			{ ...SELECTED_ARTIFACTS, graph_spec: { nodes: [] } },
+		],
+	])('the item is the same against %s', async (_label, body) => {
+		for (const operation of ['startAndPoll', 'getResult']) {
+			const { ctx } = makeContext({
+				operation,
+				params: { pipeCode: 'p', inputs: '{}', runId: 'run-1' },
+				httpImpl: startThenResults(() => fullResponse(200, body)),
+			});
+			const json = (await Pipelex.prototype.execute.call(ctx))[0][0].json;
+			expect(json).toEqual(EXPECTED_ITEM);
+		}
+	});
+
+	it('a selected main_stuff the run has not written yet (null) is still the mid-write window', async () => {
+		const { ctx } = makeContext({
+			operation: 'getResult',
+			params: { runId: 'run-1' },
+			httpImpl: () => fullResponse(200, { ...SELECTED_ARTIFACTS, main_stuff: null }),
+		});
+
+		const json = (await Pipelex.prototype.execute.call(ctx))[0][0].json;
+		expect(json.status).toBe('RUNNING');
+	});
+});
+
 describe('Pipelex node — Get Run Result (single-shot fetch)', () => {
 	beforeEach(() => vi.clearAllMocks());
 
@@ -989,7 +1059,7 @@ describe('Pipelex node — Get Run Result (single-shot fetch)', () => {
 		expect(json.main_stuff).toEqual({ answer: 42 });
 		expect(json.graph_spec).toBeUndefined();
 		expect(httpFn).toHaveBeenCalledTimes(1);
-		expect(httpFn.mock.calls[0][0].url).toBe('https://api.test/v1/runs/run-1/results');
+		expect(httpFn.mock.calls[0][0].url).toBe(`https://api.test/v1/runs/run-1/results${ARTIFACTS_QUERY}`);
 	});
 
 	it('URL-encodes the pipeline_run_id', async () => {
@@ -1000,7 +1070,7 @@ describe('Pipelex node — Get Run Result (single-shot fetch)', () => {
 		});
 
 		await Pipelex.prototype.execute.call(ctx);
-		expect(httpFn.mock.calls[0][0].url).toBe('https://api.test/v1/runs/run%2F..%2F1/results');
+		expect(httpFn.mock.calls[0][0].url).toBe(`https://api.test/v1/runs/run%2F..%2F1/results${ARTIFACTS_QUERY}`);
 	});
 
 	it("normalizes status to 'COMPLETED' even when the server body carries a different status", async () => {
