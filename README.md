@@ -31,7 +31,7 @@ This is an [n8n](https://n8n.io/) community node that lets you execute [Pipelex]
 
 ## What is Pipelex?
 
-**[Pipelex](https://github.com/Pipelex/pipelex)** is an open-source runtime to **build and run AI methods**. A *method* is a reusable, typed AI procedure declared in a `.mthds` file and executed by Pipelex — each step is explicit, every output is structured, and every run is repeatable.
+**[Pipelex](https://github.com/Pipelex/pipelex)** is a source-available runtime to **build and run AI methods**. A *method* is a reusable, typed AI procedure declared in a `.mthds` file and executed by Pipelex — each step is explicit, every output is structured, and every run is repeatable.
 
 Compose "pipes" that route across 60+ models, return structured outputs, and orchestrate sequentially, in parallel, or conditionally — sharing methods with the community via [mthds.sh](https://mthds.sh).
 
