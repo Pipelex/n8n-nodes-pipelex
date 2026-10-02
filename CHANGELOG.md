@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- **The docs' two cookbook links answer again**: `docs/index.md` and `docs/examples.md` pointed at a docs page that no longer exists, and now link the cookbook's repository.
+
 ## [v0.2.2] - 2026-09-23
 
 ### Added
