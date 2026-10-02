@@ -8,7 +8,7 @@ Execute Pipelex AI pipelines directly in your n8n workflows.
 
 - 📚 **[Read the Pipelex Documentation](https://docs.pipelex.com/)** first
 - 🚀 **[Try the Quick Start Guide](https://docs.pipelex.com/pages/quick-start/)**
-- 🍳 **[Explore the Cookbook Examples](https://docs.pipelex.com/pages/cookbook-examples/)**
+- 🍳 **[Explore the Cookbook Examples](https://github.com/Pipelex/pipelex-cookbook)**
 
 ## What You'll Need
 

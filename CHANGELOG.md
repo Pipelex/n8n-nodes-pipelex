@@ -10,6 +10,7 @@
 
 - **`Idempotency-Key` on a node inside a loop**: each pass of a Pipelex node inside Loop Over Items or a back-edge numbers its items from 0 again, so every pass sent the first pass's key, and a later pass silently got the first pass's run back, or failed with a `409` when its inputs differed. The key now includes n8n's run index, which differs from pass to pass and stays the same across *Retry On Fail* attempts, so retries still replay.
 - **A cancelled execution starts no run**: the start operations check for a cancelled execution just before `POST /v1/start` and send the request with the execution's cancel signal, so a cancel that lands while a file is being stored no longer goes on to start a paid run, and one that lands during the start ends the request.
+- **The docs' two cookbook links answer again**: `docs/index.md` and `docs/examples.md` pointed at a docs page that no longer exists, and now link the cookbook's repository.
 
 ## [v0.2.2] - 2026-09-23
 
