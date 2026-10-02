@@ -43,6 +43,7 @@ import {
 	type ResultOutcome,
 } from './GenericFunctions';
 import type { HostedStartBody, StartAck, StoredFileInput } from './PipelexApiShapes';
+import { storedUploadKey, storedUploads } from './StoredUploads';
 
 // Polling defaults. Max Wait caps how long a polling operation blocks the n8n
 // execution — 300s covers the overwhelming majority of runs while staying
@@ -260,8 +261,11 @@ function assertBinarySize(
 
 /**
  * Store one mapped file and return the input value naming it. The file is
- * loaded only here, measured again now that its real size is known, then
- * uploaded. The bytes are released when this returns.
+ * loaded only here, measured again now that its real size is known, and reused
+ * when this process already stored the same bytes for the same item of the same
+ * execution — a "Retry On Fail" attempt, see `StoredUploads.ts`. Otherwise it is
+ * uploaded, and remembered once storage has accepted it. The bytes are released
+ * when this returns.
  */
 async function storeBinary(
 	ctx: IExecuteFunctions,
@@ -273,12 +277,26 @@ async function storeBinary(
 	const bytes = await ctx.helpers.getBinaryDataBuffer(itemIndex, mapping.binaryPropertyName);
 	assertBinarySize(ctx, source, bytes.length, itemIndex);
 	const { filename, contentType } = describeBinaryFile(binaryData);
-	return await uploadBinaryFile(
+	const key = storedUploadKey({
+		executionId: ctx.getExecutionId(),
+		nodeId: ctx.getNode().id,
+		itemIndex,
+		inputName: mapping.inputName,
+		bytes,
+		filename,
+		contentType,
+		baseUrl: conn.baseUrl,
+	});
+	const remembered = key === undefined ? undefined : storedUploads.get(key);
+	if (remembered) return remembered;
+	const stored = await uploadBinaryFile(
 		ctx,
 		conn,
 		{ inputName: mapping.inputName, bytes, filename, contentType },
 		itemIndex,
 	);
+	if (key !== undefined) storedUploads.set(key, stored);
+	return stored;
 }
 
 /**
@@ -672,8 +690,8 @@ function sanitizeResult(result: IDataObject): IDataObject {
  *
  * Binary inputs are stored first, one file after another, and their
  * references merged into the inputs; a failed upload fails the item before any
- * run is created. The idempotency key then covers those references — see
- * `idempotencyKey` for why a retry cannot replay a run that carried files.
+ * run is created. The idempotency key then covers those references, which a
+ * retry of the item reuses — see `idempotencyKey` and `StoredUploads.ts`.
  */
 async function startRun(
 	ctx: IExecuteFunctions,

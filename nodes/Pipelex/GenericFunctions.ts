@@ -365,15 +365,16 @@ export function runSourceError(body: HostedStartBody): string | null {
  * is unique per node within a workflow and stable across a retry of the same
  * execution, so it keeps replays correct without causing cross-node collisions.
  *
- * **Binary inputs change the rule.** The platform refuses a reused key whose
- * body differs with a `409` ("already used with a different request body",
- * `middleware/idempotency.py`), and every attempt uploads its files afresh, so
- * the storage references in the body differ from one attempt to the next. With
- * the bare key, "Retry On Fail" would turn every item that had already started
- * into a `409`. So when the body carries uploaded files, the key also covers
- * their references (`storedFiles`, one `input=reference` entry each): a retry
- * then starts a new run instead of failing. Replaying the earlier run would need
- * the earlier references, which a new attempt cannot know.
+ * **Binary inputs extend the rule.** When the body carries uploaded files, the
+ * key also covers their references (`storedFiles`, one `input=reference` entry
+ * each). A retry in the same execution reuses the references the first attempt
+ * stored (`StoredUploads.ts`), so its key is the same and the platform replays
+ * the first run. When a retry has to upload afresh instead — the file changed,
+ * or this process no longer remembers the first upload — its references, and so
+ * its body, differ, and the platform refuses a reused key whose body differs
+ * with a `409` ("already used with a different request body",
+ * `middleware/idempotency.py`). Folding the references into the key turns that
+ * case into a new run rather than a failed item.
  */
 export function idempotencyKey(
 	executionId: string,

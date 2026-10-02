@@ -25,6 +25,7 @@ import {
 	UPLOAD_UNAVAILABLE_MESSAGE,
 } from '../nodes/Pipelex/GenericFunctions';
 import { Pipelex } from '../nodes/Pipelex/Pipelex.node';
+import { storedUploads } from '../nodes/Pipelex/StoredUploads';
 
 type HttpImpl = (options: {
 	method?: string;
@@ -1500,7 +1501,12 @@ describe('Pipelex node — explaining a failed run', () => {
 });
 
 describe('Pipelex node — binary inputs (an n8n file becomes a method input)', () => {
-	beforeEach(() => vi.clearAllMocks());
+	beforeEach(() => {
+		vi.clearAllMocks();
+		// The memory of stored uploads is process-wide; every test starts as a
+		// fresh process would.
+		storedUploads.clear();
+	});
 
 	const PDF_BYTES = Buffer.from('%PDF-1.7 a fake invoice');
 	const PDF: TestBinary = {
@@ -2068,11 +2074,96 @@ describe('Pipelex node — binary inputs (an n8n file becomes a method input)', 
 		expect(calls(httpFn).some((call) => call.url === 'https://api.test/v1/start')).toBe(false);
 	});
 
+	// ── Retry On Fail: a retried item reuses what it stored ──────────────────
+	// n8n retries by running the whole node again, every item of it, in the same
+	// execution. Each test below calls `execute` twice on one context to play it.
+
 	const ONE_DOCUMENT = {
 		methodId: 'mt_invoice',
 		inputs: '{}',
 		binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
 	};
+
+	it('reuses the stored reference when Retry On Fail re-runs the node, so the run key stays and the run replays', async () => {
+		// The first attempt stores item 0 and starts its run, then fails on item 1,
+		// whose PUT storage refuses; the retry re-runs both items.
+		let storageDown = true;
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			items: [
+				{ json: {}, binary: { data: PDF } },
+				{ json: {}, binary: { data: PNG } },
+			],
+			httpImpl: hostedPlane({
+				storage: (options) =>
+					storageDown && String(options.url).includes('/file-2.pdf')
+						? ({ statusCode: 503, body: '', headers: {} } as unknown as IN8nHttpFullResponse)
+						: ({ statusCode: 200, body: '', headers: {} } as unknown as IN8nHttpFullResponse),
+			}),
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(/Storage failed to store "receipt.png"/);
+		const firstAttempt = calls(httpFn) as Array<Record<string, any>>;
+		const [firstStart] = firstAttempt.filter((call) => call.url === 'https://api.test/v1/start');
+
+		storageDown = false;
+		httpFn.mockClear();
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0]).toHaveLength(2);
+
+		const retry = calls(httpFn) as Array<Record<string, any>>;
+		// Item 0 is not uploaded again; only item 1, whose PUT failed, is.
+		expect(retry.filter((call) => call.url === 'https://api.test/v1/upload/grant')).toHaveLength(1);
+		const retryStarts = retry.filter((call) => call.url === 'https://api.test/v1/start');
+		expect(retryStarts).toHaveLength(2);
+		// Item 0 sends the very body and key of its first attempt: the platform
+		// replays the run it already started instead of starting a second one.
+		expect(retryStarts[0].body).toEqual(firstStart.body);
+		expect(retryStarts[0].headers['Idempotency-Key']).toBe(firstStart.headers['Idempotency-Key']);
+		expect(retryStarts[0].body.inputs.document.url).toBe('pipelex-storage://orgs/org-1/assets/file-1.pdf');
+		// Item 1's failed PUT was never remembered: its retry stored a new object.
+		expect(retryStarts[1].body.inputs.document.url).toBe('pipelex-storage://orgs/org-1/assets/file-3.pdf');
+	});
+
+	it('uploads again, under a new key, when the bytes changed between attempts', async () => {
+		const items: NonNullable<ContextOptions['items']> = [{ json: {}, binary: { data: PDF } }];
+		const { ctx, httpFn } = makeContext({ operation: 'start', params: ONE_DOCUMENT, items, httpImpl: hostedPlane() });
+
+		await Pipelex.prototype.execute.call(ctx);
+		const [first] = calls(httpFn).filter((call) => call.url === 'https://api.test/v1/start') as Array<
+			Record<string, any>
+		>;
+
+		items[0].binary = { data: { ...PDF, data: Buffer.from('%PDF-1.7 the corrected invoice').toString('base64') } };
+		httpFn.mockClear();
+		await Pipelex.prototype.execute.call(ctx);
+		const retry = calls(httpFn) as Array<Record<string, any>>;
+		expect(retry.filter((call) => call.url === 'https://api.test/v1/upload/grant')).toHaveLength(1);
+		const [second] = retry.filter((call) => call.url === 'https://api.test/v1/start');
+		expect(second.body.inputs.document.url).not.toBe(first.body.inputs.document.url);
+		expect(second.headers['Idempotency-Key']).not.toBe(first.headers['Idempotency-Key']);
+	});
+
+	it('never reuses a reference across executions', async () => {
+		const first = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hostedPlane(),
+		});
+		await Pipelex.prototype.execute.call(first.ctx);
+
+		const second = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			items: [{ json: {}, binary: { data: PDF } }],
+			executionId: 'exec-2',
+			httpImpl: hostedPlane(),
+		});
+		await Pipelex.prototype.execute.call(second.ctx);
+		expect(calls(second.httpFn).filter((call) => call.url === 'https://api.test/v1/upload/grant')).toHaveLength(1);
+	});
 
 	// ── Memory: measured from metadata, loaded one file at a time ────────────
 
