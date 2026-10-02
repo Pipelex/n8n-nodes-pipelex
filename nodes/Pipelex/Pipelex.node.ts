@@ -2,6 +2,7 @@ import {
 	NodeApiError,
 	NodeConnectionTypes,
 	NodeOperationError,
+	type IBinaryData,
 	type IDataObject,
 	type IExecuteFunctions,
 	type INodeExecutionData,
@@ -16,10 +17,17 @@ import {
 	SERVICE_UNAVAILABLE_MESSAGE,
 	abortableSleep,
 	assembleRunSources,
+	binaryByteSize,
+	binaryFieldNames,
+	binaryInputConflictError,
+	binarySizeError,
 	buildApiConnection,
 	buildStartBody,
+	describeBinaryFile,
 	idempotencyKey,
 	mapResultResponse,
+	missingBinaryMessage,
+	readBinaryInputMappings,
 	requestResult,
 	requestRunStatus,
 	requestStart,
@@ -27,11 +35,15 @@ import {
 	runFailureDescription,
 	runFailureMessage,
 	runSourceError,
+	storedFileReferences,
+	uploadBinaryFile,
 	withRunId,
 	type ApiConnection,
+	type BinaryInputMapping,
 	type ResultOutcome,
 } from './GenericFunctions';
-import type { HostedStartBody, StartAck } from './PipelexApiShapes';
+import type { HostedStartBody, StartAck, StoredFileInput } from './PipelexApiShapes';
+import { storedUploadKey, storedUploads } from './StoredUploads';
 
 // Polling defaults. Max Wait caps how long a polling operation blocks the n8n
 // execution — 300s covers the overwhelming majority of runs while staying
@@ -168,13 +180,185 @@ function readFileCollection(
 	return files;
 }
 
+/** A `Binary Inputs` row resolved on the item: the row, and n8n's description of its file. */
+interface BinarySource {
+	mapping: BinaryInputMapping;
+	binaryData: IBinaryData;
+}
+
+/**
+ * n8n's description of a binary field, or `undefined` when the item has none by
+ * that name. Resolved by n8n's own `assertBinaryData`, which honours the
+ * workflow's binary mode: under `combined` the file sits in the item's JSON at
+ * the path the row names, not under `item.binary`, so reading `item.binary`
+ * here would miss it. Its own error is dropped for the node's, which names the
+ * input and the fields the item does carry.
+ */
+function resolveBinary(
+	ctx: IExecuteFunctions,
+	itemIndex: number,
+	binaryPropertyName: string,
+): IBinaryData | undefined {
+	try {
+		return ctx.helpers.assertBinaryData(itemIndex, binaryPropertyName);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Read + validate the `Binary Inputs` rows for one item: every row names a
+ * distinct input, none of them is also set in the JSON `Inputs`, and the item
+ * carries every binary field a row reads. Synchronous and network-free, so a
+ * misconfigured row fails the item before any file is uploaded.
+ */
+function readBinaryInputs(
+	ctx: IExecuteFunctions,
+	itemIndex: number,
+	inputs: Record<string, unknown>,
+): BinarySource[] {
+	const { mappings, error } = readBinaryInputMappings(
+		ctx.getNodeParameter('binaryInputs', itemIndex, {}),
+	);
+	if (error) {
+		throw new NodeOperationError(ctx.getNode(), error, { itemIndex });
+	}
+	const conflict = binaryInputConflictError(mappings, inputs);
+	if (conflict) {
+		throw new NodeOperationError(ctx.getNode(), conflict, { itemIndex });
+	}
+
+	const sources: BinarySource[] = [];
+	for (const mapping of mappings) {
+		const binaryData = resolveBinary(ctx, itemIndex, mapping.binaryPropertyName);
+		if (!binaryData) {
+			throw new NodeOperationError(
+				ctx.getNode(),
+				missingBinaryMessage(mapping, binaryFieldNames(ctx.getInputData()[itemIndex])),
+				{ itemIndex },
+			);
+		}
+		sources.push({ mapping, binaryData });
+	}
+	return sources;
+}
+
+/** Refuse a file whose size the node does not send — see `binarySizeError`. */
+function assertBinarySize(
+	ctx: IExecuteFunctions,
+	source: BinarySource,
+	size: number,
+	itemIndex: number,
+): void {
+	const sizeError = binarySizeError(
+		{ ...source.mapping, filename: describeBinaryFile(source.binaryData).filename },
+		size,
+	);
+	if (sizeError) {
+		throw new NodeOperationError(ctx.getNode(), sizeError, { itemIndex });
+	}
+}
+
+/**
+ * Store one mapped file and return the input value naming it. The file is
+ * loaded only here, measured again now that its real size is known, and reused
+ * when this process already stored the same bytes for the same item of the same
+ * execution — a "Retry On Fail" attempt, see `StoredUploads.ts`. Otherwise it is
+ * uploaded, and remembered once storage has accepted it. The bytes are released
+ * when this returns.
+ */
+async function storeBinary(
+	ctx: IExecuteFunctions,
+	conn: ApiConnection,
+	source: BinarySource,
+	runIndex: number,
+	itemIndex: number,
+): Promise<StoredFileInput> {
+	const { mapping, binaryData } = source;
+	const bytes = await ctx.helpers.getBinaryDataBuffer(itemIndex, mapping.binaryPropertyName);
+	assertBinarySize(ctx, source, bytes.length, itemIndex);
+	const { filename, contentType } = describeBinaryFile(binaryData);
+	const key = storedUploadKey({
+		executionId: ctx.getExecutionId(),
+		nodeId: ctx.getNode().id,
+		runIndex,
+		itemIndex,
+		inputName: mapping.inputName,
+		bytes,
+		filename,
+		contentType,
+		baseUrl: conn.baseUrl,
+	});
+	const remembered = key === undefined ? undefined : storedUploads.get(key);
+	if (remembered) return remembered;
+	const stored = await uploadBinaryFile(
+		ctx,
+		conn,
+		{ inputName: mapping.inputName, bytes, filename, contentType },
+		itemIndex,
+	);
+	if (key !== undefined) storedUploads.set(key, stored);
+	return stored;
+}
+
+/**
+ * Store every mapped file of an item and return the inputs naming them.
+ *
+ * Every file is measured first, from n8n's metadata and without loading it, so
+ * an empty file or one over the size limit fails the item before anything is
+ * stored. Then the files are loaded, uploaded and released one at a time, so an
+ * item never holds more than one file in memory on top of what n8n holds.
+ */
+async function storeBinaryInputs(
+	ctx: IExecuteFunctions,
+	conn: ApiConnection,
+	sources: BinarySource[],
+	runIndex: number,
+	itemIndex: number,
+): Promise<Record<string, StoredFileInput>> {
+	const getMetadata =
+		typeof ctx.helpers.getBinaryMetadata === 'function'
+			? (binaryDataId: string) => ctx.helpers.getBinaryMetadata(binaryDataId)
+			: undefined;
+	for (const source of sources) {
+		const size = await binaryByteSize(source.binaryData, getMetadata);
+		if (size !== undefined) assertBinarySize(ctx, source, size, itemIndex);
+	}
+	const stored: Record<string, StoredFileInput> = {};
+	for (const source of sources) {
+		stored[source.mapping.inputName] = await storeBinary(ctx, conn, source, runIndex, itemIndex);
+	}
+	return stored;
+}
+
+/**
+ * n8n's run index for this node: 0 on its first pass in an execution, one more
+ * on each pass a loop makes, and unchanged across "Retry On Fail" attempts. Read
+ * through the workflow data proxy (`$thisRunIndex`), the one place
+ * `IExecuteFunctions` exposes it; 0 when that proxy cannot answer.
+ */
+function runIndexOf(ctx: IExecuteFunctions, itemIndex: number): number {
+	try {
+		const runIndex: unknown = ctx.getWorkflowDataProxy(itemIndex).$thisRunIndex;
+		return typeof runIndex === 'number' && Number.isInteger(runIndex) && runIndex >= 0 ? runIndex : 0;
+	} catch {
+		return 0;
+	}
+}
+
+/** The start body, and the binary inputs still to upload into it. */
+interface RunDefinition {
+	body: HostedStartBody;
+	binaryInputs: BinarySource[];
+}
+
 /**
  * Collect + validate the pipeline-definition fields of the start operations
  * and map them to the snake_case `POST /v1/start` body. Run-source rules are
  * checked client-side so the errors are immediate and item-scoped rather than an
  * opaque server 422.
  */
-function readRunDefinition(ctx: IExecuteFunctions, itemIndex: number): HostedStartBody {
+function readRunDefinition(ctx: IExecuteFunctions, itemIndex: number): RunDefinition {
 	// Trimmed so whitespace-only values fail the local required-source check
 	// instead of turning into a server-side 422 (and so stray whitespace in
 	// Method ID never reaches the server as a phantom run source).
@@ -287,7 +471,7 @@ function readRunDefinition(ctx: IExecuteFunctions, itemIndex: number): HostedSta
 	if (sourceError) {
 		throw new NodeOperationError(ctx.getNode(), sourceError, { itemIndex });
 	}
-	return body;
+	return { body, binaryInputs: readBinaryInputs(ctx, itemIndex, inputs) };
 }
 
 /** Read + require the `runId` field (Poll & Get Result / Get Run Result). */
@@ -521,14 +705,32 @@ function sanitizeResult(result: IDataObject): IDataObject {
  * by the node's pipeline-definition fields. Shared by Start & Wait for Result
  * and Start Pipeline — the StartAck's server-generated pipeline_run_id is
  * guaranteed present on return.
+ *
+ * Binary inputs are stored first, one file after another, and their
+ * references merged into the inputs; a failed upload fails the item before any
+ * run is created. The idempotency key then covers those references, which a
+ * retry of the item reuses — see `idempotencyKey` and `StoredUploads.ts`.
  */
 async function startRun(
 	ctx: IExecuteFunctions,
 	conn: ApiConnection,
 	itemIndex: number,
 ): Promise<StartAck> {
-	const body = readRunDefinition(ctx, itemIndex);
-	const idempotency = idempotencyKey(ctx.getExecutionId(), ctx.getNode().id, itemIndex);
+	const { body, binaryInputs } = readRunDefinition(ctx, itemIndex);
+	const runIndex = runIndexOf(ctx, itemIndex);
+	let storedFiles: string[] = [];
+	if (binaryInputs.length > 0) {
+		const stored = await storeBinaryInputs(ctx, conn, binaryInputs, runIndex, itemIndex);
+		body.inputs = { ...(body.inputs ?? {}), ...stored };
+		storedFiles = storedFileReferences(stored);
+	}
+	const idempotency = idempotencyKey(
+		ctx.getExecutionId(),
+		ctx.getNode().id,
+		runIndex,
+		itemIndex,
+		storedFiles,
+	);
 	const startAck = await requestStart(ctx, conn, body, idempotency, itemIndex);
 	if (!startAck.pipeline_run_id) {
 		throw new NodeOperationError(
@@ -859,6 +1061,53 @@ export class Pipelex implements INodeType {
 						operation: START_OPERATIONS,
 					},
 				},
+			},
+			// Files from earlier nodes. n8n carries a file as binary data on the item,
+			// while a Document or Image input takes a file reference — so each row
+			// names an input and the binary field that fills it, and the node uploads
+			// the file to Pipelex storage and passes the reference. A fixedCollection
+			// like the inline-method pair, for the same compact `+ Add …` control.
+			{
+				displayName: 'Binary Inputs',
+				name: 'binaryInputs',
+				type: 'fixedCollection',
+				placeholder: 'Add Binary Input',
+				typeOptions: {
+					multipleValues: true,
+				},
+				default: {},
+				description:
+					'Method inputs filled with a file from the incoming item, such as a mail attachment or a downloaded Drive file. The node uploads each file to Pipelex storage and passes its reference as the input, keeping the file name and MIME type. An input set here must not also be set in Inputs.',
+				displayOptions: {
+					show: {
+						operation: START_OPERATIONS,
+					},
+				},
+				options: [
+					{
+						displayName: 'Binary Input',
+						name: 'input',
+						values: [
+							{
+								displayName: 'Input Name',
+								name: 'name',
+								type: 'string',
+								default: '',
+								placeholder: 'e.g., document',
+								description:
+									'The method input to fill, named as it would be keyed in Inputs. Its concept must be a Document or an Image, or refine one.',
+							},
+							{
+								displayName: 'Input Binary Field',
+								name: 'binaryPropertyName',
+								type: 'string',
+								default: 'data',
+								description:
+									'The name of the input binary field containing the file to upload. A Gmail trigger names attachments attachment_0, attachment_1, and so on.',
+							},
+						],
+					},
+				],
 			},
 			{
 				displayName: 'Pipe Code',
