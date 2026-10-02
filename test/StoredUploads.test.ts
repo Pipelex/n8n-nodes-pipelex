@@ -12,6 +12,7 @@ import {
 const IDENTITY: StoredUploadIdentity = {
 	executionId: 'exec-1',
 	nodeId: 'node-1',
+	runIndex: 0,
 	itemIndex: 0,
 	inputName: 'document',
 	bytes: Buffer.from('%PDF-1.7 a fake invoice'),
@@ -38,6 +39,7 @@ describe('storedUploadKey (what makes two uploads the same upload)', () => {
 		const variants: Array<Partial<StoredUploadIdentity>> = [
 			{ executionId: 'exec-2' },
 			{ nodeId: 'node-2' },
+			{ runIndex: 1 },
 			{ itemIndex: 1 },
 			{ inputName: 'receipt' },
 			{ bytes: Buffer.from('%PDF-1.7 the corrected invoice') },

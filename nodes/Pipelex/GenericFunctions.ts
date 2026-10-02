@@ -365,6 +365,13 @@ export function runSourceError(body: HostedStartBody): string | null {
  * is unique per node within a workflow and stable across a retry of the same
  * execution, so it keeps replays correct without causing cross-node collisions.
  *
+ * It is scoped by n8n's run index too: a node inside a loop (Loop Over Items, a
+ * back-edge) runs once per pass in the same execution, each pass numbering its
+ * items from 0 again, so without it a later pass replayed the first pass's run,
+ * or drew a `409` when its inputs differed. A "Retry On Fail" attempt keeps the
+ * run index (`workflow-execute.ts` computes it once, before its retry loop), so
+ * retries still replay.
+ *
  * **Binary inputs extend the rule.** When the body carries uploaded files, the
  * key also covers their references (`storedFiles`, one `input=reference` entry
  * each). A retry in the same execution reuses the references the first attempt
@@ -379,10 +386,11 @@ export function runSourceError(body: HostedStartBody): string | null {
 export function idempotencyKey(
 	executionId: string,
 	nodeId: string,
+	runIndex: number,
 	itemIndex: number,
 	storedFiles: string[] = [],
 ): string {
-	const key = `${executionId}:${nodeId}:${itemIndex}`;
+	const key = `${executionId}:${nodeId}:${runIndex}:${itemIndex}`;
 	if (storedFiles.length === 0) return key;
 	const digest = createHash('sha256')
 		.update([...storedFiles].sort().join('\n'))
@@ -513,6 +521,18 @@ export async function requestStart(
 	idempotency: string,
 	itemIndex: number,
 ): Promise<StartAck> {
+	// A cancelled execution starts no run: checked here, the last moment before
+	// the request, because what came before it (a file upload above all) can
+	// finish successfully while the execution is being cancelled. The signal also
+	// rides the request, so a cancel during the exchange ends it.
+	const cancelSignal = ctx.getExecutionCancelSignal();
+	if (cancelSignal?.aborted) {
+		throw new NodeOperationError(
+			ctx.getNode(),
+			'The execution was cancelled before the run was started, so no run was started.',
+			{ itemIndex },
+		);
+	}
 	const response = (await ctx.helpers.httpRequest({
 		method: 'POST' as IHttpRequestMethods,
 		url: `${conn.baseUrl}/v1/start`,
@@ -521,6 +541,7 @@ export async function requestStart(
 		json: true,
 		returnFullResponse: true,
 		ignoreHttpStatusErrors: true,
+		abortSignal: cancelSignal,
 	})) as IN8nHttpFullResponse;
 
 	const responseBody = (response.body ?? {}) as IDataObject;

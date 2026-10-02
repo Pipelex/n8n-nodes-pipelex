@@ -15,8 +15,11 @@ import type { StoredFileInput } from './PipelexApiShapes';
 //
 // So the node remembers, in this process, the reference each file was stored
 // under, and a later attempt at the same item reuses it. The key is everything
-// that makes two uploads the same upload: the execution, the node, the item, the
-// input, the SHA-256 of the bytes, the file name, the MIME type and the Base URL.
+// that makes two uploads the same upload: the execution, the node and its run
+// index, the item, the input, the SHA-256 of the bytes, the file name, the MIME
+// type and the Base URL. The run index is what keeps a node inside a loop from
+// reusing one pass's file in the next: each pass is a new run of the node, and a
+// retry is not (see `idempotencyKey`).
 // A file whose bytes changed, or that a different execution sends, is uploaded
 // again; a reference is recorded only once storage has answered the `PUT` with a
 // `2xx`, so the memory never names an object that does not exist.
@@ -45,6 +48,7 @@ export const STORED_UPLOADS_MAX_ENTRIES = 10_000;
 export interface StoredUploadIdentity {
 	executionId: string;
 	nodeId: string;
+	runIndex: number;
 	itemIndex: number;
 	inputName: string;
 	bytes: Buffer;
@@ -67,6 +71,7 @@ export function storedUploadKey(identity: StoredUploadIdentity): string | undefi
 			JSON.stringify([
 				identity.executionId,
 				identity.nodeId,
+				identity.runIndex,
 				identity.itemIndex,
 				identity.inputName,
 				contentDigest,

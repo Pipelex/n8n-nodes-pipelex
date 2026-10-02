@@ -52,6 +52,8 @@ interface ContextOptions {
 	continueOnFail?: boolean;
 	items?: Array<{ json: Record<string, unknown>; binary?: Record<string, TestBinary> }>;
 	executionId?: string;
+	/** n8n's run index for the node: one more on each pass of a loop, kept across retries. */
+	runIndex?: number;
 	cancelSignal?: AbortSignal;
 	/**
 	 * The workflow's binary mode. Under `combined`, n8n keeps a file in the item's
@@ -99,6 +101,7 @@ function makeContext(opts: ContextOptions): {
 			return name in params ? params[name] : fallback;
 		},
 		getExecutionId: () => opts.executionId ?? 'exec-1',
+		getWorkflowDataProxy: () => ({ $thisRunIndex: opts.runIndex ?? 0 }),
 		getExecutionCancelSignal: () => opts.cancelSignal,
 		continueOnFail: () => opts.continueOnFail ?? false,
 		getNode: () => ({ id: 'node-1', name: 'Pipelex', type: 'pipelex', typeVersion: 1 }),
@@ -166,7 +169,7 @@ describe('Pipelex node — client identification (User-Agent on every API reques
 		const [startCall, resultCall] = httpFn.mock.calls.map((call) => call[0]);
 		expect(startCall.url).toBe('https://api.test/v1/start');
 		expect(startCall.headers['User-Agent']).toBe(EXPECTED_USER_AGENT);
-		expect(startCall.headers['Idempotency-Key']).toBe('exec-1:node-1:0');
+		expect(startCall.headers['Idempotency-Key']).toBe('exec-1:node-1:0:0');
 		expect(resultCall.url).toBe('https://api.test/v1/runs/run-1/results');
 		expect(resultCall.headers['User-Agent']).toBe(EXPECTED_USER_AGENT);
 	});
@@ -231,7 +234,7 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 
 		const startCall = httpFn.mock.calls[0][0];
 		expect(startCall.url).toBe('https://api.test/v1/start');
-		expect(startCall.headers['Idempotency-Key']).toBe('exec-1:node-1:0');
+		expect(startCall.headers['Idempotency-Key']).toBe('exec-1:node-1:0:0');
 		expect(startCall.headers.Authorization).toBe('Bearer secret-token');
 		expect(startCall.body).toEqual({ pipe_code: 'my-pipe', inputs: { a: 1 } });
 		const resultCall = httpFn.mock.calls[1][0];
@@ -857,7 +860,7 @@ describe('Pipelex node — Start Pipeline (start only, no polling)', () => {
 		expect(httpFn).toHaveBeenCalledTimes(1);
 		const startCall = httpFn.mock.calls[0][0];
 		expect(startCall.url).toBe('https://api.test/v1/start');
-		expect(startCall.headers['Idempotency-Key']).toBe('exec-1:node-1:0');
+		expect(startCall.headers['Idempotency-Key']).toBe('exec-1:node-1:0:0');
 		expect(startCall.headers.Authorization).toBe('Bearer secret-token');
 		expect(startCall.body).toEqual({ pipe_code: 'my-pipe', inputs: { a: 1 } });
 	});
@@ -1622,7 +1625,7 @@ describe('Pipelex node — binary inputs (an n8n file becomes a method input)', 
 			},
 		});
 		// A run carrying fresh uploads gets a key that covers them — see idempotencyKey.
-		expect(startCall.headers['Idempotency-Key']).toMatch(/^exec-1:node-1:0:files-[0-9a-f]{32}$/);
+		expect(startCall.headers['Idempotency-Key']).toMatch(/^exec-1:node-1:0:0:files-[0-9a-f]{32}$/);
 	});
 
 	it("feeds a Gmail trigger's attachment field on Start Pipeline too", async () => {
@@ -1709,8 +1712,8 @@ describe('Pipelex node — binary inputs (an n8n file becomes a method input)', 
 			'invoice.pdf',
 			'receipt.png',
 		]);
-		expect(starts[0].headers['Idempotency-Key']).toMatch(/^exec-1:node-1:0:files-/);
-		expect(starts[1].headers['Idempotency-Key']).toMatch(/^exec-1:node-1:1:files-/);
+		expect(starts[0].headers['Idempotency-Key']).toMatch(/^exec-1:node-1:0:0:files-/);
+		expect(starts[1].headers['Idempotency-Key']).toMatch(/^exec-1:node-1:0:1:files-/);
 	});
 
 	it('names the binary fields the item does carry when the mapped one is missing, before any call', async () => {
@@ -2163,6 +2166,54 @@ describe('Pipelex node — binary inputs (an n8n file becomes a method input)', 
 		});
 		await Pipelex.prototype.execute.call(second.ctx);
 		expect(calls(second.httpFn).filter((call) => call.url === 'https://api.test/v1/upload/grant')).toHaveLength(1);
+	});
+
+	it("keeps a loop's passes apart: a later pass uploads again and starts its own run", async () => {
+		// Loop Over Items runs the node once per pass in one execution, numbering
+		// each pass's items from 0 again; only n8n's run index tells them apart.
+		const first = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hostedPlane(),
+		});
+		await Pipelex.prototype.execute.call(first.ctx);
+		const nextPass = makeContext({
+			operation: 'start',
+			params: { ...ONE_DOCUMENT, inputs: '{"language":"de"}' },
+			items: [{ json: {}, binary: { data: PDF } }],
+			runIndex: 1,
+			httpImpl: hostedPlane(),
+		});
+		await Pipelex.prototype.execute.call(nextPass.ctx);
+
+		const startOf = (httpFn: ReturnType<typeof vi.fn>) =>
+			calls(httpFn).find((call) => call.url === 'https://api.test/v1/start') as Record<string, any>;
+		expect(calls(nextPass.httpFn).filter((call) => call.url === 'https://api.test/v1/upload/grant')).toHaveLength(1);
+		expect(startOf(first.httpFn).headers['Idempotency-Key']).toMatch(/^exec-1:node-1:0:0:files-/);
+		expect(startOf(nextPass.httpFn).headers['Idempotency-Key']).toMatch(/^exec-1:node-1:1:0:files-/);
+	});
+
+	it('starts no run when the execution is cancelled while its file was being stored', async () => {
+		// Storage accepts the file just as the execution is cancelled: the PUT
+		// itself succeeds, so only a check before the start can stop the run.
+		const cancel = new AbortController();
+		const plane = hostedPlane();
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: ONE_DOCUMENT,
+			items: [{ json: {}, binary: { data: PDF } }],
+			cancelSignal: cancel.signal,
+			httpImpl: (options) => {
+				const response = plane(options);
+				if (String(options.url).startsWith(STORAGE_ORIGIN)) cancel.abort();
+				return response;
+			},
+		});
+
+		const error = await captureError(ctx);
+		expect(error.message).toBe('The execution was cancelled before the run was started, so no run was started.');
+		expect(calls(httpFn).some((call) => call.url === 'https://api.test/v1/start')).toBe(false);
 	});
 
 	// ── Memory: measured from metadata, loaded one file at a time ────────────

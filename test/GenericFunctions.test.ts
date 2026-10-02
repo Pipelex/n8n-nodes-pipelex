@@ -270,15 +270,20 @@ describe('runSourceError (ports mthds/protocol assertExclusiveRunSources)', () =
 });
 
 describe('idempotencyKey', () => {
-	it('joins execution id, node id, and item index', () => {
-		expect(idempotencyKey('exec-abc', 'node-1', 0)).toBe('exec-abc:node-1:0');
-		expect(idempotencyKey('exec-abc', 'node-1', 7)).toBe('exec-abc:node-1:7');
+	it('joins execution id, node id, run index, and item index', () => {
+		expect(idempotencyKey('exec-abc', 'node-1', 0, 0)).toBe('exec-abc:node-1:0:0');
+		expect(idempotencyKey('exec-abc', 'node-1', 0, 7)).toBe('exec-abc:node-1:0:7');
 	});
 
 	it('differs across nodes in the same execution + item (no collision)', () => {
-		expect(idempotencyKey('exec-abc', 'node-1', 0)).not.toBe(
-			idempotencyKey('exec-abc', 'node-2', 0),
+		expect(idempotencyKey('exec-abc', 'node-1', 0, 0)).not.toBe(
+			idempotencyKey('exec-abc', 'node-2', 0, 0),
 		);
+	});
+
+	it("differs across a loop's passes of the same node and item", () => {
+		// Each pass numbers its items from 0 again; the run index tells them apart.
+		expect(idempotencyKey('exec-abc', 'node-1', 1, 0)).not.toBe(idempotencyKey('exec-abc', 'node-1', 0, 0));
 	});
 });
 
@@ -658,21 +663,21 @@ describe('runFailureData (the "Error data" row — rendered in <pre>, so multi-l
 
 describe('idempotencyKey with uploaded files', () => {
 	it('is the bare key when the body carries no uploaded file', () => {
-		expect(idempotencyKey('exec-abc', 'node-1', 0, [])).toBe('exec-abc:node-1:0');
+		expect(idempotencyKey('exec-abc', 'node-1', 0, 0, [])).toBe('exec-abc:node-1:0:0');
 	});
 
 	it('covers the uploaded references, so a retry that re-uploads never collides with the first attempt', () => {
 		// The platform answers a reused key with a different body with a 409. Every
 		// attempt uploads afresh, so its references — and its body — differ.
-		const first = idempotencyKey('exec-abc', 'node-1', 0, ['document=pipelex-storage://a.pdf']);
-		const retry = idempotencyKey('exec-abc', 'node-1', 0, ['document=pipelex-storage://b.pdf']);
-		expect(first).toMatch(/^exec-abc:node-1:0:files-[0-9a-f]{32}$/);
+		const first = idempotencyKey('exec-abc', 'node-1', 0, 0, ['document=pipelex-storage://a.pdf']);
+		const retry = idempotencyKey('exec-abc', 'node-1', 0, 0, ['document=pipelex-storage://b.pdf']);
+		expect(first).toMatch(/^exec-abc:node-1:0:0:files-[0-9a-f]{32}$/);
 		expect(retry).not.toBe(first);
 	});
 
 	it('does not depend on the order the files were uploaded in', () => {
 		const refs = ['invoice=pipelex-storage://a.pdf', 'receipt=pipelex-storage://b.png'];
-		expect(idempotencyKey('e', 'n', 0, refs)).toBe(idempotencyKey('e', 'n', 0, [...refs].reverse()));
+		expect(idempotencyKey('e', 'n', 0, 0, refs)).toBe(idempotencyKey('e', 'n', 0, 0, [...refs].reverse()));
 	});
 
 	it('pairs each reference with its input', () => {

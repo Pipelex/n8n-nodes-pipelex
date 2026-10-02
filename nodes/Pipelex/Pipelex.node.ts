@@ -271,6 +271,7 @@ async function storeBinary(
 	ctx: IExecuteFunctions,
 	conn: ApiConnection,
 	source: BinarySource,
+	runIndex: number,
 	itemIndex: number,
 ): Promise<StoredFileInput> {
 	const { mapping, binaryData } = source;
@@ -280,6 +281,7 @@ async function storeBinary(
 	const key = storedUploadKey({
 		executionId: ctx.getExecutionId(),
 		nodeId: ctx.getNode().id,
+		runIndex,
 		itemIndex,
 		inputName: mapping.inputName,
 		bytes,
@@ -311,6 +313,7 @@ async function storeBinaryInputs(
 	ctx: IExecuteFunctions,
 	conn: ApiConnection,
 	sources: BinarySource[],
+	runIndex: number,
 	itemIndex: number,
 ): Promise<Record<string, StoredFileInput>> {
 	const getMetadata =
@@ -323,9 +326,24 @@ async function storeBinaryInputs(
 	}
 	const stored: Record<string, StoredFileInput> = {};
 	for (const source of sources) {
-		stored[source.mapping.inputName] = await storeBinary(ctx, conn, source, itemIndex);
+		stored[source.mapping.inputName] = await storeBinary(ctx, conn, source, runIndex, itemIndex);
 	}
 	return stored;
+}
+
+/**
+ * n8n's run index for this node: 0 on its first pass in an execution, one more
+ * on each pass a loop makes, and unchanged across "Retry On Fail" attempts. Read
+ * through the workflow data proxy (`$thisRunIndex`), the one place
+ * `IExecuteFunctions` exposes it; 0 when that proxy cannot answer.
+ */
+function runIndexOf(ctx: IExecuteFunctions, itemIndex: number): number {
+	try {
+		const runIndex: unknown = ctx.getWorkflowDataProxy(itemIndex).$thisRunIndex;
+		return typeof runIndex === 'number' && Number.isInteger(runIndex) && runIndex >= 0 ? runIndex : 0;
+	} catch {
+		return 0;
+	}
 }
 
 /** The start body, and the binary inputs still to upload into it. */
@@ -699,13 +717,20 @@ async function startRun(
 	itemIndex: number,
 ): Promise<StartAck> {
 	const { body, binaryInputs } = readRunDefinition(ctx, itemIndex);
+	const runIndex = runIndexOf(ctx, itemIndex);
 	let storedFiles: string[] = [];
 	if (binaryInputs.length > 0) {
-		const stored = await storeBinaryInputs(ctx, conn, binaryInputs, itemIndex);
+		const stored = await storeBinaryInputs(ctx, conn, binaryInputs, runIndex, itemIndex);
 		body.inputs = { ...(body.inputs ?? {}), ...stored };
 		storedFiles = storedFileReferences(stored);
 	}
-	const idempotency = idempotencyKey(ctx.getExecutionId(), ctx.getNode().id, itemIndex, storedFiles);
+	const idempotency = idempotencyKey(
+		ctx.getExecutionId(),
+		ctx.getNode().id,
+		runIndex,
+		itemIndex,
+		storedFiles,
+	);
 	const startAck = await requestStart(ctx, conn, body, idempotency, itemIndex);
 	if (!startAck.pipeline_run_id) {
 		throw new NodeOperationError(
