@@ -316,6 +316,15 @@ export interface StoredFileInput {
 	mime_type?: string;
 }
 
+/**
+ * The largest file the hosted API stores, in bytes: `MAX_UPLOAD_MIB` (50) on the
+ * platform, which a grant reports as `max_bytes` and enforces with a `413`. The
+ * node checks it from n8n's metadata before it loads a file, so a file it would
+ * only see refused is never read into memory. Moving the platform's limit means
+ * moving this one too.
+ */
+export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+
 /** The type the SDK falls back to when neither n8n nor the extension says one. */
 export const DEFAULT_CONTENT_TYPE = 'application/octet-stream';
 

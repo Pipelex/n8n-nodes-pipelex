@@ -8,7 +8,10 @@ import {
 	RESULT_MID_WRITE_MESSAGE,
 	UPLOAD_UNAVAILABLE_MESSAGE,
 	assembleRunSources,
+	binaryByteSize,
+	binaryFieldNames,
 	binaryInputConflictError,
+	binarySizeError,
 	buildApiConnection,
 	buildStartBody,
 	describeBinaryFile,
@@ -33,6 +36,7 @@ import {
 } from '../nodes/Pipelex/GenericFunctions';
 import {
 	DEFAULT_DEGRADED_RETRY_SECONDS,
+	MAX_UPLOAD_BYTES,
 	extensionForContentType,
 	guessContentType,
 	parseRetryAfter,
@@ -830,6 +834,76 @@ describe('describeBinaryFile (the name and type a binary is stored under)', () =
 			filename: 'Invoice',
 			contentType: 'application/octet-stream',
 		});
+	});
+});
+
+describe('binaryFieldNames (what a missing-field message lists)', () => {
+	const file = { data: 'JVBERg==', mimeType: 'application/pdf' };
+
+	it('lists the fields under item.binary, the separate binary mode', () => {
+		expect(binaryFieldNames({ json: {}, binary: { attachment_0: file, attachment_1: file } })).toEqual([
+			'attachment_0',
+			'attachment_1',
+		]);
+	});
+
+	it("lists the binary values at the top of the item's JSON, the combined binary mode", () => {
+		expect(
+			binaryFieldNames({
+				json: { subject: 'Invoice', data: file, stored: { id: 'filesystem-v2:abc', mimeType: 'image/png' }, n: 3 },
+			}),
+		).toEqual(['data', 'stored']);
+	});
+
+	it('lists nothing for an item with no file, or no item', () => {
+		expect(binaryFieldNames({ json: { subject: 'Invoice' } })).toEqual([]);
+		expect(binaryFieldNames(undefined)).toEqual([]);
+	});
+});
+
+describe('binaryByteSize (a file measured without loading it)', () => {
+	const binary = (fields: Partial<IBinaryData>): IBinaryData =>
+		({ data: '', mimeType: 'application/pdf', ...fields }) as IBinaryData;
+
+	it('prefers the bytes n8n recorded when it stored the binary', async () => {
+		const getMetadata = vi.fn();
+		expect(await binaryByteSize(binary({ bytes: 1234, id: 'filesystem-v2:a' }), getMetadata)).toBe(1234);
+		expect(getMetadata).not.toHaveBeenCalled();
+	});
+
+	it("asks n8n's metadata for a binary kept outside memory", async () => {
+		const getMetadata = vi.fn(async () => ({ fileSize: 4321 }));
+		expect(await binaryByteSize(binary({ id: 'filesystem-v2:a', data: 'filesystem-v2' }), getMetadata)).toBe(4321);
+		expect(getMetadata).toHaveBeenCalledWith('filesystem-v2:a');
+	});
+
+	it('answers nothing when that metadata is missing, fails or is not a size', async () => {
+		const stored = binary({ id: 'filesystem-v2:a', data: 'filesystem-v2' });
+		expect(await binaryByteSize(stored, undefined)).toBeUndefined();
+		expect(await binaryByteSize(stored, async () => Promise.reject(new Error('gone')))).toBeUndefined();
+		expect(await binaryByteSize(stored, async () => ({ fileSize: Number.NaN }))).toBeUndefined();
+	});
+
+	it('measures the base64 of a binary kept in memory without decoding it', async () => {
+		const bytes = Buffer.from('%PDF-1.7 a fake invoice');
+		expect(await binaryByteSize(binary({ data: bytes.toString('base64') }), undefined)).toBe(bytes.length);
+		expect(await binaryByteSize(binary({ data: '' }), undefined)).toBe(0);
+	});
+});
+
+describe('binarySizeError (the sizes the node does not send)', () => {
+	const subject = { inputName: 'document', binaryPropertyName: 'data', filename: 'scan.pdf' };
+
+	it('refuses an empty file and one over the 50 MiB limit, and nothing in between', () => {
+		expect(MAX_UPLOAD_BYTES).toBe(50 * 1024 * 1024);
+		expect(binarySizeError(subject, 0)).toBe(
+			'The file "scan.pdf" in binary field "data" for input "document" is empty (0 bytes), so there is nothing to give the method. Check the node that produced it.',
+		);
+		expect(binarySizeError(subject, 1)).toBeNull();
+		expect(binarySizeError(subject, MAX_UPLOAD_BYTES)).toBeNull();
+		expect(binarySizeError(subject, MAX_UPLOAD_BYTES + 1)).toBe(
+			'The file "scan.pdf" in binary field "data" for input "document" is 52428801 bytes, over the 50 MiB Pipelex accepts for one file, so it was not uploaded. Pass a smaller file.',
+		);
 	});
 });
 

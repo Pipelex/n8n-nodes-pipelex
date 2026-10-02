@@ -2067,4 +2067,159 @@ describe('Pipelex node — binary inputs (an n8n file becomes a method input)', 
 		);
 		expect(calls(httpFn).some((call) => call.url === 'https://api.test/v1/start')).toBe(false);
 	});
+
+	const ONE_DOCUMENT = {
+		methodId: 'mt_invoice',
+		inputs: '{}',
+		binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+	};
+
+	// ── Memory: measured from metadata, loaded one file at a time ────────────
+
+	const TWO_FILES = {
+		methodId: 'mt_expense',
+		inputs: '{}',
+		binaryInputs: {
+			input: [
+				{ name: 'invoice', binaryPropertyName: 'attachment_0' },
+				{ name: 'receipt', binaryPropertyName: 'attachment_1' },
+			],
+		},
+	};
+
+	it("refuses a file over the size limit from n8n's metadata, before loading or sending anything", async () => {
+		const { ctx, httpFn, bufferFn } = makeContext({
+			operation: 'start',
+			params: TWO_FILES,
+			items: [
+				{
+					json: {},
+					binary: { attachment_0: PDF, attachment_1: { ...PNG, bytes: 60 * 1024 * 1024 } },
+				},
+			],
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toBe(
+			'The file "receipt.png" in binary field "attachment_1" for input "receipt" is 62914560 bytes, over the 50 MiB Pipelex accepts for one file, so it was not uploaded. Pass a smaller file.',
+		);
+		expect(bufferFn).not.toHaveBeenCalled();
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it("refuses an empty file from n8n's metadata, before loading the files before it", async () => {
+		const { ctx, httpFn, bufferFn } = makeContext({
+			operation: 'start',
+			params: TWO_FILES,
+			items: [{ json: {}, binary: { attachment_0: PDF, attachment_1: { ...PNG, bytes: 0 } } }],
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('is empty (0 bytes)');
+		expect(bufferFn).not.toHaveBeenCalled();
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('reads the size of a binary n8n keeps outside memory through getBinaryMetadata', async () => {
+		const { ctx, httpFn, bufferFn } = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			items: [{ json: {}, binary: { data: { ...PDF, id: 'filesystem-v2:abc' } } }],
+			binaryMetadata: { 'filesystem-v2:abc': { fileSize: 51 * 1024 * 1024 } },
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('over the 50 MiB Pipelex accepts for one file');
+		expect(bufferFn).not.toHaveBeenCalled();
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('measures the loaded file when the metadata says nothing', async () => {
+		// Kept outside memory, but this n8n offers no getBinaryMetadata.
+		const { ctx, httpFn, bufferFn } = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			items: [{ json: {}, binary: { data: { ...PDF, data: '', id: 'filesystem-v2:abc' } } }],
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('is empty (0 bytes)');
+		expect(bufferFn).toHaveBeenCalledTimes(1);
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('loads, uploads and lets go of one file before loading the next', async () => {
+		const log: string[] = [];
+		const plane = hostedPlane();
+		const { ctx } = makeContext({
+			operation: 'start',
+			params: TWO_FILES,
+			items: [{ json: {}, binary: { attachment_0: PDF, attachment_1: PNG } }],
+			log,
+			httpImpl: (options) => {
+				const url = String(options.url);
+				log.push(
+					url === 'https://api.test/v1/upload/grant' ? 'grant' : url.startsWith(STORAGE_ORIGIN) ? 'put' : 'start',
+				);
+				return plane(options);
+			},
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		expect(log).toEqual([
+			'load attachment_0',
+			'grant',
+			'put',
+			'load attachment_1',
+			'grant',
+			'put',
+			'start',
+		]);
+	});
+
+	// ── The workflow's binary mode ────────────────────────────────────────────
+
+	it("finds a file kept in the item's JSON under the combined binary mode", async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			binaryMode: 'combined',
+			items: [{ json: { subject: 'Invoice', data: PDF as unknown as Record<string, unknown> } }],
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json.pipeline_run_id).toBe('run-1');
+		const startCall = calls(httpFn).find((call) => call.url === 'https://api.test/v1/start') as Record<string, any>;
+		expect(startCall.body.inputs.document).toEqual({
+			url: 'pipelex-storage://orgs/org-1/assets/file-1.pdf',
+			filename: 'invoice.pdf',
+			mime_type: 'application/pdf',
+		});
+	});
+
+	it("names the JSON's binary fields when the mapped one is missing under the combined mode", async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			binaryMode: 'combined',
+			items: [{ json: { subject: 'Invoice', attachment_0: PDF as unknown as Record<string, unknown> } }],
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toBe(
+			'Binary input "document" reads the binary field "data", but this item has no such field. Its binary fields are: attachment_0.',
+		);
+		expect(httpFn).not.toHaveBeenCalled();
+	});
 });

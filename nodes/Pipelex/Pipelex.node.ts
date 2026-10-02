@@ -2,6 +2,7 @@ import {
 	NodeApiError,
 	NodeConnectionTypes,
 	NodeOperationError,
+	type IBinaryData,
 	type IDataObject,
 	type IExecuteFunctions,
 	type INodeExecutionData,
@@ -16,7 +17,10 @@ import {
 	SERVICE_UNAVAILABLE_MESSAGE,
 	abortableSleep,
 	assembleRunSources,
+	binaryByteSize,
+	binaryFieldNames,
 	binaryInputConflictError,
+	binarySizeError,
 	buildApiConnection,
 	buildStartBody,
 	describeBinaryFile,
@@ -35,7 +39,6 @@ import {
 	uploadBinaryFile,
 	withRunId,
 	type ApiConnection,
-	type BinaryFile,
 	type BinaryInputMapping,
 	type ResultOutcome,
 } from './GenericFunctions';
@@ -176,6 +179,32 @@ function readFileCollection(
 	return files;
 }
 
+/** A `Binary Inputs` row resolved on the item: the row, and n8n's description of its file. */
+interface BinarySource {
+	mapping: BinaryInputMapping;
+	binaryData: IBinaryData;
+}
+
+/**
+ * n8n's description of a binary field, or `undefined` when the item has none by
+ * that name. Resolved by n8n's own `assertBinaryData`, which honours the
+ * workflow's binary mode: under `combined` the file sits in the item's JSON at
+ * the path the row names, not under `item.binary`, so reading `item.binary`
+ * here would miss it. Its own error is dropped for the node's, which names the
+ * input and the fields the item does carry.
+ */
+function resolveBinary(
+	ctx: IExecuteFunctions,
+	itemIndex: number,
+	binaryPropertyName: string,
+): IBinaryData | undefined {
+	try {
+		return ctx.helpers.assertBinaryData(itemIndex, binaryPropertyName);
+	} catch {
+		return undefined;
+	}
+}
+
 /**
  * Read + validate the `Binary Inputs` rows for one item: every row names a
  * distinct input, none of them is also set in the JSON `Inputs`, and the item
@@ -186,7 +215,7 @@ function readBinaryInputs(
 	ctx: IExecuteFunctions,
 	itemIndex: number,
 	inputs: Record<string, unknown>,
-): BinaryInputMapping[] {
+): BinarySource[] {
 	const { mappings, error } = readBinaryInputMappings(
 		ctx.getNodeParameter('binaryInputs', itemIndex, {}),
 	);
@@ -197,52 +226,94 @@ function readBinaryInputs(
 	if (conflict) {
 		throw new NodeOperationError(ctx.getNode(), conflict, { itemIndex });
 	}
-	if (mappings.length === 0) return mappings;
 
-	const binary = ctx.getInputData()[itemIndex]?.binary ?? {};
+	const sources: BinarySource[] = [];
 	for (const mapping of mappings) {
-		if (!binary[mapping.binaryPropertyName]) {
+		const binaryData = resolveBinary(ctx, itemIndex, mapping.binaryPropertyName);
+		if (!binaryData) {
 			throw new NodeOperationError(
 				ctx.getNode(),
-				missingBinaryMessage(mapping, Object.keys(binary)),
+				missingBinaryMessage(mapping, binaryFieldNames(ctx.getInputData()[itemIndex])),
 				{ itemIndex },
 			);
 		}
+		sources.push({ mapping, binaryData });
 	}
-	return mappings;
+	return sources;
+}
+
+/** Refuse a file whose size the node does not send — see `binarySizeError`. */
+function assertBinarySize(
+	ctx: IExecuteFunctions,
+	source: BinarySource,
+	size: number,
+	itemIndex: number,
+): void {
+	const sizeError = binarySizeError(
+		{ ...source.mapping, filename: describeBinaryFile(source.binaryData).filename },
+		size,
+	);
+	if (sizeError) {
+		throw new NodeOperationError(ctx.getNode(), sizeError, { itemIndex });
+	}
 }
 
 /**
- * Read each mapped binary off the item through n8n's helpers, with the name and
- * type to store it under. All of an item's files are read before the first one
- * is uploaded, so an empty file fails the item with nothing stored.
+ * Store one mapped file and return the input value naming it. The file is
+ * loaded only here, measured again now that its real size is known, then
+ * uploaded. The bytes are released when this returns.
  */
-async function readBinaryFiles(
+async function storeBinary(
 	ctx: IExecuteFunctions,
-	mappings: BinaryInputMapping[],
+	conn: ApiConnection,
+	source: BinarySource,
 	itemIndex: number,
-): Promise<BinaryFile[]> {
-	const files: BinaryFile[] = [];
-	for (const mapping of mappings) {
-		const binaryData = ctx.helpers.assertBinaryData(itemIndex, mapping.binaryPropertyName);
-		const bytes = await ctx.helpers.getBinaryDataBuffer(itemIndex, mapping.binaryPropertyName);
-		const { filename, contentType } = describeBinaryFile(binaryData);
-		if (bytes.length === 0) {
-			throw new NodeOperationError(
-				ctx.getNode(),
-				`The file "${filename}" in binary field "${mapping.binaryPropertyName}" for input "${mapping.inputName}" is empty (0 bytes), so there is nothing to give the method. Check the node that produced it.`,
-				{ itemIndex },
-			);
-		}
-		files.push({ inputName: mapping.inputName, bytes, filename, contentType });
+): Promise<StoredFileInput> {
+	const { mapping, binaryData } = source;
+	const bytes = await ctx.helpers.getBinaryDataBuffer(itemIndex, mapping.binaryPropertyName);
+	assertBinarySize(ctx, source, bytes.length, itemIndex);
+	const { filename, contentType } = describeBinaryFile(binaryData);
+	return await uploadBinaryFile(
+		ctx,
+		conn,
+		{ inputName: mapping.inputName, bytes, filename, contentType },
+		itemIndex,
+	);
+}
+
+/**
+ * Store every mapped file of an item and return the inputs naming them.
+ *
+ * Every file is measured first, from n8n's metadata and without loading it, so
+ * an empty file or one over the size limit fails the item before anything is
+ * stored. Then the files are loaded, uploaded and released one at a time, so an
+ * item never holds more than one file in memory on top of what n8n holds.
+ */
+async function storeBinaryInputs(
+	ctx: IExecuteFunctions,
+	conn: ApiConnection,
+	sources: BinarySource[],
+	itemIndex: number,
+): Promise<Record<string, StoredFileInput>> {
+	const getMetadata =
+		typeof ctx.helpers.getBinaryMetadata === 'function'
+			? (binaryDataId: string) => ctx.helpers.getBinaryMetadata(binaryDataId)
+			: undefined;
+	for (const source of sources) {
+		const size = await binaryByteSize(source.binaryData, getMetadata);
+		if (size !== undefined) assertBinarySize(ctx, source, size, itemIndex);
 	}
-	return files;
+	const stored: Record<string, StoredFileInput> = {};
+	for (const source of sources) {
+		stored[source.mapping.inputName] = await storeBinary(ctx, conn, source, itemIndex);
+	}
+	return stored;
 }
 
 /** The start body, and the binary inputs still to upload into it. */
 interface RunDefinition {
 	body: HostedStartBody;
-	binaryInputs: BinaryInputMapping[];
+	binaryInputs: BinarySource[];
 }
 
 /**
@@ -599,7 +670,7 @@ function sanitizeResult(result: IDataObject): IDataObject {
  * and Start Pipeline — the StartAck's server-generated pipeline_run_id is
  * guaranteed present on return.
  *
- * Binary inputs are uploaded first, one file after another, and their
+ * Binary inputs are stored first, one file after another, and their
  * references merged into the inputs; a failed upload fails the item before any
  * run is created. The idempotency key then covers those references — see
  * `idempotencyKey` for why a retry cannot replay a run that carried files.
@@ -612,11 +683,7 @@ async function startRun(
 	const { body, binaryInputs } = readRunDefinition(ctx, itemIndex);
 	let storedFiles: string[] = [];
 	if (binaryInputs.length > 0) {
-		const files = await readBinaryFiles(ctx, binaryInputs, itemIndex);
-		const stored: Record<string, StoredFileInput> = {};
-		for (const file of files) {
-			stored[file.inputName] = await uploadBinaryFile(ctx, conn, file, itemIndex);
-		}
+		const stored = await storeBinaryInputs(ctx, conn, binaryInputs, itemIndex);
 		body.inputs = { ...(body.inputs ?? {}), ...stored };
 		storedFiles = storedFileReferences(stored);
 	}

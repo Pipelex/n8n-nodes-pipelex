@@ -16,6 +16,7 @@ import {
 import {
 	DEFAULT_CONTENT_TYPE,
 	DEFAULT_DEGRADED_RETRY_SECONDS,
+	MAX_UPLOAD_BYTES,
 	PIPELEX_STORAGE_SCHEME,
 	extensionForContentType,
 	guessContentType,
@@ -880,6 +881,83 @@ export function missingBinaryMessage(mapping: BinaryInputMapping, available: str
 		: `${lead} It carries no binary data at all — check that the node before this one outputs a file.`;
 }
 
+/** n8n's own test for a binary value (`isBinaryValue`), owned here: it is not in every n8n-workflow the node runs on. */
+function isBinaryShaped(value: unknown): boolean {
+	return (
+		value !== null &&
+		typeof value === 'object' &&
+		!Array.isArray(value) &&
+		'mimeType' in value &&
+		('data' in value || 'id' in value)
+	);
+}
+
+/**
+ * The binary fields an item carries, for {@link missingBinaryMessage}. A workflow
+ * whose binary mode is `separate` (the default) keeps files under `item.binary`;
+ * one whose mode is `combined` keeps them in the item's JSON, where n8n's
+ * `assertBinaryData` looks the field up as a path. Both places are listed, the
+ * JSON side at its top level, so the message names what the item really holds
+ * whichever mode the workflow runs in.
+ */
+export function binaryFieldNames(
+	item: { json?: unknown; binary?: Record<string, unknown> } | undefined,
+): string[] {
+	const names = Object.keys(item?.binary ?? {});
+	const json = item?.json;
+	if (json !== null && typeof json === 'object' && !Array.isArray(json)) {
+		for (const [key, value] of Object.entries(json as Record<string, unknown>)) {
+			if (isBinaryShaped(value) && !names.includes(key)) names.push(key);
+		}
+	}
+	return names;
+}
+
+/**
+ * How many bytes n8n says a binary holds, read from its metadata without loading
+ * the file: the `bytes` n8n records when it stores a binary, else the metadata
+ * of a binary kept outside memory (`id`, through `getBinaryMetadata`), else the
+ * length of the base64 `data` of one kept in memory. `undefined` when none of
+ * them answers; the loaded file is then measured instead.
+ */
+export async function binaryByteSize(
+	binaryData: IBinaryData,
+	getMetadata: ((binaryDataId: string) => Promise<{ fileSize: number }>) | undefined,
+): Promise<number | undefined> {
+	const isSize = (value: unknown): value is number =>
+		typeof value === 'number' && Number.isFinite(value) && value >= 0;
+	if (isSize(binaryData.bytes)) return binaryData.bytes;
+	if (typeof binaryData.id === 'string' && binaryData.id.length > 0) {
+		if (!getMetadata) return undefined;
+		try {
+			const { fileSize } = await getMetadata(binaryData.id);
+			return isSize(fileSize) ? fileSize : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+	return typeof binaryData.data === 'string' ? Buffer.byteLength(binaryData.data, 'base64') : undefined;
+}
+
+/**
+ * The refusal for a file of `size` bytes, or `null` when the size is one the
+ * node sends: an empty file gives the method nothing, and one over
+ * {@link MAX_UPLOAD_BYTES} would only be refused by the upload grant.
+ */
+export function binarySizeError(
+	subject: { inputName: string; binaryPropertyName: string; filename: string },
+	size: number,
+): string | null {
+	const where = `The file "${subject.filename}" in binary field "${subject.binaryPropertyName}" for input "${subject.inputName}"`;
+	if (size === 0) {
+		return `${where} is empty (0 bytes), so there is nothing to give the method. Check the node that produced it.`;
+	}
+	if (size > MAX_UPLOAD_BYTES) {
+		return `${where} is ${size} bytes, over the ${MAX_UPLOAD_BYTES / (1024 * 1024)} MiB Pipelex accepts for one file, so it was not uploaded. Pass a smaller file.`;
+	}
+	return null;
+}
+
 /** Whether a file name ends in an extension: a dot that neither starts nor ends it (`.env` has none). */
 function hasExtension(filename: string): boolean {
 	const dot = filename.lastIndexOf('.');
@@ -934,7 +1012,7 @@ export function storedFileReferences(stored: Record<string, StoredFileInput>): s
 	return Object.entries(stored).map(([inputName, value]) => `${inputName}=${value.url}`);
 }
 
-/** A binary read off the item, ready to upload. */
+/** A binary loaded off the item, ready to upload. */
 export interface BinaryFile {
 	inputName: string;
 	bytes: Buffer;
