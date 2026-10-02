@@ -346,6 +346,18 @@ export function guessContentType(filename: string): string {
 }
 
 /**
+ * The extension the table above gives a MIME type, or `undefined` when it has
+ * none — the reverse of {@link guessContentType}, node-only, for a file whose
+ * name carries no extension. The first extension listed for a type wins
+ * (`image/jpeg` → `jpg`), and parameters after a `;` are ignored.
+ */
+export function extensionForContentType(contentType: string): string | undefined {
+	const essence = contentType.split(';')[0].trim().toLowerCase();
+	if (!essence || essence === DEFAULT_CONTENT_TYPE) return undefined;
+	return Object.keys(EXTENSION_MIME).find((extension) => EXTENSION_MIME[extension] === essence);
+}
+
+/**
  * The default time limit on the storage `PUT`, in milliseconds — the SDK's
  * `uploadWithGrant` default: a minute to open the exchange and hear back, plus a
  * second for every started 128 KiB of the file (about 1 Mbit/s), capped at the

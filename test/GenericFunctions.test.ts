@@ -31,6 +31,7 @@ import {
 } from '../nodes/Pipelex/GenericFunctions';
 import {
 	DEFAULT_DEGRADED_RETRY_SECONDS,
+	extensionForContentType,
 	guessContentType,
 	parseRetryAfter,
 	uploadTimeoutMs,
@@ -787,7 +788,46 @@ describe('describeBinaryFile (the name and type a binary is stored under)', () =
 		expect(describeBinaryFile(binary({ fileExtension: 'pdf', mimeType: 'application/pdf' })).filename).toBe(
 			'upload.pdf',
 		);
-		expect(describeBinaryFile(binary({ mimeType: 'application/pdf' })).filename).toBe('upload.bin');
+		// n8n's MIME type names the extension when n8n kept none.
+		expect(describeBinaryFile(binary({ mimeType: 'application/pdf' })).filename).toBe('upload.pdf');
+		expect(describeBinaryFile(binary({ mimeType: 'application/octet-stream' })).filename).toBe('upload.bin');
+		expect(describeBinaryFile(binary({ mimeType: 'application/x-unknown' })).filename).toBe('upload.bin');
+	});
+
+	it("gives a name without an extension n8n's fileExtension, and types it from that", () => {
+		// A Drive export or a mail attachment named "Invoice", typed octet-stream:
+		// before, it was stored without an extension and with no mime_type.
+		expect(
+			describeBinaryFile(
+				binary({ fileName: 'Invoice', fileExtension: 'pdf', mimeType: 'application/octet-stream' }),
+			),
+		).toEqual({ filename: 'Invoice.pdf', contentType: 'application/pdf' });
+		expect(describeBinaryFile(binary({ fileName: 'scan', fileExtension: '.PNG', mimeType: '' }))).toEqual({
+			filename: 'scan.PNG',
+			contentType: 'image/png',
+		});
+	});
+
+	it("gives a name without an extension the one of n8n's MIME type, keeping that type", () => {
+		expect(describeBinaryFile(binary({ fileName: 'Invoice', mimeType: 'application/pdf' }))).toEqual({
+			filename: 'Invoice.pdf',
+			contentType: 'application/pdf',
+		});
+		expect(describeBinaryFile(binary({ fileName: 'photo', mimeType: 'image/jpeg; q=1' }))).toEqual({
+			filename: 'photo.jpg',
+			contentType: 'image/jpeg; q=1',
+		});
+	});
+
+	it('leaves a name that has an extension, or that no source can extend, as n8n gave it', () => {
+		expect(
+			describeBinaryFile(binary({ fileName: 'report.final', fileExtension: 'pdf', mimeType: 'application/pdf' }))
+				.filename,
+		).toBe('report.final');
+		expect(describeBinaryFile(binary({ fileName: 'Invoice', mimeType: 'application/octet-stream' }))).toEqual({
+			filename: 'Invoice',
+			contentType: 'application/octet-stream',
+		});
 	});
 });
 
@@ -931,6 +971,14 @@ describe('guessContentType + uploadTimeoutMs (replicated from the SDK)', () => {
 		expect(guessContentType('a.docx')).toBe('application/octet-stream');
 		expect(guessContentType('noextension')).toBe('application/octet-stream');
 		expect(guessContentType('trailing.')).toBe('application/octet-stream');
+	});
+
+	it('names the extension of a MIME type the table knows, for a name that has none', () => {
+		expect(extensionForContentType('application/pdf')).toBe('pdf');
+		expect(extensionForContentType('IMAGE/JPEG; charset=binary')).toBe('jpg');
+		expect(extensionForContentType('application/octet-stream')).toBeUndefined();
+		expect(extensionForContentType('application/vnd.ms-excel')).toBeUndefined();
+		expect(extensionForContentType('')).toBeUndefined();
 	});
 
 	it('allows a minute plus a second per started 128 KiB', () => {

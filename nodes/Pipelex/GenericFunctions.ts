@@ -17,6 +17,7 @@ import {
 	DEFAULT_CONTENT_TYPE,
 	DEFAULT_DEGRADED_RETRY_SECONDS,
 	PIPELEX_STORAGE_SCHEME,
+	extensionForContentType,
 	guessContentType,
 	parseRetryAfter,
 	uploadTimeoutMs,
@@ -879,29 +880,42 @@ export function missingBinaryMessage(mapping: BinaryInputMapping, available: str
 		: `${lead} It carries no binary data at all — check that the node before this one outputs a file.`;
 }
 
+/** Whether a file name ends in an extension: a dot that neither starts nor ends it (`.env` has none). */
+function hasExtension(filename: string): boolean {
+	const dot = filename.lastIndexOf('.');
+	return dot > 0 && dot < filename.length - 1;
+}
+
 /**
  * The file name and MIME type to store a binary under, from what n8n carries.
  *
- * The name falls back as the SDK's `uploadFile` does for nameless bytes
- * (`upload.bin`), keeping n8n's extension when it knows one, since the stored
- * object keeps the extension. The type is n8n's `mimeType` unless that is empty
- * or the generic `application/octet-stream`, in which case the extension is
- * asked — the SDK's `asset.type || guessContentType(filename)`, where an
- * unknown n8n type plays the part of a browser's empty `File.type`.
+ * The stored object keeps the extension of the name, so a name without one is
+ * given n8n's `fileExtension`, or failing that the extension of n8n's MIME type
+ * (`application/pdf` → `.pdf`): a Drive export named `Invoice` with
+ * `fileExtension: "pdf"` is stored as `Invoice.pdf`, not as an extensionless
+ * object. Nameless bytes are named as the SDK's `uploadFile` names them
+ * (`upload.<extension>`, else `upload.bin`).
+ *
+ * The type is n8n's `mimeType` unless that is empty or the generic
+ * `application/octet-stream`, in which case the extension is asked — the SDK's
+ * `asset.type || guessContentType(filename)`, where an unknown n8n type plays
+ * the part of a browser's empty `File.type`. The extension asked is the one the
+ * name ends up with, so `fileExtension` counts there too.
  */
 export function describeBinaryFile(binaryData: IBinaryData): {
 	filename: string;
 	contentType: string;
 } {
-	const extension = scalarText(binaryData.fileExtension).replace(/^\./, '');
-	const filename =
-		scalarText(binaryData.fileName) || (extension ? `upload.${extension}` : 'upload.bin');
 	const declared = scalarText(binaryData.mimeType);
-	const contentType =
-		declared && declared.toLowerCase() !== DEFAULT_CONTENT_TYPE
-			? declared
-			: guessContentType(filename);
-	return { filename, contentType };
+	const knownType = declared && declared.toLowerCase() !== DEFAULT_CONTENT_TYPE ? declared : '';
+	const extension =
+		scalarText(binaryData.fileExtension).replace(/^\./, '') ||
+		(knownType ? (extensionForContentType(knownType) ?? '') : '');
+	const name = scalarText(binaryData.fileName);
+	let filename: string;
+	if (!name) filename = extension ? `upload.${extension}` : 'upload.bin';
+	else filename = !hasExtension(name) && extension ? `${name}.${extension}` : name;
+	return { filename, contentType: knownType || guessContentType(filename) };
 }
 
 /** The input value for a stored file — see {@link StoredFileInput}. */
