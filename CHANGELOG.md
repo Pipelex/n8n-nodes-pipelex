@@ -4,7 +4,7 @@
 
 ### Added
 
-- **`Binary Inputs` on the start operations**: a method's `Document` or `Image` input can now be filled with a file from the incoming item, such as a Gmail attachment or a Google Drive download, by adding a row that names the input and its binary field (`data` by default). The node uploads the file to Pipelex storage (up to the hosted API's 50 MiB limit) and passes its `pipelex-storage://` reference with the file name and MIME type, so a file no longer has to sit at a public URL; an input set both there and in `Inputs` is refused, and a retried item with binary inputs starts a new run.
+- **`Binary Inputs` on the start operations**: a method's `Document` or `Image` input can now be filled with a file from the incoming item, such as a Gmail attachment or a Google Drive download, by adding a row that names the input and its binary field (`data` by default, or the path to the file in the item's JSON under n8n's *combined* binary mode). The node measures each file from n8n's metadata, refusing an empty one or one over the hosted API's 50 MiB limit before anything is loaded, then loads and uploads the files one at a time to Pipelex storage and passes each `pipelex-storage://` reference with the file name and MIME type, so a file no longer has to sit at a public URL; an input set both there and in `Inputs` is refused. Since *Retry On Fail* re-runs every item of the node, a retry in the same execution reuses the files it already stored (for up to 24 hours, while their bytes, name and type are unchanged), so an item that already started its run gets that run back instead of starting a second paid one.
 
 ## [v0.2.2] - 2026-09-23
 
