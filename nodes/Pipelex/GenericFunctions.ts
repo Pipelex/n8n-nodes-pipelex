@@ -1197,10 +1197,50 @@ function isIdentifier(value: unknown): value is string {
 	return typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(value);
 }
 
-/** Whether a request that got no answer ran out of time (axios reports its timeout by code). */
-function isTimeoutFailure(error: unknown): boolean {
+/**
+ * Whether a request that got no answer ran out of time once storage could have
+ * been receiving it. axios reports its own timeout as `ECONNABORTED` (or
+ * `ETIMEDOUT` under `clarifyTimeoutError`), but the operating system also says
+ * `ETIMEDOUT` when a TCP connection never opens — and then storage received
+ * nothing. That one is told apart by its `syscall`, `connect`. axios 1.15 and
+ * 1.18 both keep it on the error's `cause` (checked against a failed connect),
+ * and a wrapper may lift it onto the error itself, so the whole chain is read.
+ */
+export function isTimeoutFailure(error: unknown): boolean {
 	const code = (error as { code?: unknown } | undefined)?.code;
-	return code === 'ECONNABORTED' || code === 'ETIMEDOUT';
+	if (code !== 'ECONNABORTED' && code !== 'ETIMEDOUT') return false;
+	let current: unknown = error;
+	for (let depth = 0; depth < 5 && current !== null && typeof current === 'object'; depth++) {
+		if ((current as { syscall?: unknown }).syscall === 'connect') return false;
+		current = (current as { cause?: unknown }).cause;
+	}
+	return true;
+}
+
+/**
+ * One signal that aborts when either of two does — `AbortSignal.any`, which
+ * releases its links by itself, else a controller linked by hand on a Node too
+ * old to have it, whose links `unlink` removes so a long execution's cancel
+ * signal does not collect one listener per upload.
+ */
+export function eitherSignal(
+	first: AbortSignal,
+	second: AbortSignal,
+): { signal: AbortSignal; unlink: () => void } {
+	const any = (AbortSignal as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+	if (typeof any === 'function') return { signal: any.call(AbortSignal, [first, second]), unlink: () => {} };
+	const controller = new AbortController();
+	const unlinks: Array<() => void> = [];
+	for (const source of [first, second]) {
+		if (source.aborted) {
+			controller.abort(source.reason);
+			break;
+		}
+		const onAbort = (): void => controller.abort(source.reason);
+		source.addEventListener('abort', onAbort, { once: true });
+		unlinks.push(() => source.removeEventListener('abort', onAbort));
+	}
+	return { signal: controller.signal, unlink: () => unlinks.forEach((unlink) => unlink()) };
 }
 
 /**
@@ -1211,12 +1251,18 @@ function isTimeoutFailure(error: unknown): boolean {
  * spec leaves the user agent of a request to a presigned object-store URL
  * alone, so n8n's default applies).
  *
- * Redirects are refused (a presigned URL is valid only where it was signed), the
- * exchange runs under the SDK's default time limit, and cancelling the n8n
- * execution cancels the upload. Every failure is described without the grant's
- * URL, storage's error body or the runtime error that could carry either — which
- * is why a failed request is caught here and classified OUTSIDE the `catch`
- * rather than wrapped.
+ * Redirects are refused (a presigned URL is valid only where it was signed), and
+ * cancelling the n8n execution cancels the upload. The SDK's default time limit
+ * is a deadline the node owns, an `AbortSignal.timeout` linked with the cancel
+ * signal, rather than axios's `timeout`: on the axios of n8n 2.16 and older
+ * (1.15) that option is `ClientRequest#setTimeout`, a socket-inactivity timer
+ * armed only once the socket has connected, so the name lookup and the TCP
+ * connect ran unbounded and a response that keeps trickling never trips it. The
+ * signal bounds the whole exchange on every axios. Which signal fired decides the
+ * message — cancelled, out of time, or never reached. Every failure is described
+ * without the grant's URL, storage's error body or the runtime error that could
+ * carry either — which is why a failed request is caught here and classified
+ * OUTSIDE the `catch` rather than wrapped.
  */
 export async function putToStorage(
 	ctx: IExecuteFunctions,
@@ -1225,8 +1271,10 @@ export async function putToStorage(
 	itemIndex: number,
 ): Promise<void> {
 	const origin = storageOrigin(grant.url) ?? 'storage';
-	const signal = ctx.getExecutionCancelSignal();
+	const cancelSignal = ctx.getExecutionCancelSignal();
 	const limitMs = uploadTimeoutMs(file.bytes.length);
+	const deadline = AbortSignal.timeout(limitMs);
+	const linked = cancelSignal ? eitherSignal(cancelSignal, deadline) : undefined;
 
 	let response: IN8nHttpFullResponse | undefined;
 	let failure: unknown;
@@ -1240,16 +1288,17 @@ export async function putToStorage(
 			ignoreHttpStatusErrors: true,
 			disableFollowRedirect: true,
 			encoding: 'text',
-			timeout: limitMs,
-			abortSignal: signal,
+			abortSignal: linked?.signal ?? deadline,
 		})) as IN8nHttpFullResponse;
 	} catch (error) {
 		failure = error;
+	} finally {
+		linked?.unlink();
 	}
 
 	const subject = fileSubject(file);
 	if (response === undefined) {
-		if (signal?.aborted) {
+		if (cancelSignal?.aborted) {
 			throw new NodeOperationError(
 				ctx.getNode(),
 				`The upload of ${subject} was cancelled with the execution.`,
@@ -1261,7 +1310,7 @@ export async function putToStorage(
 		// `ETIMEDOUT`, …) with a generic sentence that names neither the file nor
 		// the storage host (`setDescriptiveErrorMessage` in n8n-workflow).
 		const description = `Network failure: ${describeNetworkFailure(failure)}.`;
-		const message = isTimeoutFailure(failure)
+		const message = deadline.aborted || isTimeoutFailure(failure)
 			? `The upload of ${subject} to storage did not finish within ${Math.round(limitMs / 1000)} s, so whether storage stored it is unknown. Retry the item: it uploads the file again under a new reference.`
 			: `The upload of ${subject} could not reach storage at ${origin}. A binary input goes to storage directly, not through the Pipelex API, so this n8n instance must be able to reach ${origin}.`;
 		throw new NodeOperationError(ctx.getNode(), message, { itemIndex, description });

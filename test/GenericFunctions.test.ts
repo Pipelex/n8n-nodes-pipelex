@@ -1,5 +1,5 @@
 import type { IBinaryData, IDataObject } from 'n8n-workflow';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
 	FORBIDDEN_MESSAGE,
@@ -13,7 +13,9 @@ import {
 	buildStartBody,
 	describeBinaryFile,
 	describeNetworkFailure,
+	eitherSignal,
 	idempotencyKey,
+	isTimeoutFailure,
 	mapResultResponse,
 	missingBinaryMessage,
 	parseStorageError,
@@ -961,6 +963,63 @@ describe('describeNetworkFailure (never the runtime message, which can hold the 
 		const error = Object.assign(new Error('x'), { code: 'https://bucket/?X-Amz-Signature=s' });
 		expect(describeNetworkFailure(error)).toBe('Error');
 		expect(describeNetworkFailure('not an error')).toBe('a non-Error rejection');
+	});
+});
+
+describe('isTimeoutFailure (out of time once storage could be receiving)', () => {
+	it("reads axios's own timeout codes as out of time", () => {
+		expect(isTimeoutFailure(Object.assign(new Error('timeout'), { code: 'ECONNABORTED' }))).toBe(true);
+		expect(isTimeoutFailure(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }))).toBe(true);
+	});
+
+	it('reads a connection that never opened as unreachable, wherever axios put the syscall', () => {
+		// A wrapper that lifts the cause's fields onto the error.
+		expect(isTimeoutFailure(Object.assign(new Error('x'), { code: 'ETIMEDOUT', syscall: 'connect' }))).toBe(false);
+		// axios itself (1.15 and 1.18) keeps them on the cause.
+		const cause = Object.assign(new Error('connect ETIMEDOUT'), { code: 'ETIMEDOUT', syscall: 'connect' });
+		expect(isTimeoutFailure(Object.assign(new Error('x'), { code: 'ETIMEDOUT', cause }))).toBe(false);
+	});
+
+	it('reads any other failure as not a timeout', () => {
+		expect(isTimeoutFailure(Object.assign(new Error('x'), { code: 'ENOTFOUND' }))).toBe(false);
+		expect(isTimeoutFailure(undefined)).toBe(false);
+	});
+});
+
+describe('eitherSignal (the PUT aborts on the cancel signal or its deadline)', () => {
+	afterEach(() => vi.restoreAllMocks());
+
+	it('aborts when either signal does', () => {
+		for (const which of [0, 1]) {
+			const controllers = [new AbortController(), new AbortController()];
+			const { signal } = eitherSignal(controllers[0].signal, controllers[1].signal);
+			expect(signal.aborted).toBe(false);
+			controllers[which].abort('why');
+			expect(signal.aborted).toBe(true);
+			expect(signal.reason).toBe('why');
+		}
+	});
+
+	it('links by hand on a Node without AbortSignal.any, and unlinks after the request', () => {
+		const original = (AbortSignal as { any?: unknown }).any;
+		(AbortSignal as { any?: unknown }).any = undefined;
+		try {
+			const cancel = new AbortController();
+			const deadline = new AbortController();
+			const removed = vi.spyOn(cancel.signal, 'removeEventListener');
+			const linked = eitherSignal(cancel.signal, deadline.signal);
+			deadline.abort('late');
+			expect(linked.signal.aborted).toBe(true);
+			expect(linked.signal.reason).toBe('late');
+			linked.unlink();
+			expect(removed).toHaveBeenCalledWith('abort', expect.any(Function));
+
+			const already = new AbortController();
+			already.abort('done');
+			expect(eitherSignal(already.signal, new AbortController().signal).signal.aborted).toBe(true);
+		} finally {
+			(AbortSignal as { any?: unknown }).any = original;
+		}
 	});
 });
 

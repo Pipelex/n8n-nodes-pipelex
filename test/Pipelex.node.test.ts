@@ -38,6 +38,10 @@ interface TestBinary {
 	mimeType: string;
 	fileName?: string;
 	fileExtension?: string;
+	/** The size n8n records when it stores a binary. */
+	bytes?: number;
+	/** Set on a binary n8n keeps outside memory; its size is then in `binaryMetadata`. */
+	id?: string;
 }
 
 interface ContextOptions {
@@ -46,11 +50,23 @@ interface ContextOptions {
 	httpImpl: HttpImpl;
 	continueOnFail?: boolean;
 	items?: Array<{ json: Record<string, unknown>; binary?: Record<string, TestBinary> }>;
+	executionId?: string;
+	cancelSignal?: AbortSignal;
+	/**
+	 * The workflow's binary mode. Under `combined`, n8n keeps a file in the item's
+	 * JSON and `assertBinaryData` resolves the field name as a path there.
+	 */
+	binaryMode?: 'separate' | 'combined';
+	/** `getBinaryMetadata` answers, by binary id. Without it the helper is absent. */
+	binaryMetadata?: Record<string, { fileSize: number }>;
+	/** Shared with `httpImpl` to record the order of loads and requests. */
+	log?: string[];
 }
 
 function makeContext(opts: ContextOptions): {
 	ctx: IExecuteFunctions;
 	httpFn: ReturnType<typeof vi.fn>;
+	bufferFn: ReturnType<typeof vi.fn>;
 } {
 	const params = opts.params ?? {};
 	const items = opts.items ?? [{ json: {} }];
@@ -61,10 +77,18 @@ function makeContext(opts: ContextOptions): {
 	// way the real one does when the field is missing, so a test that reaches it
 	// by mistake fails loudly rather than reading `undefined`.
 	const binaryOf = (itemIndex: number, propertyName: string): TestBinary => {
-		const binary = items[itemIndex]?.binary?.[propertyName];
+		const binary =
+			opts.binaryMode === 'combined'
+				? (items[itemIndex]?.json[propertyName] as TestBinary | undefined)
+				: items[itemIndex]?.binary?.[propertyName];
 		if (!binary) throw new Error(`no binary field "${propertyName}" on item ${itemIndex}`);
 		return binary;
 	};
+	const bufferFn = vi.fn(async (itemIndex: number, propertyName: string) => {
+		opts.log?.push(`load ${propertyName}`);
+		return Buffer.from(binaryOf(itemIndex, propertyName).data, 'base64');
+	});
+	const metadata = opts.binaryMetadata;
 
 	const ctx = {
 		getInputData: () => items,
@@ -73,20 +97,28 @@ function makeContext(opts: ContextOptions): {
 			if (name === 'operation') return opts.operation;
 			return name in params ? params[name] : fallback;
 		},
-		getExecutionId: () => 'exec-1',
-		getExecutionCancelSignal: () => undefined,
+		getExecutionId: () => opts.executionId ?? 'exec-1',
+		getExecutionCancelSignal: () => opts.cancelSignal,
 		continueOnFail: () => opts.continueOnFail ?? false,
 		getNode: () => ({ id: 'node-1', name: 'Pipelex', type: 'pipelex', typeVersion: 1 }),
 		helpers: {
 			httpRequest: httpFn,
 			assertBinaryData: (itemIndex: number, propertyName: string) =>
 				binaryOf(itemIndex, propertyName),
-			getBinaryDataBuffer: async (itemIndex: number, propertyName: string) =>
-				Buffer.from(binaryOf(itemIndex, propertyName).data, 'base64'),
+			getBinaryDataBuffer: bufferFn,
+			...(metadata
+				? {
+						getBinaryMetadata: async (binaryDataId: string) => {
+							const found = metadata[binaryDataId];
+							if (!found) throw new Error(`no metadata for ${binaryDataId}`);
+							return found;
+						},
+					}
+				: {}),
 		},
 	} as unknown as IExecuteFunctions;
 
-	return { ctx, httpFn };
+	return { ctx, httpFn, bufferFn };
 }
 
 function fullResponse(
@@ -1567,7 +1599,9 @@ describe('Pipelex node — binary inputs (an n8n file becomes a method input)', 
 		expect((putCall.body as Buffer).equals(PDF_BYTES)).toBe(true);
 		expect(putCall.disableFollowRedirect).toBe(true);
 		expect(putCall.json).toBeUndefined();
-		expect(putCall.timeout).toBe(61_000);
+		// The deadline is the node's own signal, not axios's socket-inactivity timer.
+		expect(putCall.timeout).toBeUndefined();
+		expect(putCall.abortSignal).toBeInstanceOf(AbortSignal);
 
 		// The reference replaces nothing: it joins the JSON inputs.
 		expect(startCall.body).toEqual({
@@ -1903,6 +1937,108 @@ describe('Pipelex node — binary inputs (an n8n file becomes a method input)', 
 		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(
 			/did not finish within 61 s, so whether storage stored it is unknown/,
 		);
+	});
+
+	/** Storage that never answers: the request settles only when its signal aborts, as axios does. */
+	const storageAwaitingAbort: HttpImpl = (options) =>
+		new Promise<never>((_resolve, reject) => {
+			const signal = options.abortSignal as AbortSignal;
+			const cancel = (): void => {
+				const failure = new Error('canceled') as Error & { code: string };
+				failure.name = 'CanceledError';
+				failure.code = 'ERR_CANCELED';
+				reject(failure);
+			};
+			if (signal.aborted) cancel();
+			else signal.addEventListener('abort', cancel, { once: true });
+		});
+
+	it("owns the PUT's deadline: its own timeout signal, sized by the file, ends a stalled upload", async () => {
+		// A stand-in for AbortSignal.timeout that the test fires itself, so the
+		// deadline is proven without waiting a minute.
+		const deadline = new AbortController();
+		const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => deadline.signal);
+		const cancel = new AbortController();
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			cancelSignal: cancel.signal,
+			httpImpl: hostedPlane({
+				storage: (options) => {
+					deadline.abort();
+					return storageAwaitingAbort(options);
+				},
+			}),
+		});
+
+		const error = await captureError(ctx);
+		expect(timeoutSpy).toHaveBeenCalledWith(61_000);
+		expect(error.message).toContain(
+			'The upload of "invoice.pdf" for input "document" to storage did not finish within 61 s, so whether storage stored it is unknown.',
+		);
+		// The execution was not cancelled: the deadline, not the user, ended it.
+		expect(cancel.signal.aborted).toBe(false);
+	});
+
+	it('says the upload was cancelled when the execution is, even with the deadline linked in', async () => {
+		const cancel = new AbortController();
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			cancelSignal: cancel.signal,
+			httpImpl: hostedPlane({
+				storage: (options) => {
+					cancel.abort();
+					return storageAwaitingAbort(options);
+				},
+			}),
+		});
+
+		const error = await captureError(ctx);
+		expect(error.message).toBe('The upload of "invoice.pdf" for input "document" was cancelled with the execution.');
+	});
+
+	it('reads a connect timeout as storage never reached, not as a file that may have been stored', async () => {
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hostedPlane({
+				storage: () => {
+					// What axios throws when the TCP connection never opens: the operating
+					// system's ETIMEDOUT, its `syscall` on the cause.
+					const cause = Object.assign(new Error('connect ETIMEDOUT 52.95.0.1:443'), {
+						code: 'ETIMEDOUT',
+						syscall: 'connect',
+					});
+					throw Object.assign(new Error('connect ETIMEDOUT 52.95.0.1:443'), {
+						name: 'AxiosError',
+						code: 'ETIMEDOUT',
+						cause,
+					});
+				},
+			}),
+		});
+
+		const error = await captureError(ctx);
+		expect(error.message).toContain(
+			`The upload of "invoice.pdf" for input "document" could not reach storage at ${STORAGE_ORIGIN}.`,
+		);
+		expect(error.description).toBe('Network failure: AxiosError ETIMEDOUT, caused by Error ETIMEDOUT.');
 	});
 
 	it('turns an upload failure into an error item under Continue On Fail', async () => {
