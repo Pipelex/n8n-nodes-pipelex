@@ -200,7 +200,7 @@ export function buildStartBody(params: BuildStartParams): HostedStartBody {
 
 /**
  * Reject a bundle entry path the runner would reject anyway, but locally and
- * item-scoped. Mirrors `_safe_relpath` in `pipelex-api/api/bundle.py`: no
+ * item-scoped. Mirrors `_safe_relpath` in pipelex's `api/pipelex_api/bundle.py`: no
  * absolute paths, no `..` traversal, no backslashes, no `:` (a Windows
  * drive/stream form). Returns a message, or `null` when the path is fine.
  */
