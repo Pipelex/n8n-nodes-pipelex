@@ -1,0 +1,58 @@
+docs/index.md
+  s_19015810651d9c::t_971e3bdc196e82 11,25,36
+nodes/Pipelex/UserAgent.ts
+  s_19015810651d9c::t_971e3bdc196e82 5-9
+README.md
+  s_19015810651d9c::t_971e3bdc196e82 34,55,112,140
+test/StoredUploads.test.ts
+  s_19015810651d9c::t_971e3bdc196e82 1-134
+nodes/Pipelex/Pipelex.node.ts
+  s_19015810651d9c::t_971e3bdc196e82 5,20-23,26,29-30,38-39,42,45-46,183-354,361,474,711-715,722-736,1068-1113
+  s_19015810651d9c::t_b30a35d8f3094a 1114
+docs/usage.md
+  s_19015810651d9c::t_971e3bdc196e82 20,24,41,124-178
+  s_19015810651d9c::t_102bc0b6d578b6 179-181
+nodes/Pipelex/GenericFunctions.ts
+  s_19015810651d9c::t_971e3bdc196e82 1-2,5,7,17,19-22,24,27-29,216,367-384,386-399,526-537,546,825-1475
+test/WireContract.test.ts
+  s_19015810651d9c::t_971e3bdc196e82 30,37-38,41,111-166
+  s_19015810651d9c::t_5b21ec21336e7a 167-168
+docs/examples.md
+  s_19015810651d9c::t_971e3bdc196e82 599
+.github/workflows/cla.yml
+  s_19015810651d9c::t_971e3bdc196e82 1-42
+mkdocs.yml
+  s_19015810651d9c::t_971e3bdc196e82 83
+CHANGELOG.md
+  s_19015810651d9c::t_7da368b32ba85f 8
+  s_19015810651d9c::t_971e3bdc196e82 5-7,13-17
+  s_19015810651d9c::t_7e3a4c2cb43c3e 18
+nodes/Pipelex/PipelexApiShapes.ts
+  s_19015810651d9c::t_971e3bdc196e82 2-5,34-42,64-74,270-396
+docs/plans/sdk-sync-20260817.md
+  s_19015810651d9c::t_971e3bdc196e82 3,17,19,180,184-189
+  s_19015810651d9c::t_1342c16a83768c 190
+test/GenericFunctions.test.ts
+  s_19015810651d9c::t_971e3bdc196e82 1-2,9,11-14,17-19,21,23-26,31-34,37-44,273-275,279-280,283-287,663-1128
+nodes/Pipelex/StoredUploads.ts
+  s_19015810651d9c::t_971e3bdc196e82 1-142
+test/Pipelex.node.test.ts
+  s_19015810651d9c::t_971e3bdc196e82 25,28,36-47,53-66,72,75,79-94,97,103-105,108-122,125,177,242,868,1291,1297,1301-1310,1376,1575-2436
+  s_19015810651d9c::t_5d72f331dc203f 2437
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "9e7c8aabfc31f8950a4d97ce93ad1e0a19928db5",
+  "prompts": {},
+  "sessions": {
+    "s_19015810651d9c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "f7c8fe5d-9da1-4ed6-80d4-812084259a9f",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "thomashebrard <thomas@pipelex.com>"
+    }
+  }
+}
