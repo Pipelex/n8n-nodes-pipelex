@@ -36,6 +36,7 @@ import {
 	mapResultResponse,
 	readUploadGrant,
 	requestUploadGrant,
+	RESULT_ARTIFACTS,
 	runSourceError,
 	storedFileInput,
 } from '../nodes/Pipelex/GenericFunctions';
@@ -175,6 +176,9 @@ describe('GET /v1/runs/{id}/results — the response contract this node reads', 
 			main_stuff: { answer: 42 },
 			working_memory: { root: {}, aliases: {} },
 			graph_spec: { nodes: [] },
+			pipe_io_contracts: { 'demo.p': {} },
+			input_form: { 'demo.p': {} },
+			output_form: { 'demo.p': {} },
 			tokens_usages: [{ pipe_code: 'p', cost: 0.0012 }],
 			usage_assembly_error: null,
 		};
@@ -184,12 +188,34 @@ describe('GET /v1/runs/{id}/results — the response contract this node reads', 
 		// Pinned so a sync has an explicit checklist of what we consume.
 		expect(Object.keys(body).sort()).toEqual([
 			'graph_spec',
+			'input_form',
 			'main_stuff',
+			'output_form',
+			'pipe_io_contracts',
 			'pipeline_run_id',
 			'tokens_usages',
 			'usage_assembly_error',
 			'working_memory',
 		]);
+	});
+
+	it('pins the ?artifacts= selection: every artifact the route serves except graph_spec', () => {
+		// The platform's (and `@pipelex/sdk`'s `RUN_RESULT_ARTIFACTS`) vocabulary,
+		// in its order. The node reads all of it but the run graph, which it never
+		// shows; `tokens_usages` brings `usage_assembly_error` with it. An unknown
+		// name here would be a 400 on every read, so the vocabulary is pinned too.
+		const routeArtifacts = [
+			'graph_spec',
+			'pipe_io_contracts',
+			'input_form',
+			'output_form',
+			'main_stuff',
+			'working_memory',
+			'tokens_usages',
+		];
+		expect([...RESULT_ARTIFACTS]).toEqual(routeArtifacts.filter((name) => name !== 'graph_spec'));
+		// `main_stuff` must stay selected: the completed-run invariant reads it.
+		expect(RESULT_ARTIFACTS).toContain('main_stuff');
 	});
 
 	it('pins the HTTP status → meaning mapping', () => {

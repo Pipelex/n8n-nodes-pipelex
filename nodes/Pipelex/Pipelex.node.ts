@@ -688,8 +688,11 @@ function runStillRunning(runId: string): IDataObject {
 
 /**
  * Strip the platform's heavy top-level `graph_spec` artifact from a run result
- * before it becomes an n8n item — n8n-only; the platform's results response
- * is unchanged. Also drops the legacy `done` flag (superseded by `status`).
+ * before it becomes an n8n item. The results read no longer asks for it
+ * (`RESULT_ARTIFACTS`), so a current platform never sends it; the strip stays
+ * for a platform that predates `?artifacts=`, which ignores the parameter and
+ * returns every artifact. Also drops the legacy `done` flag (superseded by
+ * `status`).
  * Top-level only by design: a `graph_spec`/`done` key nested inside the opaque
  * user output (`main_stuff`) is left untouched.
  */

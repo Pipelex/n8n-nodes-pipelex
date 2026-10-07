@@ -217,8 +217,9 @@ A completed run produces one item:
 | `working_memory` | every named value the run produced, not just the main output |
 | `tokens_usages` | one record per inference call — see below |
 | `usage_assembly_error` | non-null only when usage accounting itself failed |
+| `pipe_io_contracts`, `input_form`, `output_form` | the run's I/O descriptions from the MTHDS standard, keyed by pipe: each pipe's input and output contracts, and form descriptors for its inputs and its output. `null` for a run that did not write them |
 
-The heavy `graph_spec` visualization artifact is stripped from the n8n item (it only cluttered the item view); the API still returns it.
+The heavy `graph_spec` visualization artifact (the run graph) is not part of the item. The node does not even download it: its result reads ask the API for every artifact except `graph_spec` (`GET /v1/runs/{pipeline_run_id}/results?artifacts=…`), which keeps each poll light. A server that predates that parameter ignores it and sends the graph anyway, and the node then strips it, so the item is the same either way.
 
 A completed run **always** delivers a `main_stuff` — but not always the instant it turns COMPLETED. The run is marked complete as soon as it finishes, then its artifacts are written to storage, so a fetch landing in that window sees a complete run with no output yet. The node handles the two cases differently:
 
