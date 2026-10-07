@@ -27,14 +27,18 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import type { IExecuteFunctions } from 'n8n-workflow';
 import { describe, expect, it } from 'vitest';
 
 import {
 	abortableSleep,
 	buildStartBody,
 	mapResultResponse,
+	readUploadGrant,
+	requestUploadGrant,
 	RESULT_ARTIFACTS,
 	runSourceError,
+	storedFileInput,
 } from '../nodes/Pipelex/GenericFunctions';
 import type { HostedStartBody } from '../nodes/Pipelex/PipelexApiShapes';
 
@@ -101,6 +105,64 @@ describe('POST /v1/start — the exact body this node sends', () => {
 			files: { 'a.mthds': 'x' },
 		});
 		expect(body).not.toHaveProperty('pipeline_run_id');
+	});
+});
+
+describe('POST /v1/upload/grant — the request this node sends and the grant it reads', () => {
+	const GRANT = {
+		uri: 'pipelex-storage://orgs/o/assets/f.pdf',
+		url: 'https://bucket.s3.amazonaws.com/orgs/o/assets/f.pdf?X-Amz-Signature=x',
+		headers: { 'If-None-Match': '*' },
+		expires_at: '2026-09-28T12:05:00Z',
+		max_bytes: 52428800,
+	};
+
+	it('describes the file with exactly filename, content_type and size — never its bytes', async () => {
+		// The SDK's `UploadGrantInput`. The platform model forbids unknown fields, so
+		// an extra or misspelled key is a 422 on every binary input.
+		let sent: Record<string, unknown> | undefined;
+		const ctx = {
+			getNode: () => ({}),
+			helpers: {
+				httpRequest: async (options: { body: Record<string, unknown> }) => {
+					sent = options.body;
+					return { statusCode: 200, body: GRANT, headers: {} };
+				},
+			},
+		} as unknown as IExecuteFunctions;
+
+		await requestUploadGrant(
+			ctx,
+			{ baseUrl: 'https://api.test', authorization: 'Bearer t' },
+			{ inputName: 'document', bytes: Buffer.from('%PDF'), filename: 'f.pdf', contentType: 'application/pdf' },
+			0,
+		);
+		expect(Object.keys(sent ?? {}).sort()).toEqual(['content_type', 'filename', 'size']);
+	});
+
+	it('reads the grant by its pinned field names', () => {
+		// `uri` is what the run input carries, `url` + `headers` are the PUT. The
+		// rest is informational.
+		expect(Object.keys(readUploadGrant(GRANT) ?? {}).sort()).toEqual([
+			'expires_at',
+			'headers',
+			'max_bytes',
+			'uri',
+			'url',
+		]);
+		const { uri: _uri, ...withoutUri } = GRANT;
+		expect(readUploadGrant(withoutUri)).toBeUndefined();
+	});
+
+	it('fills a binary-fed input with exactly url, filename and mime_type', () => {
+		// Fields of the native Document and Image contents (`DocumentContent` /
+		// `ImageContent` in pipelex); a misspelled key would be dropped or refused
+		// by the runtime without the node noticing.
+		expect(Object.keys(storedFileInput('pipelex-storage://f.pdf', 'f.pdf', 'application/pdf')).sort()).toEqual([
+			'filename',
+			'mime_type',
+			'url',
+		]);
 	});
 });
 

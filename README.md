@@ -31,7 +31,7 @@ This is an [n8n](https://n8n.io/) community node that lets you execute [Pipelex]
 
 ## What is Pipelex?
 
-**[Pipelex](https://github.com/Pipelex/pipelex)** is an open-source runtime to **build and run AI methods**. A *method* is a reusable, typed AI procedure declared in a `.mthds` file and executed by Pipelex — each step is explicit, every output is structured, and every run is repeatable.
+**[Pipelex](https://github.com/Pipelex/pipelex)** is a source-available runtime to **build and run AI methods**. A *method* is a reusable, typed AI procedure declared in a `.mthds` file and executed by Pipelex — each step is explicit, every output is structured, and every run is repeatable.
 
 Compose "pipes" that route across 60+ models, return structured outputs, and orchestrate sequentially, in parallel, or conditionally — sharing methods with the community via [mthds.sh](https://mthds.sh).
 
@@ -52,7 +52,7 @@ This node runs your pipelines through the **hosted Pipelex API's durable run lif
 
 > 🔑 **On the hosted API (`api.pipelex.com`), run access is gated for now.** It is granted per **account**, not per key — there is no key scope to set. The credential **Test** only checks that your token is valid, so a key on an account without run access tests green and then returns a clear `403` when you actually run a pipeline. Join the [waitlist](https://go.pipelex.com/waitlist) to be notified when self-serve run access opens up.
 
-> ℹ️ **Hosted-only:** the run-lifecycle polling routes (`/v1/runs/*`) and the `Method ID` field are hosted-API extensions, not part of the bare MTHDS Protocol — a bare runner does not implement them. To use your own backend, point the Base URL at a server exposing the same hosted surface (`/v1/start`, `/v1/runs/{pipeline_run_id}/results`, `/v1/auth/verify`).
+> ℹ️ **Hosted-only:** the run-lifecycle polling routes (`/v1/runs/*`), the upload route behind **Binary Inputs** (`/v1/upload/grant`) and the `Method ID` field are hosted-API extensions, not part of the bare MTHDS Protocol — a bare runner does not implement them. To use your own backend, point the Base URL at a server exposing the same hosted surface (`/v1/start`, `/v1/runs/{pipeline_run_id}/results`, `/v1/auth/verify`, and `/v1/upload/grant` for binary inputs).
 
 > ℹ️ **Client identification:** every request to the API, the credential test included, carries `User-Agent: n8n-nodes-pipelex/<package version>`, following the Pipelex client-identification spec (`docs/specs/client-identification.md` in the Pipelex workspace). See the [usage guide](docs/usage.md#client-identification-user-agent).
 
@@ -109,6 +109,7 @@ The Pipelex node has one **Operation** selector with four operations, mirroring 
 | **MTHDS Bundles** | `mthds_contents` | Your method, pasted inline — one entry per bundle file. |
 | **Python Files** | `files` | Custom PipeFunc Python for the pasted method (`funcs/*.py`, `structures/*.py`, `requirements.txt`). Shipped together with the bundle as one method bundle; requires a sandbox-hosted runner. |
 | **Inputs** | `inputs` | JSON object whose keys match your pipeline's expected inputs. Defaults to `{}`. |
+| **Binary Inputs** | `inputs` | Rows of **Input Name** + **Input Binary Field** (default `data`): each fills a `Document` or `Image` input with a file from the incoming item, such as a Gmail attachment (`attachment_0`) or a Drive download. The node uploads the file to Pipelex storage and passes its `pipelex-storage://` reference, with the file name and MIME type. An input set here must not also be set in Inputs. See the [usage guide](docs/usage.md#files-from-earlier-nodes-binary-inputs). |
 | **Pipe Code** | `pipe_code` | Which pipe to run. Empty = the method's `main_pipe`. |
 | **Output Name** | `output_name` | Optional name of the output variable. |
 | **Output Multiplicity** | `output_multiplicity` | Optional output multiplicity. |
@@ -136,7 +137,7 @@ The Pipelex node has one **Operation** selector with four operations, mirroring 
    - **Poll & Get Result** — wait for an already-started run by `pipeline_run_id` until it finishes (or Max Wait)
    - **Get Run Result** — a one-shot, non-blocking fetch by `pipeline_run_id` (returns `status: "RUNNING"` while still running)
 4. **Name the method:** a stored `Method ID`, or turn on `Define Method Inline` and paste it into `MTHDS Bundles`
-5. **Set Inputs** as a JSON object matching your pipeline's expected inputs
+5. **Set Inputs** as a JSON object matching your pipeline's expected inputs, and map any file input (a mail attachment, a Drive download) to its binary field under **Binary Inputs**
 6. **Run** the workflow
 
 Long-running pipelines: **Max Wait** (default 300s) caps how long the polling operations block the n8n execution. If a run outlives it, the node returns the `pipeline_run_id` with a "still running" message — feed that id to **Get Run Result** later (e.g. on a schedule) or to **Poll & Get Result** to keep waiting. Or skip the first wait entirely: **Start Pipeline** now, collect later. Learn more about the output format [here](https://docs.pipelex.com/pages/api/).

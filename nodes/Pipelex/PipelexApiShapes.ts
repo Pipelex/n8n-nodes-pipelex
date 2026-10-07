@@ -1,6 +1,8 @@
 /**
- * REPLICATED Pipelex hosted-API wire shapes — hand-copied from `pipelex-sdk-js`
- * v0.10.0. **This file must never import `@pipelex/sdk`, and the SDK must never
+ * REPLICATED Pipelex hosted-API wire shapes — the run-lifecycle shapes
+ * hand-copied from `pipelex-sdk-js` v0.10.0, the upload shapes (the section
+ * "Binary inputs: the upload grant" at the end) from `pipelex-sdk-js` v0.26.0.
+ * **This file must never import `@pipelex/sdk`, and the SDK must never
  * be a dependency of this package — not runtime, not dev.** n8n community nodes
  * ship with zero dependencies (`@n8n/scan-community-package` rejects any
  * `dependencies` entry), so the minimal wire shapes of the hosted Pipelex API
@@ -29,6 +31,15 @@
  *    - `mthds/protocol` (`options.ts`, `models.ts`) → the `RunRequest` /
  *      `StartRequest` field set, `RunResultStart`, and the run-source
  *      exclusivity rules replicated in `GenericFunctions.runSourceError`
+ *    - `pipelex-sdk-js/src/product-models.ts` → `UploadGrantRequest` /
+ *      `UploadGrant` (the SDK's `UploadGrantInput` / `UploadGrant`)
+ *    - `pipelex-sdk-js/src/upload-grant.ts` → the storage `PUT` and its error
+ *      mapping, adapted in `GenericFunctions.putToStorage` /
+ *      `GenericFunctions.storageRefusalMessage`, and the default time limit in
+ *      `uploadTimeoutMs`
+ *    - `pipelex-sdk-js/src/upload.ts` → `guessContentType` (the extension table)
+ *      and the grant route's own refusals, adapted in
+ *      `GenericFunctions.requestUploadGrant`
  * 3. Port the changes, **bump the version stamped in the first paragraph**, and
  *    update the pins in `test/WireContract.test.ts` (they fail on purpose when a
  *    wire field name or status mapping changes, so the edit is never silent).
@@ -50,6 +61,17 @@
  * | on ceiling exceeded | throws `RunTimeoutError` | returns a "still running" ITEM carrying the run id |
  * | sustained 503 | no ceiling | bounded by `MAX_CONSECUTIVE_DEGRADED` |
  * | `/v1/version` handshake | gates the lifecycle, throws `RunLifecycleUnavailableError` | skipped; folded into `NOT_FOUND_MESSAGE` |
+ * | upload route for a caller holding key and bytes | `uploadFile`: base64 JSON to `POST /v1/upload` | the grant: `POST /v1/upload/grant`, then the raw bytes `PUT` to storage |
+ * | a storage failure that may have written the object | retry with the same grant (the caller's choice) | never: each attempt asks a new grant |
+ * | cancelling an upload | the caller's `signal` | the n8n execution's cancel signal |
+ *
+ * Why the grant rather than `uploadFile`'s base64 body: the API gateway's
+ * request quota caps a base64 `POST /v1/upload` near 7.5 MiB, while a file sent
+ * with a grant crosses neither the gateway nor the platform, so the service's
+ * own limit (`MAX_UPLOAD_MIB` on the platform, reported as `max_bytes`) is the
+ * only cap. A file
+ * arriving from a mail or drive trigger routinely exceeds the smaller one. The
+ * stored object is the one `/v1/upload` would have written.
  */
 
 import type { IDataObject } from 'n8n-workflow';
@@ -244,4 +266,131 @@ export function parseRetryAfter(headers: IDataObject): number | undefined {
 	if (raw === undefined || raw === null) return undefined;
 	const seconds = Number(raw);
 	return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined;
+}
+
+// ── Binary inputs: the upload grant ─────────────────────────────────────────
+// Replicated from `pipelex-sdk-js` v0.26.0 (`src/product-models.ts`,
+// `src/upload-grant.ts`, `src/upload.ts`), checked against the platform route
+// (`pipelex-server/platform/src/pipelex_platform/routers/v1/storage.py`).
+
+/** The scheme of a reference to a file in Pipelex storage. */
+export const PIPELEX_STORAGE_SCHEME = 'pipelex-storage://';
+
+/**
+ * Body of `POST /v1/upload/grant` — the SDK's `UploadGrantInput`. The file is
+ * described, never sent: its bytes go straight to storage with the grant.
+ *
+ * `content_type` is signed into the grant, so the `PUT` must carry exactly it;
+ * the platform accepts printable ASCII only (a header has to carry it). `size`
+ * is the exact byte count, and the grant accepts a body of that size and no
+ * other; a size over the service's limit is a `413` and nothing is signed.
+ */
+export interface UploadGrantRequest {
+	/** The original filename with its extension; the stored object keeps the extension. */
+	filename: string;
+	content_type?: string | null;
+	size: number;
+}
+
+/**
+ * Answer of `POST /v1/upload/grant` — the SDK's `UploadGrant`: a presigned,
+ * create-only `PUT` for one new object in the caller's organization.
+ *
+ * **A bearer capability until `expires_at`**: whoever holds it can write that
+ * one object, once. The node never logs it and never lets `url` into an error
+ * message or an error body.
+ */
+export interface UploadGrant {
+	/** The `pipelex-storage://` reference — it names nothing until the `PUT` has succeeded. */
+	uri: string;
+	/** Where to `PUT` the file, as the raw request body. */
+	url: string;
+	/**
+	 * The signed headers, sent unchanged: `If-None-Match: *`, the `Content-Type`
+	 * when one was declared, and the provenance `x-amz-meta-*` values.
+	 * `Content-Length` is signed too but not listed — the body sets it.
+	 */
+	headers: Record<string, string>;
+	/** ISO-8601 UTC instant after which storage refuses the `PUT`. */
+	expires_at: string;
+	/** The largest file any grant allows, in bytes (the service's upload cap). */
+	max_bytes: number;
+}
+
+/**
+ * The value a binary-fed input takes in the `POST /v1/start` inputs: the
+ * canonical content of a `Document` or an `Image` (and of any concept refining
+ * them), in the compact form the SDK's `prepareInputs` writes — no
+ * `{ concept, content }` envelope, so the method's declared concept rules.
+ *
+ * `url` is the storage reference. `filename` and `mime_type` are declared fields
+ * of both native contents and carry what n8n knew about the file; `mime_type`
+ * is left out when the type is unknown, so the runtime is never told a PDF is
+ * `application/octet-stream`.
+ */
+export interface StoredFileInput {
+	url: string;
+	filename: string;
+	mime_type?: string;
+}
+
+/**
+ * The largest file the hosted API stores, in bytes: `MAX_UPLOAD_MIB` (50) on the
+ * platform, which a grant reports as `max_bytes` and enforces with a `413`. The
+ * node checks it from n8n's metadata before it loads a file, so a file it would
+ * only see refused is never read into memory. Moving the platform's limit means
+ * moving this one too.
+ */
+export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
+
+/** The type the SDK falls back to when neither n8n nor the extension says one. */
+export const DEFAULT_CONTENT_TYPE = 'application/octet-stream';
+
+/** The SDK's extension → MIME table (`upload.ts`), for a file n8n typed as unknown. */
+const EXTENSION_MIME: Record<string, string> = {
+	png: 'image/png',
+	jpg: 'image/jpeg',
+	jpeg: 'image/jpeg',
+	gif: 'image/gif',
+	webp: 'image/webp',
+	svg: 'image/svg+xml',
+	bmp: 'image/bmp',
+	tif: 'image/tiff',
+	tiff: 'image/tiff',
+	heic: 'image/heic',
+	pdf: 'application/pdf',
+	txt: 'text/plain',
+	csv: 'text/csv',
+	json: 'application/json',
+};
+
+/** MIME guess from a filename extension; `application/octet-stream` when unknown. The SDK's `guessContentType`. */
+export function guessContentType(filename: string): string {
+	const dot = filename.lastIndexOf('.');
+	if (dot < 0 || dot === filename.length - 1) return DEFAULT_CONTENT_TYPE;
+	const extension = filename.slice(dot + 1).toLowerCase();
+	return EXTENSION_MIME[extension] ?? DEFAULT_CONTENT_TYPE;
+}
+
+/**
+ * The extension the table above gives a MIME type, or `undefined` when it has
+ * none — the reverse of {@link guessContentType}, node-only, for a file whose
+ * name carries no extension. The first extension listed for a type wins
+ * (`image/jpeg` → `jpg`), and parameters after a `;` are ignored.
+ */
+export function extensionForContentType(contentType: string): string | undefined {
+	const essence = contentType.split(';')[0].trim().toLowerCase();
+	if (!essence || essence === DEFAULT_CONTENT_TYPE) return undefined;
+	return Object.keys(EXTENSION_MIME).find((extension) => EXTENSION_MIME[extension] === essence);
+}
+
+/**
+ * The default time limit on the storage `PUT`, in milliseconds — the SDK's
+ * `uploadWithGrant` default: a minute to open the exchange and hear back, plus a
+ * second for every started 128 KiB of the file (about 1 Mbit/s), capped at the
+ * longest delay a timer honours.
+ */
+export function uploadTimeoutMs(size: number): number {
+	const seconds = Math.ceil(size / (128 * 1024));
+	return Math.min(60_000 + seconds * 1_000, 2_147_483_647);
 }
