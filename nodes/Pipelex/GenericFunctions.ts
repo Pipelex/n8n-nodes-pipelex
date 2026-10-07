@@ -1,6 +1,10 @@
+import { createHash } from 'crypto';
+
 import {
 	NodeApiError,
+	NodeOperationError,
 	sleep,
+	type IBinaryData,
 	type ICredentialDataDecryptedObject,
 	type IDataObject,
 	type IExecuteFunctions,
@@ -10,10 +14,19 @@ import {
 } from 'n8n-workflow';
 
 import {
+	DEFAULT_CONTENT_TYPE,
 	DEFAULT_DEGRADED_RETRY_SECONDS,
+	MAX_UPLOAD_BYTES,
+	PIPELEX_STORAGE_SCHEME,
+	extensionForContentType,
+	guessContentType,
 	parseRetryAfter,
+	uploadTimeoutMs,
 	type HostedStartBody,
 	type StartAck,
+	type StoredFileInput,
+	type UploadGrant,
+	type UploadGrantRequest,
 } from './PipelexApiShapes';
 import { USER_AGENT } from './UserAgent';
 
@@ -200,7 +213,7 @@ export function buildStartBody(params: BuildStartParams): HostedStartBody {
 
 /**
  * Reject a bundle entry path the runner would reject anyway, but locally and
- * item-scoped. Mirrors `_safe_relpath` in `pipelex-api/api/bundle.py`: no
+ * item-scoped. Mirrors `_safe_relpath` in pipelex's `api/pipelex_api/bundle.py`: no
  * absolute paths, no `..` traversal, no backslashes, no `:` (a Windows
  * drive/stream form). Returns a message, or `null` when the path is fine.
  */
@@ -351,9 +364,39 @@ export function runSourceError(body: HostedStartBody): string | null {
  * the second (wrong `pipeline_run_id`, second pipeline never starts). `nodeId`
  * is unique per node within a workflow and stable across a retry of the same
  * execution, so it keeps replays correct without causing cross-node collisions.
+ *
+ * It is scoped by n8n's run index too: a node inside a loop (Loop Over Items, a
+ * back-edge) runs once per pass in the same execution, each pass numbering its
+ * items from 0 again, so without it a later pass replayed the first pass's run,
+ * or drew a `409` when its inputs differed. A "Retry On Fail" attempt keeps the
+ * run index (`workflow-execute.ts` computes it once, before its retry loop), so
+ * retries still replay.
+ *
+ * **Binary inputs extend the rule.** When the body carries uploaded files, the
+ * key also covers their references (`storedFiles`, one `input=reference` entry
+ * each). A retry in the same execution reuses the references the first attempt
+ * stored (`StoredUploads.ts`), so its key is the same and the platform replays
+ * the first run. When a retry has to upload afresh instead — the file changed,
+ * or this process no longer remembers the first upload — its references, and so
+ * its body, differ, and the platform refuses a reused key whose body differs
+ * with a `409` ("already used with a different request body",
+ * `middleware/idempotency.py`). Folding the references into the key turns that
+ * case into a new run rather than a failed item.
  */
-export function idempotencyKey(executionId: string, nodeId: string, itemIndex: number): string {
-	return `${executionId}:${nodeId}:${itemIndex}`;
+export function idempotencyKey(
+	executionId: string,
+	nodeId: string,
+	runIndex: number,
+	itemIndex: number,
+	storedFiles: string[] = [],
+): string {
+	const key = `${executionId}:${nodeId}:${runIndex}:${itemIndex}`;
+	if (storedFiles.length === 0) return key;
+	const digest = createHash('sha256')
+		.update([...storedFiles].sort().join('\n'))
+		.digest('hex')
+		.slice(0, 32);
+	return `${key}:files-${digest}`;
 }
 
 /** Outcome of mapping a `GET /v1/runs/{pipeline_run_id}/results` response. The
@@ -402,8 +445,10 @@ function extractProblemDetail(body: IDataObject): string | undefined {
  *
  * Mirrors `@pipelex/sdk` `client.ts` `getRunResult` (the SDK that owns this
  * lifecycle), verified against `pipelex-platform/.../routers/v1/runs.py`:
- *   200 → completed (body has main_stuff + graph_spec + working_memory +
- *         tokens_usages) — UNLESS `main_stuff` is absent, which breaks the
+ *   200 → completed (body has the artifacts `requestResult` selected —
+ *         main_stuff, working_memory, tokens_usages, the I/O artifacts; a
+ *         platform predating `?artifacts=` adds graph_spec) — UNLESS
+ *         `main_stuff` is absent or null, which breaks the
  *         completed-run invariant and maps to `missingMainStuff` (the SDK's
  *         `MissingMainStuffError`)
  *   202 → running (+ `Retry-After`, default 5s when absent); the server signals
@@ -478,6 +523,18 @@ export async function requestStart(
 	idempotency: string,
 	itemIndex: number,
 ): Promise<StartAck> {
+	// A cancelled execution starts no run: checked here, the last moment before
+	// the request, because what came before it (a file upload above all) can
+	// finish successfully while the execution is being cancelled. The signal also
+	// rides the request, so a cancel during the exchange ends it.
+	const cancelSignal = ctx.getExecutionCancelSignal();
+	if (cancelSignal?.aborted) {
+		throw new NodeOperationError(
+			ctx.getNode(),
+			'The execution was cancelled before the run was started, so no run was started.',
+			{ itemIndex },
+		);
+	}
 	const response = (await ctx.helpers.httpRequest({
 		method: 'POST' as IHttpRequestMethods,
 		url: `${conn.baseUrl}/v1/start`,
@@ -486,6 +543,7 @@ export async function requestStart(
 		json: true,
 		returnFullResponse: true,
 		ignoreHttpStatusErrors: true,
+		abortSignal: cancelSignal,
 	})) as IN8nHttpFullResponse;
 
 	const responseBody = (response.body ?? {}) as IDataObject;
@@ -721,8 +779,34 @@ export function runFailureData(runBody: IDataObject): string | undefined {
 }
 
 /**
- * `GET /v1/runs/{pipeline_run_id}/results`. Returns the full response
- * (status + headers + body) so the caller maps it via `mapResultResponse`.
+ * The result artifacts this node reads — every artifact the results route
+ * serves EXCEPT `graph_spec`, sent as `?artifacts=` so the platform neither
+ * reads, re-signs nor transfers the run graph, by far the heaviest artifact
+ * (hundreds of KB on an ordinary run), which this node never shows: every field
+ * a completed-run item carried before still arrives, so the item is unchanged.
+ * `tokens_usages` brings `usage_assembly_error` with it.
+ *
+ * Mirrors `@pipelex/sdk`'s `RUN_RESULT_ARTIFACTS` (v0.28.0) minus `graph_spec`.
+ * A platform that predates the parameter ignores it and returns everything, so
+ * `sanitizeResult` in the node still strips `graph_spec` from the item.
+ * Literal names from a closed vocabulary: no escaping needed, and the commas
+ * stay literal, exactly as the SDK sends them.
+ */
+export const RESULT_ARTIFACTS = [
+	'pipe_io_contracts',
+	'input_form',
+	'output_form',
+	'main_stuff',
+	'working_memory',
+	'tokens_usages',
+] as const;
+
+/**
+ * `GET /v1/runs/{pipeline_run_id}/results?artifacts=…` (see `RESULT_ARTIFACTS`).
+ * Returns the full response (status + headers + body) so the caller maps it via
+ * `mapResultResponse`. `main_stuff` is always in the selection, so the
+ * completed-run invariant `mapResultResponse` enforces still holds: a selected
+ * artifact the run has not written yet arrives as `null`, never absent.
  */
 export async function requestResult(
 	ctx: IExecuteFunctions,
@@ -731,10 +815,661 @@ export async function requestResult(
 ): Promise<IN8nHttpFullResponse> {
 	return (await ctx.helpers.httpRequest({
 		method: 'GET' as IHttpRequestMethods,
-		url: `${conn.baseUrl}/v1/runs/${encodeURIComponent(runId)}/results`,
+		url: `${conn.baseUrl}/v1/runs/${encodeURIComponent(runId)}/results?artifacts=${RESULT_ARTIFACTS.join(',')}`,
 		headers: apiHeaders(conn),
 		json: true,
 		returnFullResponse: true,
 		ignoreHttpStatusErrors: true,
 	})) as IN8nHttpFullResponse;
+}
+
+// ── Binary inputs: an n8n file becomes a method input ───────────────────────
+//
+// Files move through n8n as binary data on the item. A method input whose
+// concept is a Document or an Image takes a file reference, so the node stores
+// each mapped binary in Pipelex storage and puts the returned
+// `pipelex-storage://` reference into the start body's inputs.
+//
+// The upload is the SDK's upload grant (`requestUploadGrant` + `uploadWithGrant`
+// in `pipelex-sdk-js`), replicated: `POST /v1/upload/grant` describes the file,
+// then the raw bytes go to storage in one `PUT` with the grant's signed headers.
+// Why the grant rather than the SDK's base64 `uploadFile` is in the header of
+// `PipelexApiShapes.ts`. Everything here runs before `POST /v1/start`, so a
+// failed upload fails the item with no run created.
+
+/** One row of the `Binary Inputs` collection: a method input and the n8n binary field that fills it. */
+export interface BinaryInputMapping {
+	inputName: string;
+	binaryPropertyName: string;
+}
+
+/** The binary field n8n names a single file by default, and the row's prefilled value. */
+export const DEFAULT_BINARY_PROPERTY = 'data';
+
+/** A string, a number or a boolean as trimmed text; anything else as empty. */
+function scalarText(value: unknown): string {
+	if (typeof value === 'string') return value.trim();
+	if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+	return '';
+}
+
+/**
+ * Read the `Binary Inputs` fixedCollection (`{ input: [{ name, binaryPropertyName }] }`)
+ * into mappings. Pure — the node turns the returned error into an item-scoped one.
+ *
+ * - A row with a blank input name is dropped: the editor persists a row as soon
+ *   as its add button is clicked, with the binary field prefilled, so a blank
+ *   name is an unused row.
+ * - An input named twice is refused. One input takes one file, and keeping the
+ *   last row would silently drop a file the author mapped.
+ * - A binary field left out of the stored row falls back to `data` (n8n may
+ *   store a row without its default values); one explicitly cleared is refused,
+ *   since guessing which field the author meant would upload the wrong file.
+ */
+export function readBinaryInputMappings(raw: unknown): {
+	mappings: BinaryInputMapping[];
+	error?: string;
+} {
+	const rows = (raw as { input?: unknown } | undefined)?.input;
+	const mappings: BinaryInputMapping[] = [];
+	if (!Array.isArray(rows)) return { mappings };
+	const seen = new Set<string>();
+	for (const row of rows) {
+		const { name, binaryPropertyName } = (row ?? {}) as {
+			name?: unknown;
+			binaryPropertyName?: unknown;
+		};
+		const inputName = scalarText(name);
+		if (!inputName) continue;
+		if (seen.has(inputName)) {
+			return {
+				mappings,
+				error: `Binary input "${inputName}" is listed more than once — each method input takes one file. Remove the duplicate row.`,
+			};
+		}
+		seen.add(inputName);
+		const property =
+			binaryPropertyName === undefined ? DEFAULT_BINARY_PROPERTY : scalarText(binaryPropertyName);
+		if (!property) {
+			return {
+				mappings,
+				error: `Binary input "${inputName}" names no binary field. Set "Input Binary Field" to the field that holds the file (n8n's default is "${DEFAULT_BINARY_PROPERTY}").`,
+			};
+		}
+		mappings.push({ inputName, binaryPropertyName: property });
+	}
+	return { mappings };
+}
+
+/**
+ * The precedence rule between the two ways to give an input: there is none.
+ * An input set both in the JSON `Inputs` and in `Binary Inputs` is refused,
+ * because either winner would silently discard a value the author typed — the
+ * same "refuse rather than guess" rule the node applies to a Method ID beside
+ * an inline method. Returns the message, or `null` when the two are disjoint.
+ */
+export function binaryInputConflictError(
+	mappings: BinaryInputMapping[],
+	inputs: Record<string, unknown>,
+): string | null {
+	const clash = mappings.find((mapping) =>
+		Object.prototype.hasOwnProperty.call(inputs, mapping.inputName),
+	);
+	if (!clash) return null;
+	return `Input "${clash.inputName}" is set twice: in Inputs and in Binary Inputs. Remove it from one of them — the node does not guess which value you meant.`;
+}
+
+/**
+ * The message for a mapped binary field the item does not carry, naming the
+ * fields it does carry — a Gmail trigger names attachments `attachment_0`,
+ * `attachment_1`, …, so "no field data" alone sends the author hunting.
+ */
+export function missingBinaryMessage(mapping: BinaryInputMapping, available: string[]): string {
+	const lead = `Binary input "${mapping.inputName}" reads the binary field "${mapping.binaryPropertyName}", but this item has no such field.`;
+	return available.length > 0
+		? `${lead} Its binary fields are: ${available.join(', ')}.`
+		: `${lead} It carries no binary data at all — check that the node before this one outputs a file.`;
+}
+
+/** n8n's own test for a binary value (`isBinaryValue`), owned here: it is not in every n8n-workflow the node runs on. */
+function isBinaryShaped(value: unknown): boolean {
+	return (
+		value !== null &&
+		typeof value === 'object' &&
+		!Array.isArray(value) &&
+		'mimeType' in value &&
+		('data' in value || 'id' in value)
+	);
+}
+
+/**
+ * The binary fields an item carries, for {@link missingBinaryMessage}. A workflow
+ * whose binary mode is `separate` (the default) keeps files under `item.binary`;
+ * one whose mode is `combined` keeps them in the item's JSON, where n8n's
+ * `assertBinaryData` looks the field up as a path. Both places are listed, the
+ * JSON side at its top level, so the message names what the item really holds
+ * whichever mode the workflow runs in.
+ */
+export function binaryFieldNames(
+	item: { json?: unknown; binary?: Record<string, unknown> } | undefined,
+): string[] {
+	const names = Object.keys(item?.binary ?? {});
+	const json = item?.json;
+	if (json !== null && typeof json === 'object' && !Array.isArray(json)) {
+		for (const [key, value] of Object.entries(json as Record<string, unknown>)) {
+			if (isBinaryShaped(value) && !names.includes(key)) names.push(key);
+		}
+	}
+	return names;
+}
+
+/**
+ * How many bytes n8n says a binary holds, read from its metadata without loading
+ * the file: the `bytes` n8n records when it stores a binary, else the metadata
+ * of a binary kept outside memory (`id`, through `getBinaryMetadata`), else the
+ * length of the base64 `data` of one kept in memory. `undefined` when none of
+ * them answers; the loaded file is then measured instead.
+ */
+export async function binaryByteSize(
+	binaryData: IBinaryData,
+	getMetadata: ((binaryDataId: string) => Promise<{ fileSize: number }>) | undefined,
+): Promise<number | undefined> {
+	const isSize = (value: unknown): value is number =>
+		typeof value === 'number' && Number.isFinite(value) && value >= 0;
+	if (isSize(binaryData.bytes)) return binaryData.bytes;
+	if (typeof binaryData.id === 'string' && binaryData.id.length > 0) {
+		if (!getMetadata) return undefined;
+		try {
+			const { fileSize } = await getMetadata(binaryData.id);
+			return isSize(fileSize) ? fileSize : undefined;
+		} catch {
+			return undefined;
+		}
+	}
+	return typeof binaryData.data === 'string' ? Buffer.byteLength(binaryData.data, 'base64') : undefined;
+}
+
+/**
+ * The refusal for a file of `size` bytes, or `null` when the size is one the
+ * node sends: an empty file gives the method nothing, and one over
+ * {@link MAX_UPLOAD_BYTES} would only be refused by the upload grant.
+ */
+export function binarySizeError(
+	subject: { inputName: string; binaryPropertyName: string; filename: string },
+	size: number,
+): string | null {
+	const where = `The file "${subject.filename}" in binary field "${subject.binaryPropertyName}" for input "${subject.inputName}"`;
+	if (size === 0) {
+		return `${where} is empty (0 bytes), so there is nothing to give the method. Check the node that produced it.`;
+	}
+	if (size > MAX_UPLOAD_BYTES) {
+		return `${where} is ${size} bytes, over the ${MAX_UPLOAD_BYTES / (1024 * 1024)} MiB Pipelex accepts for one file, so it was not uploaded. Pass a smaller file.`;
+	}
+	return null;
+}
+
+/** Whether a file name ends in an extension: a dot that neither starts nor ends it (`.env` has none). */
+function hasExtension(filename: string): boolean {
+	const dot = filename.lastIndexOf('.');
+	return dot > 0 && dot < filename.length - 1;
+}
+
+/**
+ * The file name and MIME type to store a binary under, from what n8n carries.
+ *
+ * The stored object keeps the extension of the name, so a name without one is
+ * given n8n's `fileExtension`, or failing that the extension of n8n's MIME type
+ * (`application/pdf` → `.pdf`): a Drive export named `Invoice` with
+ * `fileExtension: "pdf"` is stored as `Invoice.pdf`, not as an extensionless
+ * object. Nameless bytes are named as the SDK's `uploadFile` names them
+ * (`upload.<extension>`, else `upload.bin`).
+ *
+ * The type is n8n's `mimeType` unless that is empty or the generic
+ * `application/octet-stream`, in which case the extension is asked — the SDK's
+ * `asset.type || guessContentType(filename)`, where an unknown n8n type plays
+ * the part of a browser's empty `File.type`. The extension asked is the one the
+ * name ends up with, so `fileExtension` counts there too.
+ */
+export function describeBinaryFile(binaryData: IBinaryData): {
+	filename: string;
+	contentType: string;
+} {
+	const declared = scalarText(binaryData.mimeType);
+	const knownType = declared && declared.toLowerCase() !== DEFAULT_CONTENT_TYPE ? declared : '';
+	const extension =
+		scalarText(binaryData.fileExtension).replace(/^\./, '') ||
+		(knownType ? (extensionForContentType(knownType) ?? '') : '');
+	const name = scalarText(binaryData.fileName);
+	let filename: string;
+	if (!name) filename = extension ? `upload.${extension}` : 'upload.bin';
+	else filename = !hasExtension(name) && extension ? `${name}.${extension}` : name;
+	return { filename, contentType: knownType || guessContentType(filename) };
+}
+
+/** The input value for a stored file — see {@link StoredFileInput}. */
+export function storedFileInput(
+	uri: string,
+	filename: string,
+	contentType: string,
+): StoredFileInput {
+	const value: StoredFileInput = { url: uri, filename };
+	if (contentType !== DEFAULT_CONTENT_TYPE) value.mime_type = contentType;
+	return value;
+}
+
+/** The `input=reference` entries {@link idempotencyKey} folds in, one per stored file. */
+export function storedFileReferences(stored: Record<string, StoredFileInput>): string[] {
+	return Object.entries(stored).map(([inputName, value]) => `${inputName}=${value.url}`);
+}
+
+/** A binary loaded off the item, ready to upload. */
+export interface BinaryFile {
+	inputName: string;
+	bytes: Buffer;
+	filename: string;
+	contentType: string;
+}
+
+/** How a file is named in upload messages: its name, and the input it fills. */
+function fileSubject(file: { inputName: string; filename: string }): string {
+	return `"${file.filename}" for input "${file.inputName}"`;
+}
+
+export const UPLOAD_UNAVAILABLE_MESSAGE =
+	'The credential\'s Base URL offers no file upload (it has no /v1/upload/grant route), so a binary input cannot be stored. Point the Base URL at the hosted Pipelex API, or pass the file as an http(s) URL in Inputs instead.';
+
+/**
+ * Read the answer of `POST /v1/upload/grant` into an {@link UploadGrant}, or
+ * `undefined` when it is not one. The `url` must be an absolute `http(s)` URL
+ * with no user info — the SDK's `storageTarget` rule: a relative URL would be
+ * resolved against something else, and user info would ride into an error.
+ */
+export function readUploadGrant(body: unknown): UploadGrant | undefined {
+	if (body === null || typeof body !== 'object' || Array.isArray(body)) return undefined;
+	const { uri, url, headers, expires_at: expiresAt, max_bytes: maxBytes } = body as Record<
+		string,
+		unknown
+	>;
+	if (typeof uri !== 'string' || !uri.startsWith(PIPELEX_STORAGE_SCHEME)) return undefined;
+	if (typeof url !== 'string' || storageOrigin(url) === undefined) return undefined;
+	if (headers === null || typeof headers !== 'object' || Array.isArray(headers)) return undefined;
+	const signed: Record<string, string> = {};
+	for (const [name, value] of Object.entries(headers as Record<string, unknown>)) {
+		if (typeof value !== 'string') return undefined;
+		signed[name] = value;
+	}
+	return {
+		uri,
+		url,
+		headers: signed,
+		expires_at: typeof expiresAt === 'string' ? expiresAt : '',
+		max_bytes: typeof maxBytes === 'number' ? maxBytes : 0,
+	};
+}
+
+/** The origin of a grant URL, or `undefined` when it is not one the node will send a file to. */
+function storageOrigin(url: string): string | undefined {
+	let target: URL;
+	try {
+		target = new URL(url);
+	} catch {
+		return undefined;
+	}
+	if (target.protocol !== 'https:' && target.protocol !== 'http:') return undefined;
+	if (target.username !== '' || target.password !== '') return undefined;
+	return target.origin;
+}
+
+/**
+ * The message for a refused `POST /v1/upload/grant`, after the SDK's
+ * `mapUploadError`: a `413` is a file over the service's limit, a `401` or `403`
+ * an authorization failure, a `404` a deployment without the route, anything
+ * else a failure worth retrying when it is a `5xx`. The platform's
+ * `problem+json` detail is appended, as on the run routes.
+ */
+export function uploadGrantRefusalMessage(
+	statusCode: number,
+	body: IDataObject,
+	file: { inputName: string; filename: string; size: number },
+): string {
+	const subject = fileSubject(file);
+	switch (statusCode) {
+		case 413:
+			return withServerDetail(
+				`The file ${subject} is too large for Pipelex (${file.size} bytes).`,
+				body,
+			);
+		case 401:
+			return withServerDetail(
+				`Pipelex did not accept the credential's Bearer Token when asked to store ${subject} (HTTP 401). Check the token in the Pipelex credential.`,
+				body,
+			);
+		// The storage routes are gated by identity alone on the platform (an
+		// org-less caller is a 400), so a 403 comes from the gateway's access rules,
+		// not from the per-account run gate FORBIDDEN_MESSAGE describes.
+		case 403:
+			return withServerDetail(
+				`Pipelex refused to store ${subject} (HTTP 403): the credential's token is not allowed to upload files. Ask Pipelex to check your account's API access (https://go.pipelex.com/discord).`,
+				body,
+			);
+		case 404:
+			return UPLOAD_UNAVAILABLE_MESSAGE;
+		default: {
+			const retry = statusCode >= 500 ? ' Retry the item.' : '';
+			return withServerDetail(
+				`Pipelex could not prepare the upload of ${subject} (HTTP ${statusCode}).${retry}`,
+				body,
+			);
+		}
+	}
+}
+
+/**
+ * `POST /v1/upload/grant` — ask for a presigned `PUT` for one file. Sent with
+ * the API headers and **without** an `Idempotency-Key`: the route never replays
+ * a grant (a repeated key is a `409` "already executed"), and asking again is
+ * free, so a retry simply asks for a new one.
+ *
+ * A refusal surfaces as a `NodeApiError` carrying the platform's problem body.
+ * A `2xx` that is not a usable grant surfaces WITHOUT its body, which may hold
+ * the grant's URL — a bearer capability that must stay out of error panels.
+ */
+export async function requestUploadGrant(
+	ctx: IExecuteFunctions,
+	conn: ApiConnection,
+	file: BinaryFile,
+	itemIndex: number,
+): Promise<UploadGrant> {
+	const request: UploadGrantRequest = {
+		filename: file.filename,
+		content_type: file.contentType,
+		size: file.bytes.length,
+	};
+	const response = (await ctx.helpers.httpRequest({
+		method: 'POST' as IHttpRequestMethods,
+		url: `${conn.baseUrl}/v1/upload/grant`,
+		headers: apiHeaders(conn),
+		body: request as unknown as IDataObject,
+		json: true,
+		returnFullResponse: true,
+		ignoreHttpStatusErrors: true,
+	})) as IN8nHttpFullResponse;
+
+	const statusCode = response.statusCode;
+	if (statusCode >= 200 && statusCode < 300) {
+		const grant = readUploadGrant(response.body);
+		if (grant) return grant;
+		throw new NodeApiError(ctx.getNode(), {} as JsonObject, {
+			message: `Pipelex answered the upload request for ${fileSubject(file)} without a usable upload grant, so the file was not sent. This is a server-side problem — report it to Pipelex support.`,
+			httpCode: String(statusCode),
+			itemIndex,
+		});
+	}
+	const body =
+		response.body !== null && typeof response.body === 'object' && !Array.isArray(response.body)
+			? (response.body as IDataObject)
+			: {};
+	throw new NodeApiError(ctx.getNode(), body as JsonObject, {
+		message: uploadGrantRefusalMessage(statusCode, body, { ...file, size: request.size }),
+		httpCode: String(statusCode),
+		itemIndex,
+	});
+}
+
+/** How much of storage's error body is read — where S3 writes its `<Code>` and `<Message>`. */
+const STORAGE_ERROR_BODY_MAX_CHARS = 16 * 1024;
+
+/** Storage's own error, read off an S3 XML body. Either field is absent on another body. */
+export interface StorageRefusal {
+	code?: string;
+	message?: string;
+}
+
+/**
+ * Read `<Code>` and `<Message>` off an S3 error document — the SDK's
+ * `parseStorageError`. Only these two are ever kept: the rest of the body can
+ * echo the signed request, and with it the grant's credential.
+ */
+export function parseStorageError(body: unknown): StorageRefusal {
+	const text = typeof body === 'string' ? body.slice(0, STORAGE_ERROR_BODY_MAX_CHARS) : '';
+	const refusal: StorageRefusal = {};
+	const code = xmlElementText(text, 'Code');
+	const message = xmlElementText(text, 'Message');
+	if (code !== undefined) refusal.code = code;
+	if (message !== undefined) refusal.message = message;
+	return refusal;
+}
+
+function xmlElementText(body: string, element: string): string | undefined {
+	const match = new RegExp(`<${element}>([^<]*)</${element}>`).exec(body);
+	if (!match?.[1]) return undefined;
+	return match[1]
+		.replace(/&lt;/g, '<')
+		.replace(/&gt;/g, '>')
+		.replace(/&quot;/g, '"')
+		.replace(/&apos;/g, "'")
+		.replace(/&amp;/g, '&');
+}
+
+/** A message whose own final period would double the one the sentence adds after it. */
+function withoutFinalPeriod(message: string): string {
+	return message.replace(/\.\s*$/, '');
+}
+
+/**
+ * The message for storage's answer to the `PUT` when it is not a `2xx` — the
+ * SDK's `uploadWithGrant` classification, with its advice rewritten for a
+ * workflow: the SDK offers a retry with the same grant, while the node never
+ * keeps one, so the advice is always "retry the item", which asks for a new
+ * grant. A signature mismatch or an unsigned header cannot come from the
+ * author's file — the node sends the grant's headers unchanged — so those say
+ * where to look instead.
+ */
+export function storageRefusalMessage(
+	statusCode: number,
+	refusal: StorageRefusal,
+	file: { inputName: string; filename: string },
+): string {
+	const subject = fileSubject(file);
+	const status = refusal.code ? `${statusCode} ${refusal.code}` : String(statusCode);
+	if (statusCode >= 300 && statusCode < 400) {
+		return `Storage redirected the upload of ${subject} (${status}), and the redirect was refused: a presigned upload is valid only at the address it was signed for.`;
+	}
+	if (statusCode === 400 && refusal.code === 'RequestTimeout') {
+		return `Storage stopped waiting for the bytes of ${subject} (${status}) and stored nothing. Retry the item.`;
+	}
+	if (statusCode === 409 && refusal.code === 'ConditionalRequestConflict') {
+		return `Storage met another upload with the same grant for ${subject} (${status}), so whether the file was stored is unknown. Retry the item: it asks for a new grant.`;
+	}
+	if (statusCode >= 400 && statusCode < 500) {
+		const lead = `Storage refused the upload of ${subject} (${status})`;
+		if (statusCode === 412) {
+			return `${lead}: the upload grant was already used. Retry the item: every attempt asks for a new grant.`;
+		}
+		if (refusal.code === 'SignatureDoesNotMatch') {
+			return `${lead}: the request differs from what the upload grant signed. Something between n8n and storage changed it (a proxy rewriting headers), or this is a bug in the node — please report it.`;
+		}
+		if (refusal.message && /expired/i.test(refusal.message)) {
+			return `${lead}: the upload grant expired before the upload started. Retry the item.`;
+		}
+		if (refusal.message && /not signed/i.test(refusal.message)) {
+			return `${lead}: the request carried a storage header the upload grant did not sign. A proxy between n8n and storage may be adding one; otherwise this is a bug in the node — please report it.`;
+		}
+		return refusal.message
+			? `${lead}: ${withoutFinalPeriod(refusal.message)}. Retry the item.`
+			: `${lead}. Retry the item.`;
+	}
+	const detail = refusal.message ? `: ${withoutFinalPeriod(refusal.message)}` : '';
+	return `Storage failed to store ${subject} (${status})${detail}. Whether the file was stored is unknown; retry the item.`;
+}
+
+/**
+ * A network failure described by the names and codes along its cause chain —
+ * "AxiosError ENOTFOUND" — the SDK's `describeNetworkFailure`. Each is kept only
+ * when it is a bare identifier, which cannot hold the grant's URL; the runtime's
+ * own message is never relayed, because it can.
+ */
+export function describeNetworkFailure(error: unknown): string {
+	const parts: string[] = [];
+	let current: unknown = error;
+	for (let depth = 0; depth < 5 && current instanceof Error; depth++) {
+		const name = isIdentifier(current.name) ? current.name : 'Error';
+		const code = (current as { code?: unknown }).code;
+		parts.push(isIdentifier(code) ? `${name} ${code}` : name);
+		current = (current as { cause?: unknown }).cause;
+	}
+	return parts.length > 0 ? parts.join(', caused by ') : 'a non-Error rejection';
+}
+
+function isIdentifier(value: unknown): value is string {
+	return typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(value);
+}
+
+/**
+ * Whether a request that got no answer ran out of time once storage could have
+ * been receiving it. axios reports its own timeout as `ECONNABORTED` (or
+ * `ETIMEDOUT` under `clarifyTimeoutError`), but the operating system also says
+ * `ETIMEDOUT` when a TCP connection never opens — and then storage received
+ * nothing. That one is told apart by its `syscall`, `connect`. axios 1.15 and
+ * 1.18 both keep it on the error's `cause` (checked against a failed connect),
+ * and a wrapper may lift it onto the error itself, so the whole chain is read.
+ */
+export function isTimeoutFailure(error: unknown): boolean {
+	const code = (error as { code?: unknown } | undefined)?.code;
+	if (code !== 'ECONNABORTED' && code !== 'ETIMEDOUT') return false;
+	let current: unknown = error;
+	for (let depth = 0; depth < 5 && current !== null && typeof current === 'object'; depth++) {
+		if ((current as { syscall?: unknown }).syscall === 'connect') return false;
+		current = (current as { cause?: unknown }).cause;
+	}
+	return true;
+}
+
+/**
+ * One signal that aborts when either of two does — `AbortSignal.any`, which
+ * releases its links by itself, else a controller linked by hand on a Node too
+ * old to have it, whose links `unlink` removes so a long execution's cancel
+ * signal does not collect one listener per upload.
+ */
+export function eitherSignal(
+	first: AbortSignal,
+	second: AbortSignal,
+): { signal: AbortSignal; unlink: () => void } {
+	const any = (AbortSignal as { any?: (signals: AbortSignal[]) => AbortSignal }).any;
+	if (typeof any === 'function') return { signal: any.call(AbortSignal, [first, second]), unlink: () => {} };
+	const controller = new AbortController();
+	const unlinks: Array<() => void> = [];
+	for (const source of [first, second]) {
+		if (source.aborted) {
+			controller.abort(source.reason);
+			break;
+		}
+		const onAbort = (): void => controller.abort(source.reason);
+		source.addEventListener('abort', onAbort, { once: true });
+		unlinks.push(() => source.removeEventListener('abort', onAbort));
+	}
+	return { signal: controller.signal, unlink: () => unlinks.forEach((unlink) => unlink()) };
+}
+
+/**
+ * `PUT` the file to storage with the grant: the raw bytes as the body, the
+ * grant's signed headers unchanged, and nothing else of the node's own — no
+ * `Authorization` (the signature in the URL is the credential, and a second one
+ * makes S3 refuse the request) and no `User-Agent` (the client-identification
+ * spec leaves the user agent of a request to a presigned object-store URL
+ * alone, so n8n's default applies).
+ *
+ * Redirects are refused (a presigned URL is valid only where it was signed), and
+ * cancelling the n8n execution cancels the upload. The SDK's default time limit
+ * is a deadline the node owns, an `AbortSignal.timeout` linked with the cancel
+ * signal, rather than axios's `timeout`: on the axios of n8n 2.16 and older
+ * (1.15) that option is `ClientRequest#setTimeout`, a socket-inactivity timer
+ * armed only once the socket has connected, so the name lookup and the TCP
+ * connect ran unbounded and a response that keeps trickling never trips it. The
+ * signal bounds the whole exchange on every axios. Which signal fired decides the
+ * message — cancelled, out of time, or never reached. Every failure is described
+ * without the grant's URL, storage's error body or the runtime error that could
+ * carry either — which is why a failed request is caught here and classified
+ * OUTSIDE the `catch` rather than wrapped.
+ */
+export async function putToStorage(
+	ctx: IExecuteFunctions,
+	grant: UploadGrant,
+	file: BinaryFile,
+	itemIndex: number,
+): Promise<void> {
+	const origin = storageOrigin(grant.url) ?? 'storage';
+	const cancelSignal = ctx.getExecutionCancelSignal();
+	const limitMs = uploadTimeoutMs(file.bytes.length);
+	const deadline = AbortSignal.timeout(limitMs);
+	const linked = cancelSignal ? eitherSignal(cancelSignal, deadline) : undefined;
+
+	let response: IN8nHttpFullResponse | undefined;
+	let failure: unknown;
+	try {
+		response = (await ctx.helpers.httpRequest({
+			method: 'PUT' as IHttpRequestMethods,
+			url: grant.url,
+			headers: { ...grant.headers },
+			body: file.bytes,
+			returnFullResponse: true,
+			ignoreHttpStatusErrors: true,
+			disableFollowRedirect: true,
+			encoding: 'text',
+			abortSignal: linked?.signal ?? deadline,
+		})) as IN8nHttpFullResponse;
+	} catch (error) {
+		failure = error;
+	} finally {
+		linked?.unlink();
+	}
+
+	const subject = fileSubject(file);
+	if (response === undefined) {
+		if (cancelSignal?.aborted) {
+			throw new NodeOperationError(
+				ctx.getNode(),
+				`The upload of ${subject} was cancelled with the execution.`,
+				{ itemIndex },
+			);
+		}
+		// The failure's names and codes go in the description, never the message:
+		// n8n replaces any message containing a Node error code (`ENOTFOUND`,
+		// `ETIMEDOUT`, …) with a generic sentence that names neither the file nor
+		// the storage host (`setDescriptiveErrorMessage` in n8n-workflow).
+		const description = `Network failure: ${describeNetworkFailure(failure)}.`;
+		const message = deadline.aborted || isTimeoutFailure(failure)
+			? `The upload of ${subject} to storage did not finish within ${Math.round(limitMs / 1000)} s, so whether storage stored it is unknown. Retry the item: it uploads the file again under a new reference.`
+			: `The upload of ${subject} could not reach storage at ${origin}. A binary input goes to storage directly, not through the Pipelex API, so this n8n instance must be able to reach ${origin}.`;
+		throw new NodeOperationError(ctx.getNode(), message, { itemIndex, description });
+	}
+
+	const statusCode = response.statusCode;
+	if (statusCode >= 200 && statusCode < 300) return;
+	const refusal = parseStorageError(response.body);
+	throw new NodeApiError(
+		ctx.getNode(),
+		{ storage_status: statusCode, storage_error: refusal.code ?? null } as JsonObject,
+		{
+			message: storageRefusalMessage(statusCode, refusal, file),
+			httpCode: String(statusCode),
+			itemIndex,
+		},
+	);
+}
+
+/**
+ * Store one binary and return the input value that names it: ask for a grant,
+ * `PUT` the bytes, and only then use the grant's reference — it names nothing
+ * until storage has answered the `PUT` with a `2xx`.
+ */
+export async function uploadBinaryFile(
+	ctx: IExecuteFunctions,
+	conn: ApiConnection,
+	file: BinaryFile,
+	itemIndex: number,
+): Promise<StoredFileInput> {
+	const grant = await requestUploadGrant(ctx, conn, file, itemIndex);
+	await putToStorage(ctx, grant, file, itemIndex);
+	return storedFileInput(grant.uri, file.filename, file.contentType);
 }

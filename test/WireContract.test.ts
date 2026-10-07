@@ -27,13 +27,18 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+import type { IExecuteFunctions } from 'n8n-workflow';
 import { describe, expect, it } from 'vitest';
 
 import {
 	abortableSleep,
 	buildStartBody,
 	mapResultResponse,
+	readUploadGrant,
+	requestUploadGrant,
+	RESULT_ARTIFACTS,
 	runSourceError,
+	storedFileInput,
 } from '../nodes/Pipelex/GenericFunctions';
 import type { HostedStartBody } from '../nodes/Pipelex/PipelexApiShapes';
 
@@ -103,6 +108,64 @@ describe('POST /v1/start — the exact body this node sends', () => {
 	});
 });
 
+describe('POST /v1/upload/grant — the request this node sends and the grant it reads', () => {
+	const GRANT = {
+		uri: 'pipelex-storage://orgs/o/assets/f.pdf',
+		url: 'https://bucket.s3.amazonaws.com/orgs/o/assets/f.pdf?X-Amz-Signature=x',
+		headers: { 'If-None-Match': '*' },
+		expires_at: '2026-09-28T12:05:00Z',
+		max_bytes: 52428800,
+	};
+
+	it('describes the file with exactly filename, content_type and size — never its bytes', async () => {
+		// The SDK's `UploadGrantInput`. The platform model forbids unknown fields, so
+		// an extra or misspelled key is a 422 on every binary input.
+		let sent: Record<string, unknown> | undefined;
+		const ctx = {
+			getNode: () => ({}),
+			helpers: {
+				httpRequest: async (options: { body: Record<string, unknown> }) => {
+					sent = options.body;
+					return { statusCode: 200, body: GRANT, headers: {} };
+				},
+			},
+		} as unknown as IExecuteFunctions;
+
+		await requestUploadGrant(
+			ctx,
+			{ baseUrl: 'https://api.test', authorization: 'Bearer t' },
+			{ inputName: 'document', bytes: Buffer.from('%PDF'), filename: 'f.pdf', contentType: 'application/pdf' },
+			0,
+		);
+		expect(Object.keys(sent ?? {}).sort()).toEqual(['content_type', 'filename', 'size']);
+	});
+
+	it('reads the grant by its pinned field names', () => {
+		// `uri` is what the run input carries, `url` + `headers` are the PUT. The
+		// rest is informational.
+		expect(Object.keys(readUploadGrant(GRANT) ?? {}).sort()).toEqual([
+			'expires_at',
+			'headers',
+			'max_bytes',
+			'uri',
+			'url',
+		]);
+		const { uri: _uri, ...withoutUri } = GRANT;
+		expect(readUploadGrant(withoutUri)).toBeUndefined();
+	});
+
+	it('fills a binary-fed input with exactly url, filename and mime_type', () => {
+		// Fields of the native Document and Image contents (`DocumentContent` /
+		// `ImageContent` in pipelex); a misspelled key would be dropped or refused
+		// by the runtime without the node noticing.
+		expect(Object.keys(storedFileInput('pipelex-storage://f.pdf', 'f.pdf', 'application/pdf')).sort()).toEqual([
+			'filename',
+			'mime_type',
+			'url',
+		]);
+	});
+});
+
 describe('GET /v1/runs/{id}/results — the response contract this node reads', () => {
 	it('recognises every artifact the hosted route returns, and drops none of them', () => {
 		// The full result body per the hosted `RunResultsResponse`. `graph_spec` is
@@ -113,6 +176,9 @@ describe('GET /v1/runs/{id}/results — the response contract this node reads', 
 			main_stuff: { answer: 42 },
 			working_memory: { root: {}, aliases: {} },
 			graph_spec: { nodes: [] },
+			pipe_io_contracts: { 'demo.p': {} },
+			input_form: { 'demo.p': {} },
+			output_form: { 'demo.p': {} },
 			tokens_usages: [{ pipe_code: 'p', cost: 0.0012 }],
 			usage_assembly_error: null,
 		};
@@ -122,12 +188,34 @@ describe('GET /v1/runs/{id}/results — the response contract this node reads', 
 		// Pinned so a sync has an explicit checklist of what we consume.
 		expect(Object.keys(body).sort()).toEqual([
 			'graph_spec',
+			'input_form',
 			'main_stuff',
+			'output_form',
+			'pipe_io_contracts',
 			'pipeline_run_id',
 			'tokens_usages',
 			'usage_assembly_error',
 			'working_memory',
 		]);
+	});
+
+	it('pins the ?artifacts= selection: every artifact the route serves except graph_spec', () => {
+		// The platform's (and `@pipelex/sdk`'s `RUN_RESULT_ARTIFACTS`) vocabulary,
+		// in its order. The node reads all of it but the run graph, which it never
+		// shows; `tokens_usages` brings `usage_assembly_error` with it. An unknown
+		// name here would be a 400 on every read, so the vocabulary is pinned too.
+		const routeArtifacts = [
+			'graph_spec',
+			'pipe_io_contracts',
+			'input_form',
+			'output_form',
+			'main_stuff',
+			'working_memory',
+			'tokens_usages',
+		];
+		expect([...RESULT_ARTIFACTS]).toEqual(routeArtifacts.filter((name) => name !== 'graph_spec'));
+		// `main_stuff` must stay selected: the completed-run invariant reads it.
+		expect(RESULT_ARTIFACTS).toContain('main_stuff');
 	});
 
 	it('pins the HTTP status → meaning mapping', () => {
