@@ -154,7 +154,8 @@ function startThenResults(resultImpl: HttpImpl): HttpImpl {
 afterEach(() => vi.restoreAllMocks());
 
 // Read from the manifest, independently of `UserAgent.ts`, so a drifted
-// constant fails here (spec: docs/specs/client-identification.md).
+// constant fails here (spec: conformance/specs/client-identification.md, in the
+// `conformance` repo).
 const EXPECTED_USER_AGENT = `n8n-nodes-pipelex/${
 	(JSON.parse(readFileSync(resolve(__dirname, '../package.json'), 'utf8')) as { version: string }).version
 }`;

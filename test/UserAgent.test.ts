@@ -1,8 +1,10 @@
 /**
  * Client identification: every request this node sends to the Pipelex API
- * carries `User-Agent: n8n-nodes-pipelex/<package version>` (workspace spec
- * `docs/specs/client-identification.md`). The expected value is read from the
- * manifest on disk here, independently of the module under test, so a
+ * carries `User-Agent: n8n-nodes-pipelex/<package version>` (the spec
+ * `conformance/specs/client-identification.md` in the `conformance` repo, whose
+ * "Client obligations" section leaves this check to each client's own suite,
+ * since no conformance test covers a JS client). The expected value is read
+ * from the manifest on disk here, independently of the module under test, so a
  * hand-typed or stale version fails.
  */
 
