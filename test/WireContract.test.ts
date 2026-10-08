@@ -34,6 +34,7 @@ import {
 	abortableSleep,
 	buildStartBody,
 	mapResultResponse,
+	problemMessage,
 	readUploadGrant,
 	requestUploadGrant,
 	RESULT_ARTIFACTS,
@@ -105,6 +106,32 @@ describe('POST /v1/start — the exact body this node sends', () => {
 			files: { 'a.mthds': 'x' },
 		});
 		expect(body).not.toHaveProperty('pipeline_run_id');
+	});
+
+	it('sends a method selector under method_id unchanged — the suffix is the API to parse', () => {
+		for (const selector of ['mt_abc', 'mt_abc@3', 'mt_abc@draft']) {
+			expect(buildStartBody({ methodId: selector }).method_id).toBe(selector);
+		}
+	});
+});
+
+describe('problem+json — the error body this node reads', () => {
+	it('reads errors[].field and errors[].detail before detail, then title', () => {
+		// The shape the platform's error handler renders (`ProblemDetail` with its
+		// `FieldError` list). A 422's `detail` only points at `errors`, so the field
+		// errors are what the node shows; a renamed key would silently fall back to
+		// that pointer.
+		expect(
+			problemMessage({
+				title: 'Validation failed',
+				status: 422,
+				code: 'validation_failed',
+				detail: 'Request body failed validation. See `errors` for the per-field breakdown.',
+				errors: [{ field: 'method_id', code: 'malformed_version_suffix', detail: 'Bad suffix.' }],
+			}),
+		).toBe('method_id: Bad suffix.');
+		expect(problemMessage({ title: 'T', detail: 'D' })).toBe('D');
+		expect(problemMessage({ title: 'T' })).toBe('T');
 	});
 });
 

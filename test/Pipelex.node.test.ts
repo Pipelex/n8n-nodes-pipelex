@@ -259,6 +259,80 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		expect(httpFn.mock.calls[0][0].body).toEqual({ method_id: 'method-42', inputs: {} });
 	});
 
+	it('sends a pinned or draft Method ID exactly as typed, only trimmed', async () => {
+		// The suffix is the hosted API's to parse: the node neither checks nor
+		// rewrites it, and it rides the JSON body, so the `@` is never URL-encoded.
+		for (const [typed, sent] of [
+			['mt_abc@3', 'mt_abc@3'],
+			['mt_abc@draft', 'mt_abc@draft'],
+			['  mt_abc@12\n', 'mt_abc@12'],
+			// A malformed suffix is sent too: the API's 422 says what a suffix may be.
+			['mt_abc@latest', 'mt_abc@latest'],
+		]) {
+			const { ctx, httpFn } = makeContext({
+				operation: 'startAndPoll',
+				params: { methodId: typed, inputs: '{}' },
+				httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+			});
+
+			await Pipelex.prototype.execute.call(ctx);
+			expect(httpFn.mock.calls[0][0].url).toBe('https://api.test/v1/start');
+			expect(httpFn.mock.calls[0][0].body, typed).toEqual({ method_id: sent, inputs: {} });
+		}
+	});
+
+	it('adds the version the StartAck says ran to the result item', async () => {
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: { methodId: 'mt_abc', inputs: '{}' },
+			httpImpl: (options) =>
+				options.method === 'POST'
+					? fullResponse(202, { ...START_ACK, method_version: 4 })
+					: fullResponse(200, COMPLETED_RESULT),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json).toMatchObject({
+			status: 'COMPLETED',
+			main_stuff: { answer: 42 },
+			method_version: 4,
+		});
+	});
+
+	it('adds method_version to the still-running item too, so it is never lost to Max Wait', async () => {
+		// deadline = 0 + 1*1000; remaining check sees now = 100_000 → exceeded.
+		vi.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValue(100_000);
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: { methodId: 'mt_abc@draft', inputs: '{}', maxWaitSeconds: 1 },
+			httpImpl: (options) =>
+				options.method === 'POST'
+					? fullResponse(202, { ...START_ACK, method_version: 'draft' })
+					: fullResponse(202, {}),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json).toMatchObject({
+			status: 'RUNNING',
+			pipeline_run_id: 'run-1',
+			method_version: 'draft',
+		});
+	});
+
+	it('leaves method_version out when the StartAck carries none (an inline method, an older server)', async () => {
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: { methodId: 'mt_abc', inputs: '{}' },
+			httpImpl: (options) =>
+				options.method === 'POST'
+					? fullResponse(202, { ...START_ACK, method_version: null })
+					: fullResponse(200, COMPLETED_RESULT),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json).not.toHaveProperty('method_version');
+	});
+
 	it('refuses a stored method AND an inline one (no run, no ambiguity)', async () => {
 		// The hosted API would accept both — it runs the inline method and records
 		// method_id as run-history linkage. The node refuses, so there is one
@@ -540,6 +614,66 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		});
 
 		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow('Failed to start pipeline');
+	});
+
+	it('says how to run a never-published method when a bare Method ID has no version (409)', async () => {
+		const detail =
+			"Method 'mt_abc' has no published version. Address its draft as `mt_abc@draft`, or publish it first.";
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: { methodId: 'mt_abc', inputs: '{}' },
+			httpImpl: () =>
+				fullResponse(409, {
+					title: 'Method not published',
+					status: 409,
+					code: 'method_not_published',
+					detail,
+				}),
+		});
+
+		const error = await Pipelex.prototype.execute.call(ctx).catch((thrown: unknown) => thrown);
+		expect(error).toMatchObject({ message: detail, httpCode: '409' });
+		// Nothing started, so nothing is polled.
+		expect(httpFn).toHaveBeenCalledTimes(1);
+	});
+
+	it('names the missing version when a pinned Method ID was never published (404)', async () => {
+		const { ctx } = makeContext({
+			operation: 'start',
+			params: { methodId: 'mt_abc@7', inputs: '{}' },
+			continueOnFail: true,
+			httpImpl: () =>
+				fullResponse(404, {
+					title: 'Method version not found',
+					status: 404,
+					code: 'method_version_not_found',
+					detail: "Method 'mt_abc' has no version 7.",
+				}),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json).toEqual({ error: "Method 'mt_abc' has no version 7." });
+	});
+
+	it("shows the API's own explanation of a malformed version suffix, not the 422's pointer to it", async () => {
+		const fieldDetail =
+			"method_id 'mt_abc' carries a version suffix that names no version. After the `@`, write a published version's number (a positive number without a leading zero, as in `@3`) or `draft` in lower case; leave the suffix out to name the latest published version.";
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: { methodId: 'mt_abc@latest', inputs: '{}' },
+			continueOnFail: true,
+			httpImpl: () =>
+				fullResponse(422, {
+					title: 'Validation failed',
+					status: 422,
+					code: 'validation_failed',
+					detail: 'Request body failed validation. See `errors` for the per-field breakdown.',
+					errors: [{ field: 'method_id', code: 'malformed_version_suffix', detail: fieldDetail }],
+				}),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json).toEqual({ error: `method_id: ${fieldDetail}` });
 	});
 
 	it('raises on a failed (409) run with the server problem detail', async () => {
@@ -869,6 +1003,24 @@ describe('Pipelex node — Start Pipeline (start only, no polling)', () => {
 		expect(startCall.headers['Idempotency-Key']).toBe('exec-1:node-1:0:0');
 		expect(startCall.headers.Authorization).toBe('Bearer secret-token');
 		expect(startCall.body).toEqual({ pipe_code: 'my-pipe', inputs: { a: 1 } });
+	});
+
+	it('adds method_version to the StartAck output when the server says which version runs', async () => {
+		for (const version of [3, 'draft']) {
+			const { ctx } = makeContext({
+				operation: 'start',
+				params: { methodId: version === 'draft' ? 'mt_abc@draft' : 'mt_abc', inputs: '{}' },
+				httpImpl: () => fullResponse(202, { ...START_ACK, method_version: version }),
+			});
+
+			const result = await Pipelex.prototype.execute.call(ctx);
+			expect(result[0][0].json).toEqual({
+				pipeline_run_id: 'run-1',
+				state: 'STARTED',
+				created_at: '2026-06-10T00:00:00Z',
+				method_version: version,
+			});
+		}
 	});
 
 	it('shapes the start body identically to Start & Wait for Result (inline method)', async () => {
@@ -1354,6 +1506,17 @@ describe('Pipelex node — operation surface (description sanity)', () => {
 				`${property.name}: multipleValueButtonText does nothing on a fixedCollection — use placeholder`,
 			).toBeUndefined();
 		}
+	});
+
+	it('says what a bare, a pinned and a draft Method ID run, and never that it combines with an inline method', () => {
+		const methodId = properties.find((p: INodeProperties) => p.name === 'methodId');
+		const description = methodId?.description ?? '';
+		expect(description).toMatch(/bare ID runs its latest published version/);
+		expect(description).toMatch(/@3 runs version 3/);
+		expect(description).toMatch(/@draft runs its current draft/);
+		expect(description).toMatch(/alternatives, not combinable/);
+		expect(description).not.toMatch(/Combinable with/);
+		expect(methodId?.placeholder).toMatch(/@draft/);
 	});
 
 	it('offers the four operations in usage order, defaulting to Start & Wait for Result', () => {

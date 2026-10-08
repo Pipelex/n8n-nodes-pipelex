@@ -104,7 +104,7 @@ The Pipelex node has one **Operation** selector with four operations, mirroring 
 
 | Parameter | API Field | Description |
 |---|---|---|
-| **Method ID** | `method_id` | ID of a stored method to run (hosted API only). It already carries its own Python. |
+| **Method ID** | `method_id` | ID of a stored method to run (hosted API only), sent exactly as typed. `mt_abc123` runs its latest published version, `mt_abc123@3` runs version 3, and `mt_abc123@draft` runs its current draft; see [which version a Method ID runs](docs/usage.md#which-version-a-method-id-runs). It already carries its own Python. |
 | **Define Method Inline** | — | Toggle. Turn on to paste the method here instead of running a stored one; it reveals the two fields below. **Mutually exclusive with Method ID.** |
 | **MTHDS Bundles** | `mthds_contents` | Your method, pasted inline — one entry per bundle file. |
 | **Python Files** | `files` | Custom PipeFunc Python for the pasted method (`funcs/*.py`, `structures/*.py`, `requirements.txt`). Shipped together with the bundle as one method bundle; requires a sandbox-hosted runner. |
@@ -136,7 +136,7 @@ The Pipelex node has one **Operation** selector with four operations, mirroring 
    - **Start Pipeline** — start the run and return immediately with its `pipeline_run_id` (collect the result later)
    - **Poll & Get Result** — wait for an already-started run by `pipeline_run_id` until it finishes (or Max Wait)
    - **Get Run Result** — a one-shot, non-blocking fetch by `pipeline_run_id` (returns `status: "RUNNING"` while still running)
-4. **Name the method:** a stored `Method ID`, or turn on `Define Method Inline` and paste it into `MTHDS Bundles`
+4. **Name the method:** a stored `Method ID` (its latest published version, or `@3` for version 3, or `@draft` for the draft), or turn on `Define Method Inline` and paste it into `MTHDS Bundles`
 5. **Set Inputs** as a JSON object matching your pipeline's expected inputs, and map any file input (a mail attachment, a Drive download) to its binary field under **Binary Inputs**
 6. **Run** the workflow
 
