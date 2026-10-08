@@ -108,7 +108,12 @@ export type RunStatus =
  *   the editor for no user-visible gain.
  *
  * `method_id` is the HOSTED extension (a stored method in the active org's
- * catalog).
+ * catalog). It is a method selector, sent exactly as the user typed it (trimmed
+ * of surrounding whitespace, nothing else): a bare `mt_…` names the method's
+ * latest published version, `mt_…@<n>` the published version `n`, and
+ * `mt_…@draft` the draft. The hosted API parses the suffix; the node neither
+ * checks nor rewrites it, and it travels in the JSON body, never in a URL, so
+ * the `@` needs no encoding.
  *
  * `files` is the PIPELEX-API method-bundle extension: the whole method (the
  * `.mthds` plus its `funcs/*.py`, `structures/*.py` and an optional
@@ -132,8 +137,9 @@ export interface HostedStartBody {
  * Ack of a started execution — `POST /v1/start` 202.
  *
  * The protocol's `RunResultStart` guarantees `pipeline_run_id` ONLY and is
- * extension-open; `state` and `created_at` are hosted extension fields the
- * platform's `StartAck` adds (`platform/routers/v1/execution.py`). They are
+ * extension-open; `state`, `created_at` and `method_version` are hosted
+ * extension fields the platform's `StartAck` adds
+ * (`platform/routers/v1/execution.py`). They are
  * typed optional here to match that contract, and `state` is an open `string`
  * rather than a closed union because the server types it `str` — the protocol
  * has no `RunState` enum to close it against.
@@ -144,6 +150,14 @@ export interface StartAck {
 	state?: string;
 	/** Hosted extension — ISO timestamp the run row was created. */
 	created_at?: string;
+	/**
+	 * Hosted extension — which content of the stored method a run started from a
+	 * `method_id` runs: the published version's number (the one a bare id
+	 * resolved to, or the pinned one), or `draft`. Taken from the platform's
+	 * `StartAck`, which leaves it out of the body for every other run; `null` is
+	 * typed too, for a server that sends the key empty instead.
+	 */
+	method_version?: number | 'draft' | null;
 	/** Further server-specific fields, preserved rather than dropped. */
 	[extension: string]: unknown;
 }

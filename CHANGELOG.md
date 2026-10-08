@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`method_version` on the start operations' items**: for a run started from a `Method ID`, `Start & Wait for Result` and `Start Pipeline` add `method_version` to their item, the number of the published version that ran or `draft`, as the hosted API's start acknowledgement reports it, so a workflow that runs a bare id can tell which version it got.
+
+### Changed
+
+- **`Method ID` names a version**: the field takes `mt_…` for the method's latest published version, `mt_…@<n>` for one published version and `mt_…@draft` for the draft, and sends it to the hosted API exactly as typed (trimmed of surrounding spaces). Its description and the docs say what each form runs, and that a method never published runs only as `@draft`.
+
+### Fixed
+
+- **`Method ID` description**: it no longer claims a stored method combines with `MTHDS Bundles`; it says the two are alternatives, which the node has enforced since 0.2.0.
+- **An API error shows its field errors**: when the Pipelex API refuses a request with per-field `errors`, as its `422` does, the node's error is now each field's own message, such as the API's explanation of a malformed `Method ID` version suffix, instead of the `422`'s generic pointer to a list n8n does not display.
+
 ## [v0.3.0] - 2026-10-07
 
 ### Added
