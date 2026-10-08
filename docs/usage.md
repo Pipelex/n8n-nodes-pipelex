@@ -17,11 +17,11 @@ The Pipelex node has one **Operation** selector with four operations, mirroring 
 - **Long runs** → **Start Pipeline** now, then **Poll & Get Result** later — in the same workflow after other work, on another workflow branch, or in a different workflow entirely. Poll & Get Result uses the exact same poll loop and Max Wait semantics, just fed by your `pipeline_run_id` instead of a fresh start.
 - **Webhook-style / fire-and-collect** → **Start Pipeline**, store the `pipeline_run_id`, and check in with **Get Run Result** on a schedule: it fetches once, returning `status: "RUNNING"` until the run completes — no blocking anywhere.
 
-Both start operations carry an `Idempotency-Key` derived from the n8n execution, node, and item, so an n8n "Retry On Fail" replays the same run instead of creating a duplicate paid run.
+Both start operations carry an `Idempotency-Key` derived from the n8n execution, the node and its run index, and the item. The run index is what keeps the passes of a node inside a loop (Loop Over Items, a back-edge) apart, since each pass numbers its items from 0 again, while a retry keeps it. n8n's "Retry On Fail" re-runs the whole node, every item of it and not only the one that failed, and the key is what keeps that safe: an item that already started its run sends the same key and the same request again, and the platform answers with that run instead of starting a duplicate paid one. An item with [Binary Inputs](#files-from-earlier-nodes-binary-inputs) replays the same way, because the node reuses the files it stored on the first attempt rather than uploading them again (see [Retries](#retries-reuse-the-stored-files)).
 
 > ℹ️ **Upgrading from 0.0.x?** The old `execute` operation value ("Execute Pipeline") still executes as a hidden alias of **Start & Wait for Result** — saved workflows keep running without edits. And there is no more injected **Custom API Call** entry in the dropdown: the credential no longer declares a generic `authenticate` block (the node sends its own `Authorization` header), which is the trigger n8n uses to inject that raw-HTTP escape hatch.
 
-> ℹ️ **Hosted-only:** the run-lifecycle polling routes (`/v1/runs/*`) and the `Method ID` field are hosted-API extensions, not part of the bare MTHDS Protocol — a bare runner does not implement them.
+> ℹ️ **Hosted-only:** the run-lifecycle polling routes (`/v1/runs/*`), the upload route behind **Binary Inputs** (`/v1/upload/grant`) and the `Method ID` field are hosted-API extensions, not part of the bare MTHDS Protocol — a bare runner does not implement them.
 
 ## Credential: Base URL
 
@@ -35,6 +35,10 @@ The Pipelex API base URL is configured on the credential, not on the node. Open 
 > ⚠️ **Running on n8n Cloud or any deployed n8n instance?** `localhost`/`127.0.0.1` URLs won't be reachable from n8n. Use a Base URL that n8n can reach over the network.
 
 The credential test hits `GET <Base URL>/v1/auth/verify` to verify both reachability and the Bearer Token. Note it only checks the token is **valid** — not that it can **start runs**. Access to the run API is granted per **account**, not per key, so a perfectly valid key can pass the test and still be refused with a `403` on a real run. That is not a key you can re-scope: ask Pipelex to enable API access for your account.
+
+## Client identification (`User-Agent`)
+
+Every request the node sends to the Pipelex API — the upload grant for a binary input, the start, the result polls, the failed-run status read and the credential test — carries `User-Agent: n8n-nodes-pipelex/<package version>` (for example `n8n-nodes-pipelex/0.2.1`), so the platform can tell traffic from n8n apart from the web app, the SDKs or a hand-written call. The value is a single product token because a community node cannot read the n8n version it runs in. It is self-declared and used only for analytics and diagnostics, never for authorization or rate limits. The one request that does not go to the Pipelex API, a binary input's upload to storage, keeps n8n's own `User-Agent`, as the spec asks for a presigned object-store URL. The convention every first-party Pipelex client follows is the client-identification spec, `conformance/specs/client-identification.md` in the `conformance` repository, which holds the cross-repo interface specs.
 
 ---
 
@@ -50,8 +54,6 @@ These fields apply to the two start operations (**Start & Wait for Result** and 
 Setting a `Method ID` *and* an inline method is an error — "what is this node running?" must have one answer. (The API itself would accept both, running the inline method and filing the run under the stored one in history; the node refuses it deliberately.)
 
 Turning the toggle **off** also removes whatever it holds from the request, so a bundle you pasted and then abandoned is never sent, and never trips the either/or error from a field you can no longer see.
-
-> **Upgrading from 0.1.0?** A node configured before this toggle existed will refuse to run until you switch it on, with an error saying so. That is deliberate: in 0.1.0 an inline bundle took precedence over a `Method ID`, so quietly defaulting to "toggle off" would have run the *stored* method instead — a different method, with no error. Switch the toggle on to keep running the pasted method, or clear `MTHDS Bundles` to run the stored one.
 
 > **Upgrading from 0.1.0?** A node configured before this toggle existed will refuse to run until you switch it on, with an error saying so. That is deliberate: in 0.1.0 an inline bundle took precedence over a `Method ID`, so quietly defaulting to "toggle off" would have run the *stored* method instead — a different method, with no error. Switch the toggle on to keep running the pasted method, or clear `MTHDS Bundles` to run the stored one.
 
@@ -119,6 +121,64 @@ Pass data from previous nodes:
 
 ---
 
+## Files from earlier nodes: Binary Inputs
+
+Files travel through n8n as **binary data** on the item: a Gmail trigger puts each attachment in its own binary field (`attachment_0`, `attachment_1`, …), and the Google Drive **Download** operation puts the file in `data`. A method input whose concept is a `Document` or an `Image` (or refines one) takes a file reference instead, and **Binary Inputs** bridges the two. Each row names a method input and the binary field that fills it:
+
+| Row field | What it is |
+| --- | --- |
+| **Input Name** | The method input to fill, named as you would key it in **Inputs** (for example `document`). |
+| **Input Binary Field** | The binary field on the incoming item that holds the file. Defaults to `data`. |
+
+For each row, on each item, the node uploads the file to Pipelex storage and adds the input to the run's inputs, keeping the file name and MIME type n8n carries:
+
+```json
+{
+  "document": {
+    "url": "pipelex-storage://…/3f2c9a….pdf",
+    "filename": "invoice.pdf",
+    "mime_type": "application/pdf"
+  }
+}
+```
+
+The other inputs still come from the **Inputs** JSON, and the two are merged into one set of inputs.
+
+### Example: a Gmail attachment into a method's `Document` input
+
+Take a stored method that reads an invoice from its `document` input, a `Document`, and writes its summary in the language given by its `language` input.
+
+1. A **Gmail Trigger** with *Download Attachments* switched on. Each email arrives as one item, with its first attachment in the binary field `attachment_0`.
+2. A **Pipelex** node on **Start & Wait for Result**:
+    - **Method ID**: the stored method's id
+    - **Inputs**: `{"language": "fr"}`
+    - **Binary Inputs** → **Add Binary Input**: Input Name `document`, Input Binary Field `attachment_0`
+
+A Google Drive flow is the same, with a **Google Drive** node on **Download** in front of the Pipelex node: the downloaded file lands in `data`, which is the row's default, so only the Input Name needs filling.
+
+### Rules
+
+- **An input is given one way.** An input named in Binary Inputs must not also be a key of Inputs: the node refuses the item rather than picking one, since either choice would silently drop a value you set. The same goes for a row naming an input twice. A row with an empty Input Name is ignored.
+- **Everything is checked before anything is sent.** A binary field missing from the item fails it with the list of the binary fields the item does carry, and so does an empty (0-byte) file or one over the size limit; nothing is uploaded and no run is started. The sizes are read from the metadata n8n keeps, so this check loads no file.
+- **One file in memory at a time.** The node loads a file only to upload it, and lets it go before loading the next, so an item with several large attachments never holds them all at once.
+- **The binary mode.** In a workflow whose binary mode is *separate* (n8n's default), Input Binary Field names a field under the item's binary data; in one whose binary mode is *combined*, where n8n keeps files inside the item's JSON, it is the path to the file there. The node resolves it with n8n's own helper, so either mode works.
+- **The file name and type** are n8n's. When the name has no extension, the node adds the one n8n recorded for the file, or failing that the one of its MIME type, since the stored object keeps the extension: a Drive export named `Invoice` is stored as `Invoice.pdf`. When n8n only knows `application/octet-stream`, the file extension decides the type (`.pdf`, `.png`, `.jpg`, …), and when neither knows, `mime_type` is left out of the input so the method is never told the wrong type.
+- **Size:** the hosted API accepts files up to 50 MiB. The node refuses a larger one itself, from n8n's metadata, before loading it.
+- **Where the bytes go:** the node asks the Pipelex API for an upload grant (`POST /v1/upload/grant`), then sends the file straight to Pipelex storage in one `PUT` to the address the grant names. The n8n instance must therefore reach that storage host as well as the API — worth knowing on a self-hosted n8n behind an egress allowlist. The `PUT` has a deadline of a minute plus a second for every 128 KiB of the file, counted from the start of the request; an upload that runs out of time fails the item saying it is unknown whether storage kept the file, and one whose connection never opened fails it saying storage was not reached.
+- **A failed upload fails the item before any run is created.** With *Continue On Fail*, the reason lands in the item's `error` field. An execution cancelled while its files were being stored starts no run either: the node checks for the cancel just before the start.
+- **Top-level inputs only.** A file nested inside a structured input, or a list of files, still goes through **Inputs** as JSON, with an `http(s)` URL the runner can fetch.
+- **Hosted API only.** A Base URL without the upload route fails the item with a message saying so; on such a server, pass the file as an `http(s)` URL in Inputs.
+
+### Retries reuse the stored files
+
+n8n's *Retry On Fail* runs the whole node again, every item of it, not only the item that failed. A JSON-only item that had already started its run replays it through its `Idempotency-Key`. For an item with binary inputs, the node remembers the reference each file was stored under, and a retry in the same execution reuses it instead of uploading the file again: the request is the same as on the first attempt, so is its key, and the platform answers with the run that attempt started rather than starting a second paid one.
+
+A stored file is reused only for the same execution, node, run of the node (a loop's next pass is a new run and uploads again), item and input, with the same bytes (compared by their SHA-256), file name, MIME type and credential Base URL, and only once storage has accepted it. Anything else uploads the file again and starts a new run, which the node keeps from being refused as a conflicting request by folding the files' references into the `Idempotency-Key`: an item whose file changed between attempts, an upload that failed on the first attempt, or a retry the node no longer remembers.
+
+The memory lives in the n8n process for up to 24 hours, the platform's own idempotency window, and holds a bounded number of files, the oldest leaving first. A retry runs in the same process as its execution, so it finds what it needs; a restarted n8n forgets, and so does a manual *Retry* from the executions list, which is a new execution.
+
+---
+
 ## Optional output controls
 
 These optional fields are surfaced at the top level on both start operations (they are forwarded verbatim to the runner).
@@ -157,8 +217,9 @@ A completed run produces one item:
 | `working_memory` | every named value the run produced, not just the main output |
 | `tokens_usages` | one record per inference call — see below |
 | `usage_assembly_error` | non-null only when usage accounting itself failed |
+| `pipe_io_contracts`, `input_form`, `output_form` | the run's I/O descriptions from the MTHDS standard, keyed by pipe: each pipe's input and output contracts, and form descriptors for its inputs and its output. `null` for a run that did not write them |
 
-The heavy `graph_spec` visualization artifact is stripped from the n8n item (it only cluttered the item view); the API still returns it.
+The heavy `graph_spec` visualization artifact (the run graph) is not part of the item. The node does not even download it: its result reads ask the API for every artifact except `graph_spec` (`GET /v1/runs/{pipeline_run_id}/results?artifacts=…`), which keeps each poll light. A server that predates that parameter ignores it and sends the graph anyway, and the node then strips it, so the item is the same either way.
 
 A completed run **always** delivers a `main_stuff` — but not always the instant it turns COMPLETED. The run is marked complete as soon as it finishes, then its artifacts are written to storage, so a fetch landing in that window sees a complete run with no output yet. The node handles the two cases differently:
 

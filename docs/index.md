@@ -8,7 +8,7 @@ Execute Pipelex AI pipelines directly in your n8n workflows.
 
 - 📚 **[Read the Pipelex Documentation](https://docs.pipelex.com/)** first
 - 🚀 **[Try the Quick Start Guide](https://docs.pipelex.com/pages/quick-start/)**
-- 🍳 **[Explore the Cookbook Examples](https://docs.pipelex.com/pages/cookbook-examples/)**
+- 🍳 **[Explore the Cookbook Examples](https://github.com/Pipelex/pipelex-cookbook)**
 
 ## What You'll Need
 
@@ -22,7 +22,7 @@ Here is some n8n documentation about [installing community nodes](https://docs.n
 
 ## Quick Start
 
-1. **Get API access** — the node defaults to the hosted Pipelex platform at `https://api.pipelex.com`. Run access there is gated for now (admin / `runs:execute`-scoped key) — create a key at [app.pipelex.com](https://app.pipelex.com/) and join the [waitlist](https://go.pipelex.com/waitlist). You can also point the Base URL at your own server that exposes the platform run surface (a self-hosting guide is in the works).
+1. **Get API access** — the node defaults to the hosted Pipelex platform at `https://api.pipelex.com`. Run access there is gated for now, per account rather than per key — create a key at [app.pipelex.com](https://app.pipelex.com/) and join the [waitlist](https://go.pipelex.com/waitlist). You can also point the Base URL at your own server that exposes the platform run surface (a self-hosting guide is in the works).
 
 2. **Add credentials in n8n**:
    - Node → **Credential to connect with** → **Create New**
@@ -33,6 +33,7 @@ Here is some n8n documentation about [installing community nodes](https://docs.n
    - Pick an **Operation**: `Start & Wait for Result` (default — starts a run and polls internally until the result is ready), `Start Pipeline` (starts a run and returns its `pipeline_run_id` immediately), `Poll & Get Result` (waits for an already-started run by `pipeline_run_id`), or `Get Run Result` (one-shot, non-blocking fetch by `pipeline_run_id`)
    - Provide a `Pipe Code`, inline `MTHDS Bundles`, or a stored `Method ID`
    - Set `Inputs` as a JSON object matching your pipeline's expected inputs
+   - Feed a file from an earlier node (a Gmail attachment, a Drive download) into a `Document` or `Image` input with `Binary Inputs` — see [Files from earlier nodes](./usage.md#files-from-earlier-nodes-binary-inputs)
 
 4. **Copy paste an example from the [Examples](./examples.md) page**
 

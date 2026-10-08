@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IExecuteFunctions, IN8nHttpFullResponse, INodeProperties } from 'n8n-workflow';
 
@@ -19,8 +22,10 @@ import {
 	FORBIDDEN_MESSAGE,
 	NOT_FOUND_MESSAGE,
 	SERVICE_UNAVAILABLE_MESSAGE,
+	UPLOAD_UNAVAILABLE_MESSAGE,
 } from '../nodes/Pipelex/GenericFunctions';
 import { Pipelex } from '../nodes/Pipelex/Pipelex.node';
+import { storedUploads } from '../nodes/Pipelex/StoredUploads';
 
 type HttpImpl = (options: {
 	method?: string;
@@ -28,38 +33,96 @@ type HttpImpl = (options: {
 	[key: string]: unknown;
 }) => IN8nHttpFullResponse | Promise<IN8nHttpFullResponse>;
 
+/** An n8n binary as it sits on an item: base64 data plus the metadata n8n keeps. */
+interface TestBinary {
+	data: string;
+	mimeType: string;
+	fileName?: string;
+	fileExtension?: string;
+	/** The size n8n records when it stores a binary. */
+	bytes?: number;
+	/** Set on a binary n8n keeps outside memory; its size is then in `binaryMetadata`. */
+	id?: string;
+}
+
 interface ContextOptions {
 	operation: string;
 	params?: Record<string, unknown>;
 	httpImpl: HttpImpl;
 	continueOnFail?: boolean;
-	items?: Array<{ json: Record<string, unknown> }>;
+	items?: Array<{ json: Record<string, unknown>; binary?: Record<string, TestBinary> }>;
+	executionId?: string;
+	/** n8n's run index for the node: one more on each pass of a loop, kept across retries. */
+	runIndex?: number;
+	cancelSignal?: AbortSignal;
+	/**
+	 * The workflow's binary mode. Under `combined`, n8n keeps a file in the item's
+	 * JSON and `assertBinaryData` resolves the field name as a path there.
+	 */
+	binaryMode?: 'separate' | 'combined';
+	/** `getBinaryMetadata` answers, by binary id. Without it the helper is absent. */
+	binaryMetadata?: Record<string, { fileSize: number }>;
+	/** Shared with `httpImpl` to record the order of loads and requests. */
+	log?: string[];
 }
 
 function makeContext(opts: ContextOptions): {
 	ctx: IExecuteFunctions;
 	httpFn: ReturnType<typeof vi.fn>;
+	bufferFn: ReturnType<typeof vi.fn>;
 } {
 	const params = opts.params ?? {};
+	const items = opts.items ?? [{ json: {} }];
 	// The node uses ctx.helpers.httpRequest (manual Authorization header — the
 	// credential has no `authenticate` block; see PiplexApi.credentials.ts).
 	const httpFn = vi.fn(async (options: { url: string }) => opts.httpImpl(options));
+	// n8n's binary helpers, answered from the items. `assertBinaryData` throws the
+	// way the real one does when the field is missing, so a test that reaches it
+	// by mistake fails loudly rather than reading `undefined`.
+	const binaryOf = (itemIndex: number, propertyName: string): TestBinary => {
+		const binary =
+			opts.binaryMode === 'combined'
+				? (items[itemIndex]?.json[propertyName] as TestBinary | undefined)
+				: items[itemIndex]?.binary?.[propertyName];
+		if (!binary) throw new Error(`no binary field "${propertyName}" on item ${itemIndex}`);
+		return binary;
+	};
+	const bufferFn = vi.fn(async (itemIndex: number, propertyName: string) => {
+		opts.log?.push(`load ${propertyName}`);
+		return Buffer.from(binaryOf(itemIndex, propertyName).data, 'base64');
+	});
+	const metadata = opts.binaryMetadata;
 
 	const ctx = {
-		getInputData: () => opts.items ?? [{ json: {} }],
+		getInputData: () => items,
 		getCredentials: async () => ({ baseUrl: 'https://api.test', apiKey: 'secret-token' }),
 		getNodeParameter: (name: string, _itemIndex: number, fallback?: unknown) => {
 			if (name === 'operation') return opts.operation;
 			return name in params ? params[name] : fallback;
 		},
-		getExecutionId: () => 'exec-1',
-		getExecutionCancelSignal: () => undefined,
+		getExecutionId: () => opts.executionId ?? 'exec-1',
+		getWorkflowDataProxy: () => ({ $thisRunIndex: opts.runIndex ?? 0 }),
+		getExecutionCancelSignal: () => opts.cancelSignal,
 		continueOnFail: () => opts.continueOnFail ?? false,
 		getNode: () => ({ id: 'node-1', name: 'Pipelex', type: 'pipelex', typeVersion: 1 }),
-		helpers: { httpRequest: httpFn },
+		helpers: {
+			httpRequest: httpFn,
+			assertBinaryData: (itemIndex: number, propertyName: string) =>
+				binaryOf(itemIndex, propertyName),
+			getBinaryDataBuffer: bufferFn,
+			...(metadata
+				? {
+						getBinaryMetadata: async (binaryDataId: string) => {
+							const found = metadata[binaryDataId];
+							if (!found) throw new Error(`no metadata for ${binaryDataId}`);
+							return found;
+						},
+					}
+				: {}),
+		},
 	} as unknown as IExecuteFunctions;
 
-	return { ctx, httpFn };
+	return { ctx, httpFn, bufferFn };
 }
 
 function fullResponse(
@@ -69,6 +132,11 @@ function fullResponse(
 ): IN8nHttpFullResponse {
 	return { statusCode, body, headers } as IN8nHttpFullResponse;
 }
+
+// The results read's artifact selection, pinned literally: everything the
+// route serves except the heavy `graph_spec`, which the node never shows.
+const ARTIFACTS_QUERY =
+	'?artifacts=pipe_io_contracts,input_form,output_form,main_stuff,working_memory,tokens_usages';
 
 const START_ACK = { pipeline_run_id: 'run-1', state: 'STARTED', created_at: '2026-06-10T00:00:00Z' };
 
@@ -84,6 +152,72 @@ function startThenResults(resultImpl: HttpImpl): HttpImpl {
 }
 
 afterEach(() => vi.restoreAllMocks());
+
+// Read from the manifest, independently of `UserAgent.ts`, so a drifted
+// constant fails here (spec: conformance/specs/client-identification.md, in the
+// `conformance` repo).
+const EXPECTED_USER_AGENT = `n8n-nodes-pipelex/${
+	(JSON.parse(readFileSync(resolve(__dirname, '../package.json'), 'utf8')) as { version: string }).version
+}`;
+
+describe('Pipelex node — client identification (User-Agent on every API request)', () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	it('sends the User-Agent on POST /v1/start and GET /v1/runs/{id}/results', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: { pipeCode: 'my-pipe', inputs: '{}' },
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+
+		const [startCall, resultCall] = httpFn.mock.calls.map((call) => call[0]);
+		expect(startCall.url).toBe('https://api.test/v1/start');
+		expect(startCall.headers['User-Agent']).toBe(EXPECTED_USER_AGENT);
+		expect(startCall.headers['Idempotency-Key']).toBe('exec-1:node-1:0:0');
+		expect(resultCall.url).toBe(`https://api.test/v1/runs/run-1/results${ARTIFACTS_QUERY}`);
+		expect(resultCall.headers['User-Agent']).toBe(EXPECTED_USER_AGENT);
+	});
+
+	it('sends the User-Agent on GET /v1/runs/{id}/status (the failed-run explanation read)', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: { pipeCode: 'my-pipe', inputs: '{}' },
+			continueOnFail: true,
+			httpImpl: (options) => {
+				if (options.method === 'POST') return fullResponse(202, START_ACK);
+				if (String(options.url).endsWith('/status'))
+					return fullResponse(200, { pipeline_run_id: 'run-1', status: 'FAILED', error: { message: 'boom' } });
+				return fullResponse(409, { detail: 'Run finished with status FAILED; no result available' });
+			},
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+
+		const statusCall = httpFn.mock.calls
+			.map((call) => call[0])
+			.find((options) => String(options.url).endsWith('/v1/runs/run-1/status'));
+		expect(statusCall).toBeDefined();
+		expect(statusCall.headers['User-Agent']).toBe(EXPECTED_USER_AGENT);
+		expect(statusCall.headers.Authorization).toBe('Bearer secret-token');
+	});
+
+	it('sends the same User-Agent on every request it makes', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: { pipeCode: 'my-pipe', inputs: '{}' },
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+
+		expect(httpFn.mock.calls.length).toBeGreaterThan(0);
+		for (const [options] of httpFn.mock.calls) {
+			expect(options.headers['User-Agent']).toBe(EXPECTED_USER_AGENT);
+		}
+	});
+});
 
 describe('Pipelex node — Start & Wait for Result (start + internal poll)', () => {
 	beforeEach(() => vi.clearAllMocks());
@@ -106,11 +240,11 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 
 		const startCall = httpFn.mock.calls[0][0];
 		expect(startCall.url).toBe('https://api.test/v1/start');
-		expect(startCall.headers['Idempotency-Key']).toBe('exec-1:node-1:0');
+		expect(startCall.headers['Idempotency-Key']).toBe('exec-1:node-1:0:0');
 		expect(startCall.headers.Authorization).toBe('Bearer secret-token');
 		expect(startCall.body).toEqual({ pipe_code: 'my-pipe', inputs: { a: 1 } });
 		const resultCall = httpFn.mock.calls[1][0];
-		expect(resultCall.url).toBe('https://api.test/v1/runs/run-1/results');
+		expect(resultCall.url).toBe(`https://api.test/v1/runs/run-1/results${ARTIFACTS_QUERY}`);
 		expect(resultCall.headers.Authorization).toBe('Bearer secret-token');
 	});
 
@@ -698,7 +832,7 @@ describe('Pipelex node — legacy `execute` operation value (published 0.0.x)', 
 		const result = await Pipelex.prototype.execute.call(ctx);
 		expect(result[0][0].json.status).toBe('COMPLETED');
 		expect(httpFn.mock.calls[0][0].url).toBe('https://api.test/v1/start');
-		expect(httpFn.mock.calls[1][0].url).toBe('https://api.test/v1/runs/run-1/results');
+		expect(httpFn.mock.calls[1][0].url).toBe(`https://api.test/v1/runs/run-1/results${ARTIFACTS_QUERY}`);
 	});
 
 	it('is hidden from the Operation dropdown (not offered to new workflows)', () => {
@@ -732,7 +866,7 @@ describe('Pipelex node — Start Pipeline (start only, no polling)', () => {
 		expect(httpFn).toHaveBeenCalledTimes(1);
 		const startCall = httpFn.mock.calls[0][0];
 		expect(startCall.url).toBe('https://api.test/v1/start');
-		expect(startCall.headers['Idempotency-Key']).toBe('exec-1:node-1:0');
+		expect(startCall.headers['Idempotency-Key']).toBe('exec-1:node-1:0:0');
 		expect(startCall.headers.Authorization).toBe('Bearer secret-token');
 		expect(startCall.body).toEqual({ pipe_code: 'my-pipe', inputs: { a: 1 } });
 	});
@@ -807,7 +941,7 @@ describe('Pipelex node — Poll & Get Result (waitForResult by id)', () => {
 		expect(json.status).toBe('COMPLETED');
 		expect(json.main_stuff).toEqual({ ok: true });
 		const call = httpFn.mock.calls[0][0];
-		expect(call.url).toBe('https://api.test/v1/runs/run-9/results');
+		expect(call.url).toBe(`https://api.test/v1/runs/run-9/results${ARTIFACTS_QUERY}`);
 		expect(call.headers.Authorization).toBe('Bearer secret-token');
 	});
 
@@ -877,7 +1011,7 @@ describe('Pipelex node — Poll & Get Result (waitForResult by id)', () => {
 		});
 
 		await Pipelex.prototype.execute.call(ctx);
-		expect(httpFn.mock.calls[0][0].url).toBe('https://api.test/v1/runs/run%2F..%2F9/results');
+		expect(httpFn.mock.calls[0][0].url).toBe(`https://api.test/v1/runs/run%2F..%2F9/results${ARTIFACTS_QUERY}`);
 	});
 });
 
@@ -905,6 +1039,71 @@ describe('Pipelex node — expression-fed text fields', () => {
 	});
 });
 
+describe('Pipelex node — results artifact selection (?artifacts=)', () => {
+	beforeEach(() => vi.clearAllMocks());
+
+	// Every artifact a completed-run item carried before the selection existed.
+	const SELECTED_ARTIFACTS = {
+		pipeline_run_id: 'run-1',
+		pipe_io_contracts: { 'demo.p': { inputs: {} } },
+		input_form: { 'demo.p': { fields: [] } },
+		output_form: { 'demo.p': { kind: 'text' } },
+		main_stuff: { answer: 42 },
+		working_memory: { root: {}, aliases: {} },
+		tokens_usages: [{ pipe_code: 'p', cost: 0.0012 }],
+		usage_assembly_error: null,
+	};
+	const EXPECTED_ITEM = { ...SELECTED_ARTIFACTS, status: 'COMPLETED' };
+
+	it.each([
+		['startAndPoll', { pipeCode: 'p', inputs: '{}' }],
+		['poll', { runId: 'run-1', maxWaitSeconds: 60 }],
+		['getResult', { runId: 'run-1' }],
+	])('%s asks for every artifact but graph_spec', async (operation, params) => {
+		const { ctx, httpFn } = makeContext({
+			operation,
+			params,
+			httpImpl: startThenResults(() => fullResponse(200, SELECTED_ARTIFACTS)),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		const resultCalls = httpFn.mock.calls
+			.map(([options]) => String(options.url))
+			.filter((url) => url.includes('/results'));
+		expect(resultCalls).toEqual([`https://api.test/v1/runs/run-1/results${ARTIFACTS_QUERY}`]);
+		expect(resultCalls[0]).not.toContain('graph_spec');
+	});
+
+	it.each([
+		['a current platform (selection honoured, graph_spec absent)', SELECTED_ARTIFACTS],
+		[
+			'a platform predating ?artifacts= (parameter ignored, graph_spec sent)',
+			{ ...SELECTED_ARTIFACTS, graph_spec: { nodes: [] } },
+		],
+	])('the item is the same against %s', async (_label, body) => {
+		for (const operation of ['startAndPoll', 'getResult']) {
+			const { ctx } = makeContext({
+				operation,
+				params: { pipeCode: 'p', inputs: '{}', runId: 'run-1' },
+				httpImpl: startThenResults(() => fullResponse(200, body)),
+			});
+			const json = (await Pipelex.prototype.execute.call(ctx))[0][0].json;
+			expect(json).toEqual(EXPECTED_ITEM);
+		}
+	});
+
+	it('a selected main_stuff the run has not written yet (null) is still the mid-write window', async () => {
+		const { ctx } = makeContext({
+			operation: 'getResult',
+			params: { runId: 'run-1' },
+			httpImpl: () => fullResponse(200, { ...SELECTED_ARTIFACTS, main_stuff: null }),
+		});
+
+		const json = (await Pipelex.prototype.execute.call(ctx))[0][0].json;
+		expect(json.status).toBe('RUNNING');
+	});
+});
+
 describe('Pipelex node — Get Run Result (single-shot fetch)', () => {
 	beforeEach(() => vi.clearAllMocks());
 
@@ -921,7 +1120,7 @@ describe('Pipelex node — Get Run Result (single-shot fetch)', () => {
 		expect(json.main_stuff).toEqual({ answer: 42 });
 		expect(json.graph_spec).toBeUndefined();
 		expect(httpFn).toHaveBeenCalledTimes(1);
-		expect(httpFn.mock.calls[0][0].url).toBe('https://api.test/v1/runs/run-1/results');
+		expect(httpFn.mock.calls[0][0].url).toBe(`https://api.test/v1/runs/run-1/results${ARTIFACTS_QUERY}`);
 	});
 
 	it('URL-encodes the pipeline_run_id', async () => {
@@ -932,7 +1131,7 @@ describe('Pipelex node — Get Run Result (single-shot fetch)', () => {
 		});
 
 		await Pipelex.prototype.execute.call(ctx);
-		expect(httpFn.mock.calls[0][0].url).toBe('https://api.test/v1/runs/run%2F..%2F1/results');
+		expect(httpFn.mock.calls[0][0].url).toBe(`https://api.test/v1/runs/run%2F..%2F1/results${ARTIFACTS_QUERY}`);
 	});
 
 	it("normalizes status to 'COMPLETED' even when the server body carries a different status", async () => {
@@ -1090,13 +1289,24 @@ describe('Pipelex node — operation surface (description sanity)', () => {
 		const startFields = properties
 			.filter((p: INodeProperties) => showOperations(p.name).includes('startAndPoll'))
 			.map((p: INodeProperties) => p.name);
-		expect(startFields.slice(0, 5)).toEqual([
+		expect(startFields.slice(0, 6)).toEqual([
 			'methodId',
 			'inlineMethod',
 			'mthdsContents',
 			'pythonFiles',
 			'inputs',
+			'binaryInputs',
 		]);
+	});
+
+	it('offers Binary Inputs as rows of input name + binary field, the field defaulting to data', () => {
+		const property = properties.find((p: INodeProperties) => p.name === 'binaryInputs');
+		expect(property?.type).toBe('fixedCollection');
+		expect(property?.typeOptions?.multipleValues).toBe(true);
+		const row = (property?.options ?? [])[0] as { name: string; values: INodeProperties[] };
+		expect(row.name).toBe('input');
+		expect(row.values.map((value) => value.name)).toEqual(['name', 'binaryPropertyName']);
+		expect(row.values.find((value) => value.name === 'binaryPropertyName')?.default).toBe('data');
 	});
 
 	it('renders both halves of the inline method as the same kind of control', () => {
@@ -1164,6 +1374,7 @@ describe('Pipelex node — operation surface (description sanity)', () => {
 			'mthdsContents',
 			'methodId',
 			'inputs',
+			'binaryInputs',
 			'pipeCode',
 			'outputName',
 			'outputMultiplicity',
@@ -1360,5 +1571,868 @@ describe('Pipelex node — explaining a failed run', () => {
 		expect(httpFn.mock.calls.map((call) => String(call[0].url))).not.toContain(
 			'https://api.test/v1/runs/run-1/status',
 		);
+	});
+});
+
+describe('Pipelex node — binary inputs (an n8n file becomes a method input)', () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		// The memory of stored uploads is process-wide; every test starts as a
+		// fresh process would.
+		storedUploads.clear();
+	});
+
+	const PDF_BYTES = Buffer.from('%PDF-1.7 a fake invoice');
+	const PDF: TestBinary = {
+		data: PDF_BYTES.toString('base64'),
+		mimeType: 'application/pdf',
+		fileName: 'invoice.pdf',
+		fileExtension: 'pdf',
+	};
+	const PNG_BYTES = Buffer.from('\x89PNG fake receipt');
+	// n8n types a file it could not identify as octet-stream; the extension decides.
+	const PNG: TestBinary = {
+		data: PNG_BYTES.toString('base64'),
+		mimeType: 'application/octet-stream',
+		fileName: 'receipt.png',
+	};
+
+	// A presigned URL carries its credential in the query string: it must never
+	// reach an error message.
+	const STORAGE_ORIGIN = 'https://app-bucket.s3.eu-west-3.amazonaws.com';
+	const grantFor = (n: number) => ({
+		uri: `pipelex-storage://orgs/org-1/assets/file-${n}.pdf`,
+		url: `${STORAGE_ORIGIN}/orgs/org-1/assets/file-${n}.pdf?X-Amz-Credential=AKIASECRET&X-Amz-Signature=deadbeef${n}`,
+		headers: {
+			'If-None-Match': '*',
+			'Content-Type': 'application/pdf',
+			'x-amz-meta-uploaded-by': 'user-1',
+		},
+		expires_at: '2026-09-28T12:05:00Z',
+		max_bytes: 52428800,
+	});
+
+	/** The hosted plane, faked: numbered grants, storage accepting, a start ack, a completed result. */
+	function hostedPlane(overrides: { grant?: HttpImpl; storage?: HttpImpl } = {}): HttpImpl {
+		let granted = 0;
+		return (options) => {
+			const url = String(options.url);
+			if (url === 'https://api.test/v1/upload/grant') {
+				if (overrides.grant) return overrides.grant(options);
+				granted += 1;
+				return fullResponse(200, grantFor(granted));
+			}
+			if (url.startsWith(STORAGE_ORIGIN)) {
+				if (overrides.storage) return overrides.storage(options);
+				return { statusCode: 200, body: '', headers: {} } as unknown as IN8nHttpFullResponse;
+			}
+			if (url === 'https://api.test/v1/start') return fullResponse(202, START_ACK);
+			return fullResponse(200, COMPLETED_RESULT);
+		};
+	}
+
+	const calls = (httpFn: ReturnType<typeof vi.fn>) =>
+		httpFn.mock.calls.map((call) => call[0] as Record<string, unknown> & { url: string });
+
+	it('uploads the mapped binary, then starts the run with its storage reference as the input', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{"language":"fr"}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json.status).toBe('COMPLETED');
+
+		const sent = calls(httpFn);
+		expect(sent.map((call) => `${call.method} ${call.url.split('?')[0]}`)).toEqual([
+			'POST https://api.test/v1/upload/grant',
+			`PUT ${STORAGE_ORIGIN}/orgs/org-1/assets/file-1.pdf`,
+			'POST https://api.test/v1/start',
+			'GET https://api.test/v1/runs/run-1/results',
+		]);
+		const [grantCall, putCall, startCall] = sent as Array<Record<string, any>>;
+
+		// The grant describes the file with the name and type n8n carries; the bytes
+		// are not in it.
+		expect(grantCall.body).toEqual({
+			filename: 'invoice.pdf',
+			content_type: 'application/pdf',
+			size: PDF_BYTES.length,
+		});
+		expect(grantCall.json).toBe(true);
+		expect(grantCall.headers.Authorization).toBe('Bearer secret-token');
+		expect(grantCall.headers['User-Agent']).toBe(EXPECTED_USER_AGENT);
+		// The grant route never replays: a repeated key would be a 409.
+		expect(grantCall.headers['Idempotency-Key']).toBeUndefined();
+
+		// The bytes go straight to storage, with the grant's signed headers and
+		// nothing of the node's own: no API key, no User-Agent override.
+		expect(putCall.url).toBe(grantFor(1).url);
+		expect(putCall.headers).toEqual(grantFor(1).headers);
+		expect(Buffer.isBuffer(putCall.body)).toBe(true);
+		expect((putCall.body as Buffer).equals(PDF_BYTES)).toBe(true);
+		expect(putCall.disableFollowRedirect).toBe(true);
+		expect(putCall.json).toBeUndefined();
+		// The deadline is the node's own signal, not axios's socket-inactivity timer.
+		expect(putCall.timeout).toBeUndefined();
+		expect(putCall.abortSignal).toBeInstanceOf(AbortSignal);
+
+		// The reference replaces nothing: it joins the JSON inputs.
+		expect(startCall.body).toEqual({
+			method_id: 'mt_invoice',
+			inputs: {
+				language: 'fr',
+				document: {
+					url: 'pipelex-storage://orgs/org-1/assets/file-1.pdf',
+					filename: 'invoice.pdf',
+					mime_type: 'application/pdf',
+				},
+			},
+		});
+		// A run carrying fresh uploads gets a key that covers them — see idempotencyKey.
+		expect(startCall.headers['Idempotency-Key']).toMatch(/^exec-1:node-1:0:0:files-[0-9a-f]{32}$/);
+	});
+
+	it("feeds a Gmail trigger's attachment field on Start Pipeline too", async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'attachment_0' }] },
+			},
+			items: [{ json: { subject: 'Invoice' }, binary: { attachment_0: PDF } }],
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json.pipeline_run_id).toBe('run-1');
+		const startCall = calls(httpFn).find((call) => call.url === 'https://api.test/v1/start') as Record<string, any>;
+		expect(startCall.body.inputs.document.url).toBe('pipelex-storage://orgs/org-1/assets/file-1.pdf');
+	});
+
+	it('uploads every mapped binary of an item, skipping a row left blank', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: {
+				methodId: 'mt_expense',
+				inputs: '{}',
+				binaryInputs: {
+					input: [
+						{ name: 'invoice', binaryPropertyName: 'attachment_0' },
+						// The editor persists a row as soon as its add button is clicked.
+						{ name: '  ', binaryPropertyName: 'data' },
+						{ name: 'receipt', binaryPropertyName: 'attachment_1' },
+					],
+				},
+			},
+			items: [{ json: {}, binary: { attachment_0: PDF, attachment_1: PNG } }],
+			httpImpl: hostedPlane(),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		const sent = calls(httpFn) as Array<Record<string, any>>;
+		const grants = sent.filter((call) => call.url === 'https://api.test/v1/upload/grant');
+		expect(grants.map((call) => call.body)).toEqual([
+			{ filename: 'invoice.pdf', content_type: 'application/pdf', size: PDF_BYTES.length },
+			// n8n said octet-stream; the extension names the type instead.
+			{ filename: 'receipt.png', content_type: 'image/png', size: PNG_BYTES.length },
+		]);
+		const startCall = sent.find((call) => call.url === 'https://api.test/v1/start');
+		expect(startCall?.body.inputs).toEqual({
+			invoice: {
+				url: 'pipelex-storage://orgs/org-1/assets/file-1.pdf',
+				filename: 'invoice.pdf',
+				mime_type: 'application/pdf',
+			},
+			receipt: {
+				url: 'pipelex-storage://orgs/org-1/assets/file-2.pdf',
+				filename: 'receipt.png',
+				mime_type: 'image/png',
+			},
+		});
+	});
+
+	it('uploads each item its own file', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [
+				{ json: {}, binary: { data: PDF } },
+				{ json: {}, binary: { data: PNG } },
+			],
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0]).toHaveLength(2);
+		const starts = calls(httpFn).filter((call) => call.url === 'https://api.test/v1/start') as Array<
+			Record<string, any>
+		>;
+		expect(starts.map((call) => call.body.inputs.document.filename)).toEqual([
+			'invoice.pdf',
+			'receipt.png',
+		]);
+		expect(starts[0].headers['Idempotency-Key']).toMatch(/^exec-1:node-1:0:0:files-/);
+		expect(starts[1].headers['Idempotency-Key']).toMatch(/^exec-1:node-1:0:1:files-/);
+	});
+
+	it('names the binary fields the item does carry when the mapped one is missing, before any call', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { attachment_0: PDF, attachment_1: PNG } }],
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		const error = String(result[0][0].json.error);
+		expect(error).toContain('Binary input "document" reads the binary field "data", but this item has no such field.');
+		expect(error).toContain('attachment_0, attachment_1');
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('says so when the item carries no binary data at all', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {} }],
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('carries no binary data at all');
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('refuses an input set both in Inputs and in Binary Inputs, rather than picking one', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{"document": {"url": "https://example.com/invoice.pdf"}}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('Input "document" is set twice');
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('refuses an input mapped twice', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: {
+					input: [
+						{ name: 'document', binaryPropertyName: 'attachment_0' },
+						{ name: 'document', binaryPropertyName: 'attachment_1' },
+					],
+				},
+			},
+			items: [{ json: {}, binary: { attachment_0: PDF, attachment_1: PNG } }],
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('listed more than once');
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('refuses an empty file before uploading anything', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: { ...PDF, data: '' } } }],
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('is empty (0 bytes)');
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	/** Run with Continue On Fail off and hand back the error the node threw. */
+	async function captureError(ctx: IExecuteFunctions): Promise<Record<string, any>> {
+		try {
+			await Pipelex.prototype.execute.call(ctx);
+		} catch (error) {
+			return error as Record<string, any>;
+		}
+		throw new Error('expected the node to throw');
+	}
+
+	it('fails the item with no run when Pipelex refuses the upload as too large', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hostedPlane({
+				grant: () =>
+					fullResponse(413, {
+						title: 'Payload Too Large',
+						detail: 'Declared file size exceeds the 50 MiB limit.',
+					}),
+			}),
+		});
+
+		const error = await captureError(ctx);
+		expect(error.message).toContain('The file "invoice.pdf" for input "document" is too large for Pipelex');
+		expect(error.message).toContain('(Server: Declared file size exceeds the 50 MiB limit.)');
+		expect(error.httpCode).toBe('413');
+		expect(calls(httpFn).map((call) => call.url)).toEqual(['https://api.test/v1/upload/grant']);
+	});
+
+	it('says the Base URL offers no upload when the grant route is missing', async () => {
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hostedPlane({ grant: () => fullResponse(404, { detail: 'Not Found' }) }),
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(UPLOAD_UNAVAILABLE_MESSAGE);
+	});
+
+	it("classifies storage's refusal and never repeats its body or the grant URL", async () => {
+		// S3 echoes the canonical request on a signature mismatch — the credential
+		// included. Only its <Code> and <Message> may surface.
+		const s3Body =
+			'<?xml version="1.0" encoding="UTF-8"?><Error><Code>SignatureDoesNotMatch</Code>' +
+			'<Message>The request signature we calculated does not match the signature you provided.</Message>' +
+			'<CanonicalRequest>PUT /orgs/org-1/assets/file-1.pdf X-Amz-Credential=AKIASECRET</CanonicalRequest></Error>';
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hostedPlane({
+				storage: () => ({ statusCode: 403, body: s3Body, headers: {} }) as unknown as IN8nHttpFullResponse,
+			}),
+		});
+
+		const error = await captureError(ctx);
+		expect(error.message).toContain(
+			'Storage refused the upload of "invoice.pdf" for input "document" (403 SignatureDoesNotMatch): the request differs from what the upload grant signed.',
+		);
+		expect(error.httpCode).toBe('403');
+		expect(JSON.stringify({ ...error, message: error.message, description: error.description })).not.toMatch(
+			/AKIASECRET|X-Amz-Signature|CanonicalRequest/,
+		);
+		expect(calls(httpFn).some((call) => call.url === 'https://api.test/v1/start')).toBe(false);
+	});
+
+	it('names only the storage origin when storage cannot be reached', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hostedPlane({
+				storage: (options) => {
+					// A runtime error can carry the whole presigned URL in its message.
+					const failure = new Error(`getaddrinfo ENOTFOUND ${options.url}`) as Error & { code: string };
+					failure.name = 'AxiosError';
+					failure.code = 'ENOTFOUND';
+					throw failure;
+				},
+			}),
+		});
+
+		const error = await captureError(ctx);
+		expect(error.message).toContain(
+			`The upload of "invoice.pdf" for input "document" could not reach storage at ${STORAGE_ORIGIN}.`,
+		);
+		// The code rides in the description: in the message, n8n would swap the whole
+		// sentence for a generic "incorrect host" one naming neither file nor host.
+		expect(error.description).toBe('Network failure: AxiosError ENOTFOUND.');
+		expect(`${error.message} ${error.description}`).not.toMatch(/AKIASECRET|X-Amz-Signature/);
+		expect(calls(httpFn).some((call) => call.url === 'https://api.test/v1/start')).toBe(false);
+	});
+
+	it('reports a storage upload that ran out of time as unknown, not as refused', async () => {
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hostedPlane({
+				storage: () => {
+					const failure = new Error('timeout of 61000ms exceeded') as Error & { code: string };
+					failure.code = 'ECONNABORTED';
+					throw failure;
+				},
+			}),
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(
+			/did not finish within 61 s, so whether storage stored it is unknown/,
+		);
+	});
+
+	/** Storage that never answers: the request settles only when its signal aborts, as axios does. */
+	const storageAwaitingAbort: HttpImpl = (options) =>
+		new Promise<never>((_resolve, reject) => {
+			const signal = options.abortSignal as AbortSignal;
+			const cancel = (): void => {
+				const failure = new Error('canceled') as Error & { code: string };
+				failure.name = 'CanceledError';
+				failure.code = 'ERR_CANCELED';
+				reject(failure);
+			};
+			if (signal.aborted) cancel();
+			else signal.addEventListener('abort', cancel, { once: true });
+		});
+
+	it("owns the PUT's deadline: its own timeout signal, sized by the file, ends a stalled upload", async () => {
+		// A stand-in for AbortSignal.timeout that the test fires itself, so the
+		// deadline is proven without waiting a minute.
+		const deadline = new AbortController();
+		const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => deadline.signal);
+		const cancel = new AbortController();
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			cancelSignal: cancel.signal,
+			httpImpl: hostedPlane({
+				storage: (options) => {
+					deadline.abort();
+					return storageAwaitingAbort(options);
+				},
+			}),
+		});
+
+		const error = await captureError(ctx);
+		expect(timeoutSpy).toHaveBeenCalledWith(61_000);
+		expect(error.message).toContain(
+			'The upload of "invoice.pdf" for input "document" to storage did not finish within 61 s, so whether storage stored it is unknown.',
+		);
+		// The execution was not cancelled: the deadline, not the user, ended it.
+		expect(cancel.signal.aborted).toBe(false);
+	});
+
+	it('says the upload was cancelled when the execution is, even with the deadline linked in', async () => {
+		const cancel = new AbortController();
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			cancelSignal: cancel.signal,
+			httpImpl: hostedPlane({
+				storage: (options) => {
+					cancel.abort();
+					return storageAwaitingAbort(options);
+				},
+			}),
+		});
+
+		const error = await captureError(ctx);
+		expect(error.message).toBe('The upload of "invoice.pdf" for input "document" was cancelled with the execution.');
+	});
+
+	it('reads a connect timeout as storage never reached, not as a file that may have been stored', async () => {
+		const { ctx } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hostedPlane({
+				storage: () => {
+					// What axios throws when the TCP connection never opens: the operating
+					// system's ETIMEDOUT, its `syscall` on the cause.
+					const cause = Object.assign(new Error('connect ETIMEDOUT 52.95.0.1:443'), {
+						code: 'ETIMEDOUT',
+						syscall: 'connect',
+					});
+					throw Object.assign(new Error('connect ETIMEDOUT 52.95.0.1:443'), {
+						name: 'AxiosError',
+						code: 'ETIMEDOUT',
+						cause,
+					});
+				},
+			}),
+		});
+
+		const error = await captureError(ctx);
+		expect(error.message).toContain(
+			`The upload of "invoice.pdf" for input "document" could not reach storage at ${STORAGE_ORIGIN}.`,
+		);
+		expect(error.description).toBe('Network failure: AxiosError ETIMEDOUT, caused by Error ETIMEDOUT.');
+	});
+
+	it('turns an upload failure into an error item under Continue On Fail', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				methodId: 'mt_invoice',
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: PDF } }],
+			continueOnFail: true,
+			httpImpl: hostedPlane({
+				storage: () =>
+					({
+						statusCode: 503,
+						body: '<Error><Code>SlowDown</Code><Message>Please reduce your request rate.</Message></Error>',
+						headers: {},
+					}) as unknown as IN8nHttpFullResponse,
+			}),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain(
+			'Storage failed to store "invoice.pdf" for input "document" (503 SlowDown): Please reduce your request rate. Whether the file was stored is unknown; retry the item.',
+		);
+		expect(calls(httpFn).some((call) => call.url === 'https://api.test/v1/start')).toBe(false);
+	});
+
+	// ── Retry On Fail: a retried item reuses what it stored ──────────────────
+	// n8n retries by running the whole node again, every item of it, in the same
+	// execution. Each test below calls `execute` twice on one context to play it.
+
+	const ONE_DOCUMENT = {
+		methodId: 'mt_invoice',
+		inputs: '{}',
+		binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+	};
+
+	it('reuses the stored reference when Retry On Fail re-runs the node, so the run key stays and the run replays', async () => {
+		// The first attempt stores item 0 and starts its run, then fails on item 1,
+		// whose PUT storage refuses; the retry re-runs both items.
+		let storageDown = true;
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			items: [
+				{ json: {}, binary: { data: PDF } },
+				{ json: {}, binary: { data: PNG } },
+			],
+			httpImpl: hostedPlane({
+				storage: (options) =>
+					storageDown && String(options.url).includes('/file-2.pdf')
+						? ({ statusCode: 503, body: '', headers: {} } as unknown as IN8nHttpFullResponse)
+						: ({ statusCode: 200, body: '', headers: {} } as unknown as IN8nHttpFullResponse),
+			}),
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(/Storage failed to store "receipt.png"/);
+		const firstAttempt = calls(httpFn) as Array<Record<string, any>>;
+		const [firstStart] = firstAttempt.filter((call) => call.url === 'https://api.test/v1/start');
+
+		storageDown = false;
+		httpFn.mockClear();
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0]).toHaveLength(2);
+
+		const retry = calls(httpFn) as Array<Record<string, any>>;
+		// Item 0 is not uploaded again; only item 1, whose PUT failed, is.
+		expect(retry.filter((call) => call.url === 'https://api.test/v1/upload/grant')).toHaveLength(1);
+		const retryStarts = retry.filter((call) => call.url === 'https://api.test/v1/start');
+		expect(retryStarts).toHaveLength(2);
+		// Item 0 sends the very body and key of its first attempt: the platform
+		// replays the run it already started instead of starting a second one.
+		expect(retryStarts[0].body).toEqual(firstStart.body);
+		expect(retryStarts[0].headers['Idempotency-Key']).toBe(firstStart.headers['Idempotency-Key']);
+		expect(retryStarts[0].body.inputs.document.url).toBe('pipelex-storage://orgs/org-1/assets/file-1.pdf');
+		// Item 1's failed PUT was never remembered: its retry stored a new object.
+		expect(retryStarts[1].body.inputs.document.url).toBe('pipelex-storage://orgs/org-1/assets/file-3.pdf');
+	});
+
+	it('uploads again, under a new key, when the bytes changed between attempts', async () => {
+		const items: NonNullable<ContextOptions['items']> = [{ json: {}, binary: { data: PDF } }];
+		const { ctx, httpFn } = makeContext({ operation: 'start', params: ONE_DOCUMENT, items, httpImpl: hostedPlane() });
+
+		await Pipelex.prototype.execute.call(ctx);
+		const [first] = calls(httpFn).filter((call) => call.url === 'https://api.test/v1/start') as Array<
+			Record<string, any>
+		>;
+
+		items[0].binary = { data: { ...PDF, data: Buffer.from('%PDF-1.7 the corrected invoice').toString('base64') } };
+		httpFn.mockClear();
+		await Pipelex.prototype.execute.call(ctx);
+		const retry = calls(httpFn) as Array<Record<string, any>>;
+		expect(retry.filter((call) => call.url === 'https://api.test/v1/upload/grant')).toHaveLength(1);
+		const [second] = retry.filter((call) => call.url === 'https://api.test/v1/start');
+		expect(second.body.inputs.document.url).not.toBe(first.body.inputs.document.url);
+		expect(second.headers['Idempotency-Key']).not.toBe(first.headers['Idempotency-Key']);
+	});
+
+	it('never reuses a reference across executions', async () => {
+		const first = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hostedPlane(),
+		});
+		await Pipelex.prototype.execute.call(first.ctx);
+
+		const second = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			items: [{ json: {}, binary: { data: PDF } }],
+			executionId: 'exec-2',
+			httpImpl: hostedPlane(),
+		});
+		await Pipelex.prototype.execute.call(second.ctx);
+		expect(calls(second.httpFn).filter((call) => call.url === 'https://api.test/v1/upload/grant')).toHaveLength(1);
+	});
+
+	it("keeps a loop's passes apart: a later pass uploads again and starts its own run", async () => {
+		// Loop Over Items runs the node once per pass in one execution, numbering
+		// each pass's items from 0 again; only n8n's run index tells them apart.
+		const first = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hostedPlane(),
+		});
+		await Pipelex.prototype.execute.call(first.ctx);
+		const nextPass = makeContext({
+			operation: 'start',
+			params: { ...ONE_DOCUMENT, inputs: '{"language":"de"}' },
+			items: [{ json: {}, binary: { data: PDF } }],
+			runIndex: 1,
+			httpImpl: hostedPlane(),
+		});
+		await Pipelex.prototype.execute.call(nextPass.ctx);
+
+		const startOf = (httpFn: ReturnType<typeof vi.fn>) =>
+			calls(httpFn).find((call) => call.url === 'https://api.test/v1/start') as Record<string, any>;
+		expect(calls(nextPass.httpFn).filter((call) => call.url === 'https://api.test/v1/upload/grant')).toHaveLength(1);
+		expect(startOf(first.httpFn).headers['Idempotency-Key']).toMatch(/^exec-1:node-1:0:0:files-/);
+		expect(startOf(nextPass.httpFn).headers['Idempotency-Key']).toMatch(/^exec-1:node-1:1:0:files-/);
+	});
+
+	it('starts no run when the execution is cancelled while its file was being stored', async () => {
+		// Storage accepts the file just as the execution is cancelled: the PUT
+		// itself succeeds, so only a check before the start can stop the run.
+		const cancel = new AbortController();
+		const plane = hostedPlane();
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: ONE_DOCUMENT,
+			items: [{ json: {}, binary: { data: PDF } }],
+			cancelSignal: cancel.signal,
+			httpImpl: (options) => {
+				const response = plane(options);
+				if (String(options.url).startsWith(STORAGE_ORIGIN)) cancel.abort();
+				return response;
+			},
+		});
+
+		const error = await captureError(ctx);
+		expect(error.message).toBe('The execution was cancelled before the run was started, so no run was started.');
+		expect(calls(httpFn).some((call) => call.url === 'https://api.test/v1/start')).toBe(false);
+	});
+
+	// ── Memory: measured from metadata, loaded one file at a time ────────────
+
+	const TWO_FILES = {
+		methodId: 'mt_expense',
+		inputs: '{}',
+		binaryInputs: {
+			input: [
+				{ name: 'invoice', binaryPropertyName: 'attachment_0' },
+				{ name: 'receipt', binaryPropertyName: 'attachment_1' },
+			],
+		},
+	};
+
+	it("refuses a file over the size limit from n8n's metadata, before loading or sending anything", async () => {
+		const { ctx, httpFn, bufferFn } = makeContext({
+			operation: 'start',
+			params: TWO_FILES,
+			items: [
+				{
+					json: {},
+					binary: { attachment_0: PDF, attachment_1: { ...PNG, bytes: 60 * 1024 * 1024 } },
+				},
+			],
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toBe(
+			'The file "receipt.png" in binary field "attachment_1" for input "receipt" is 62914560 bytes, over the 50 MiB Pipelex accepts for one file, so it was not uploaded. Pass a smaller file.',
+		);
+		expect(bufferFn).not.toHaveBeenCalled();
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it("refuses an empty file from n8n's metadata, before loading the files before it", async () => {
+		const { ctx, httpFn, bufferFn } = makeContext({
+			operation: 'start',
+			params: TWO_FILES,
+			items: [{ json: {}, binary: { attachment_0: PDF, attachment_1: { ...PNG, bytes: 0 } } }],
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('is empty (0 bytes)');
+		expect(bufferFn).not.toHaveBeenCalled();
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('reads the size of a binary n8n keeps outside memory through getBinaryMetadata', async () => {
+		const { ctx, httpFn, bufferFn } = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			items: [{ json: {}, binary: { data: { ...PDF, id: 'filesystem-v2:abc' } } }],
+			binaryMetadata: { 'filesystem-v2:abc': { fileSize: 51 * 1024 * 1024 } },
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('over the 50 MiB Pipelex accepts for one file');
+		expect(bufferFn).not.toHaveBeenCalled();
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('measures the loaded file when the metadata says nothing', async () => {
+		// Kept outside memory, but this n8n offers no getBinaryMetadata.
+		const { ctx, httpFn, bufferFn } = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			items: [{ json: {}, binary: { data: { ...PDF, data: '', id: 'filesystem-v2:abc' } } }],
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('is empty (0 bytes)');
+		expect(bufferFn).toHaveBeenCalledTimes(1);
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('loads, uploads and lets go of one file before loading the next', async () => {
+		const log: string[] = [];
+		const plane = hostedPlane();
+		const { ctx } = makeContext({
+			operation: 'start',
+			params: TWO_FILES,
+			items: [{ json: {}, binary: { attachment_0: PDF, attachment_1: PNG } }],
+			log,
+			httpImpl: (options) => {
+				const url = String(options.url);
+				log.push(
+					url === 'https://api.test/v1/upload/grant' ? 'grant' : url.startsWith(STORAGE_ORIGIN) ? 'put' : 'start',
+				);
+				return plane(options);
+			},
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		expect(log).toEqual([
+			'load attachment_0',
+			'grant',
+			'put',
+			'load attachment_1',
+			'grant',
+			'put',
+			'start',
+		]);
+	});
+
+	// ── The workflow's binary mode ────────────────────────────────────────────
+
+	it("finds a file kept in the item's JSON under the combined binary mode", async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			binaryMode: 'combined',
+			items: [{ json: { subject: 'Invoice', data: PDF as unknown as Record<string, unknown> } }],
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json.pipeline_run_id).toBe('run-1');
+		const startCall = calls(httpFn).find((call) => call.url === 'https://api.test/v1/start') as Record<string, any>;
+		expect(startCall.body.inputs.document).toEqual({
+			url: 'pipelex-storage://orgs/org-1/assets/file-1.pdf',
+			filename: 'invoice.pdf',
+			mime_type: 'application/pdf',
+		});
+	});
+
+	it("names the JSON's binary fields when the mapped one is missing under the combined mode", async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			binaryMode: 'combined',
+			items: [{ json: { subject: 'Invoice', attachment_0: PDF as unknown as Record<string, unknown> } }],
+			continueOnFail: true,
+			httpImpl: hostedPlane(),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toBe(
+			'Binary input "document" reads the binary field "data", but this item has no such field. Its binary fields are: attachment_0.',
+		);
+		expect(httpFn).not.toHaveBeenCalled();
 	});
 });
