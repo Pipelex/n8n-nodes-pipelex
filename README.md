@@ -54,7 +54,7 @@ This node runs your pipelines through the **hosted Pipelex API's durable run lif
 
 > ℹ️ **Hosted-only:** the run-lifecycle polling routes (`/v1/runs/*`), the upload route behind **Binary Inputs** (`/v1/upload/grant`) and the `Method ID` field are hosted-API extensions, not part of the bare MTHDS Protocol — a bare runner does not implement them. To use your own backend, point the Base URL at a server exposing the same hosted surface (`/v1/start`, `/v1/runs/{pipeline_run_id}/results`, `/v1/auth/verify`, and `/v1/upload/grant` for binary inputs).
 
-> ℹ️ **Client identification:** every request to the API, the credential test included, carries `User-Agent: n8n-nodes-pipelex/<package version>`, following the Pipelex client-identification spec (`docs/specs/client-identification.md` in the Pipelex workspace). See the [usage guide](docs/usage.md#client-identification-user-agent).
+> ℹ️ **Client identification:** every request to the API, the credential test included, carries `User-Agent: n8n-nodes-pipelex/<package version>`, following the Pipelex client-identification spec, `conformance/specs/client-identification.md` in the `conformance` repository, which holds the cross-repo interface specs. See the [usage guide](docs/usage.md#client-identification-user-agent).
 
 ### Install the n8n Community Node
 
@@ -104,7 +104,7 @@ The Pipelex node has one **Operation** selector with four operations, mirroring 
 
 | Parameter | API Field | Description |
 |---|---|---|
-| **Method ID** | `method_id` | ID of a stored method to run (hosted API only). It already carries its own Python. |
+| **Method ID** | `method_id` | ID of a stored method to run (hosted API only), sent exactly as typed. `mt_abc123` runs its latest published version, `mt_abc123@3` runs version 3, and `mt_abc123@draft` runs its current draft; see [which version a Method ID runs](docs/usage.md#which-version-a-method-id-runs). It already carries its own Python. |
 | **Define Method Inline** | — | Toggle. Turn on to paste the method here instead of running a stored one; it reveals the two fields below. **Mutually exclusive with Method ID.** |
 | **MTHDS Bundles** | `mthds_contents` | Your method, pasted inline — one entry per bundle file. |
 | **Python Files** | `files` | Custom PipeFunc Python for the pasted method (`funcs/*.py`, `structures/*.py`, `requirements.txt`). Shipped together with the bundle as one method bundle; requires a sandbox-hosted runner. |
@@ -136,7 +136,7 @@ The Pipelex node has one **Operation** selector with four operations, mirroring 
    - **Start Pipeline** — start the run and return immediately with its `pipeline_run_id` (collect the result later)
    - **Poll & Get Result** — wait for an already-started run by `pipeline_run_id` until it finishes (or Max Wait)
    - **Get Run Result** — a one-shot, non-blocking fetch by `pipeline_run_id` (returns `status: "RUNNING"` while still running)
-4. **Name the method:** a stored `Method ID`, or turn on `Define Method Inline` and paste it into `MTHDS Bundles`
+4. **Name the method:** a stored `Method ID` (its latest published version, or `@3` for version 3, or `@draft` for the draft), or turn on `Define Method Inline` and paste it into `MTHDS Bundles`
 5. **Set Inputs** as a JSON object matching your pipeline's expected inputs, and map any file input (a mail attachment, a Drive download) to its binary field under **Binary Inputs**
 6. **Run** the workflow
 

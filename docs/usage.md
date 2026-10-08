@@ -7,7 +7,7 @@ The Pipelex node has one **Operation** selector with four operations, mirroring 
 | Operation | What it does | Endpoint |
 |---|---|---|
 | **Start & Wait for Result** (default) | Start a durable run and poll internally until it finishes, then return the result. The polling is invisible — no Wait-node loop to assemble. | `POST /v1/start` → `GET /v1/runs/{pipeline_run_id}/results` |
-| **Start Pipeline** | Start a durable run and return **immediately** with the StartAck — `{ pipeline_run_id, state, created_at }`. No waiting. | `POST /v1/start` |
+| **Start Pipeline** | Start a durable run and return **immediately** with the StartAck — `{ pipeline_run_id, state, created_at }`, plus `method_version` for a stored method. No waiting. | `POST /v1/start` |
 | **Poll & Get Result** | Wait for an **already-started** run by `pipeline_run_id`: poll until it finishes or Max Wait is exceeded. | `GET /v1/runs/{pipeline_run_id}/results` (polled) |
 | **Get Run Result** | Fetch a run's result **once** by `pipeline_run_id` (no polling). `status: "RUNNING"` while still running. | `GET /v1/runs/{pipeline_run_id}/results` |
 
@@ -21,7 +21,7 @@ Both start operations carry an `Idempotency-Key` derived from the n8n execution,
 
 > ℹ️ **Upgrading from 0.0.x?** The old `execute` operation value ("Execute Pipeline") still executes as a hidden alias of **Start & Wait for Result** — saved workflows keep running without edits. And there is no more injected **Custom API Call** entry in the dropdown: the credential no longer declares a generic `authenticate` block (the node sends its own `Authorization` header), which is the trigger n8n uses to inject that raw-HTTP escape hatch.
 
-> ℹ️ **Hosted-only:** the run-lifecycle polling routes (`/v1/runs/*`), the upload route behind **Binary Inputs** (`/v1/upload/grant`) and the `Method ID` field are hosted-API extensions, not part of the bare MTHDS Protocol — a bare runner does not implement them.
+> ℹ️ **Hosted-only:** the run-lifecycle polling routes (`/v1/runs/*`), the upload route behind **Binary Inputs** (`/v1/upload/grant`) and the `Method ID` field, with its version suffixes, are hosted-API extensions, not part of the bare MTHDS Protocol — a bare runner does not implement them.
 
 ## Credential: Base URL
 
@@ -38,7 +38,7 @@ The credential test hits `GET <Base URL>/v1/auth/verify` to verify both reachabi
 
 ## Client identification (`User-Agent`)
 
-Every request the node sends to the Pipelex API — the upload grant for a binary input, the start, the result polls, the failed-run status read and the credential test — carries `User-Agent: n8n-nodes-pipelex/<package version>` (for example `n8n-nodes-pipelex/0.2.1`), so the platform can tell traffic from n8n apart from the web app, the SDKs or a hand-written call. The value is a single product token because a community node cannot read the n8n version it runs in. It is self-declared and used only for analytics and diagnostics, never for authorization or rate limits. The one request that does not go to the Pipelex API, a binary input's upload to storage, keeps n8n's own `User-Agent`, as the spec asks for a presigned object-store URL. The convention every first-party Pipelex client follows is the Pipelex workspace spec `docs/specs/client-identification.md`.
+Every request the node sends to the Pipelex API — the upload grant for a binary input, the start, the result polls, the failed-run status read and the credential test — carries `User-Agent: n8n-nodes-pipelex/<package version>` (for example `n8n-nodes-pipelex/0.2.1`), so the platform can tell traffic from n8n apart from the web app, the SDKs or a hand-written call. The value is a single product token because a community node cannot read the n8n version it runs in. It is self-declared and used only for analytics and diagnostics, never for authorization or rate limits. The one request that does not go to the Pipelex API, a binary input's upload to storage, keeps n8n's own `User-Agent`, as the spec asks for a presigned object-store URL. The convention every first-party Pipelex client follows is the client-identification spec, `conformance/specs/client-identification.md` in the `conformance` repository, which holds the cross-repo interface specs.
 
 ---
 
@@ -48,7 +48,7 @@ These fields apply to the two start operations (**Start & Wait for Result** and 
 
 | | How |
 | --- | --- |
-| **A stored method** (default) | put its id in **Method ID**. It already carries its own Python. |
+| **A stored method** (default) | put its id in **Method ID**, with a suffix when you want a particular version (see [Which version a Method ID runs](#which-version-a-method-id-runs)). It already carries its own Python. |
 | **An inline method** | turn on **Define Method Inline**, then paste the bundle into **MTHDS Bundles** (one entry per bundle file) and add any custom PipeFunc Python under **Python Files**. |
 
 Setting a `Method ID` *and* an inline method is an error — "what is this node running?" must have one answer. (The API itself would accept both, running the inline method and filing the run under the stored one in history; the node refuses it deliberately.)
@@ -56,6 +56,22 @@ Setting a `Method ID` *and* an inline method is an error — "what is this node 
 Turning the toggle **off** also removes whatever it holds from the request, so a bundle you pasted and then abandoned is never sent, and never trips the either/or error from a field you can no longer see.
 
 > **Upgrading from 0.1.0?** A node configured before this toggle existed will refuse to run until you switch it on, with an error saying so. That is deliberate: in 0.1.0 an inline bundle took precedence over a `Method ID`, so quietly defaulting to "toggle off" would have run the *stored* method instead — a different method, with no error. Switch the toggle on to keep running the pasted method, or clear `MTHDS Bundles` to run the stored one.
+
+### Which version a Method ID runs
+
+A stored method keeps a draft, which you edit, and the versions published from it, each fixed once published. The **Method ID** says which of them runs:
+
+| Method ID | What runs |
+| --- | --- |
+| `mt_abc123` | The latest published version. A method that was never published has none, so the start is refused (`409`, `method_not_published`) with a message naming the `@draft` form: run the draft with `@draft`, or publish the method first. |
+| `mt_abc123@3` | Version 3, and still version 3 after later publishes. A version that was never published is refused (`404`, `method_version_not_found`). |
+| `mt_abc123@draft` | The draft as it stands when the run starts, published or not. |
+
+A bare id follows the method as it is published, so the workflow picks up each new version on its next run without an edit. Pin a version when the workflow must keep running exactly what it was built against, and use `@draft` while you are still editing the method and want each run to take your latest changes.
+
+The node sends the id exactly as you type it, trimmed of surrounding spaces, and the Pipelex API reads the suffix. After the `@` it accepts a version number without a leading zero, or `draft` in lower case; anything else is refused with a `422`, and the error on the item is the API's own explanation of what a suffix may be.
+
+Both start operations add `method_version` to their item: the number of the version that ran, or `draft`. A workflow that runs a bare id can therefore tell which version it got. **Poll & Get Result** and **Get Run Result** read a run by its `pipeline_run_id` alone, and their items do not carry it.
 
 ### Custom PipeFunc Python
 
@@ -150,7 +166,7 @@ Take a stored method that reads an invoice from its `document` input, a `Documen
 
 1. A **Gmail Trigger** with *Download Attachments* switched on. Each email arrives as one item, with its first attachment in the binary field `attachment_0`.
 2. A **Pipelex** node on **Start & Wait for Result**:
-    - **Method ID**: the stored method's id
+    - **Method ID**: the stored method's id, such as `mt_abc123` to run its latest published version
     - **Inputs**: `{"language": "fr"}`
     - **Binary Inputs** → **Add Binary Input**: Input Name `document`, Input Binary Field `attachment_0`
 
@@ -217,6 +233,7 @@ A completed run produces one item:
 | `working_memory` | every named value the run produced, not just the main output |
 | `tokens_usages` | one record per inference call — see below |
 | `usage_assembly_error` | non-null only when usage accounting itself failed |
+| `method_version` | which version of a stored method ran: its number, or `draft`. Only on the items of the two start operations, and only for a run started from a **Method ID** (see [Which version a Method ID runs](#which-version-a-method-id-runs)) |
 | `pipe_io_contracts`, `input_form`, `output_form` | the run's I/O descriptions from the MTHDS standard, keyed by pipe: each pipe's input and output contracts, and form descriptors for its inputs and its output. `null` for a run that did not write them |
 
 The heavy `graph_spec` visualization artifact (the run graph) is not part of the item. The node does not even download it: its result reads ask the API for every artifact except `graph_spec` (`GET /v1/runs/{pipeline_run_id}/results?artifacts=…`), which keeps each poll light. A server that predates that parameter ignores it and sends the graph anyway, and the node then strips it, so the item is the same either way.

@@ -762,14 +762,38 @@ async function startAndWaitForResult(
 		itemIndex,
 		DEFAULT_MAX_WAIT_SECONDS,
 	) as number;
-	return pollForResultLoop(ctx, conn, startAck.pipeline_run_id, maxWaitSeconds, itemIndex);
+	const json = await pollForResultLoop(
+		ctx,
+		conn,
+		startAck.pipeline_run_id,
+		maxWaitSeconds,
+		itemIndex,
+	);
+	return withMethodVersion(json, startAck);
+}
+
+/**
+ * Carry the StartAck's `method_version` into the item, when the server sent
+ * one: which content of the stored method the run ran, the version number a
+ * bare Method ID resolved to (or the pinned one), or `draft`. The ack is the one
+ * answer that says it — the results read does not — so a workflow that runs a
+ * bare id learns from its own item which version ran. Absent for an inline
+ * method, and from a server that predates method versions.
+ */
+function withMethodVersion(json: IDataObject, startAck: StartAck): IDataObject {
+	const version = startAck.method_version;
+	if (typeof version === 'number' || typeof version === 'string') {
+		return { ...json, method_version: version };
+	}
+	return json;
 }
 
 /**
  * Start Pipeline op: `POST /v1/start` only — no polling. Output is the
- * StartAck (`{ pipeline_run_id, state, created_at }`); the pipeline_run_id is
- * the point — feed it to Poll & Get Result or Get Run Result later (possibly
- * from another workflow branch or a scheduled workflow).
+ * StartAck (`{ pipeline_run_id, state, created_at }`, plus `method_version` for
+ * a run started from a Method ID); the pipeline_run_id is the point — feed it
+ * to Poll & Get Result or Get Run Result later (possibly from another workflow
+ * branch or a scheduled workflow).
  */
 async function startPipeline(
 	ctx: IExecuteFunctions,
@@ -777,14 +801,14 @@ async function startPipeline(
 	itemIndex: number,
 ): Promise<IDataObject> {
 	const startAck = await startRun(ctx, conn, itemIndex);
-	// `state` and `created_at` are HOSTED extension fields, not protocol
-	// guarantees (the protocol's RunResultStart promises `pipeline_run_id` only),
-	// so emit them only when the server actually sent them rather than planting
-	// `undefined` keys in the item.
+	// `state`, `created_at` and `method_version` are HOSTED extension fields, not
+	// protocol guarantees (the protocol's RunResultStart promises
+	// `pipeline_run_id` only), so emit them only when the server actually sent
+	// them rather than planting `undefined` keys in the item.
 	const json: IDataObject = { pipeline_run_id: startAck.pipeline_run_id };
 	if (startAck.state !== undefined) json.state = startAck.state;
 	if (startAck.created_at !== undefined) json.created_at = startAck.created_at;
-	return json;
+	return withMethodVersion(json, startAck);
 }
 
 /**
@@ -915,25 +939,31 @@ export class Pipelex implements INodeType {
 			},
 
 			// ── Pipeline definition (Start & Wait for Result / Start Pipeline) ────
-			// Field order: MTHDS Bundles (the big payload) → Method ID → Inputs →
-			// Pipe Code → optional overrides. Run source rule (enforced at
-			// runtime, mirroring the server): at least one of Pipe Code / MTHDS
-			// Bundles / Method ID. Method ID combines with MTHDS Bundles —
-			// inline bundles run, method_id links the run to the stored method.
-			// Custom PipeFunc Python for the pasted method. There are exactly two
-			// ways to say what to run: a stored Method ID, or MTHDS Bundles (+ these
-			// Python files). The API also accepts a base64-zip bundle and arbitrary
-			// bundle files; both are deliberately NOT exposed — they were a third and
-			// fourth run source in the editor for no user-visible gain. See
-			// `assembleRunSources` for how the two halves are sent as one bundle.
+			// Field order: Method ID → the inline toggle → its pair (MTHDS Bundles,
+			// Python Files) → Inputs → Binary Inputs → Pipe Code → optional
+			// overrides. Run source rule (enforced at runtime, mirroring the
+			// server): at least one of Pipe Code / MTHDS Bundles / Method ID. There
+			// are exactly two ways to say what to run, and they are alternatives: a
+			// stored Method ID, or the method pasted inline (MTHDS Bundles + Python
+			// Files). The hosted API would accept a method_id beside an inline
+			// source as run-history linkage, but the node refuses the pair (see
+			// `readRunDefinition`). The API also accepts a base64-zip bundle and
+			// arbitrary bundle files; both are deliberately NOT exposed — they were
+			// a third and fourth run source in the editor for no user-visible gain.
+			// See `assembleRunSources` for how the inline pair is sent as one bundle.
+			//
+			// The Method ID is a selector, sent as typed (only trimmed): a bare id
+			// runs the latest published version, `@<n>` a pinned version, `@draft`
+			// the draft. The hosted API parses the suffix and explains a malformed
+			// one, so the node does not repeat its grammar here.
 			{
 				displayName: 'Method ID',
 				name: 'methodId',
 				type: 'string',
 				default: '',
-				placeholder: 'e.g., my-stored-method-ID',
+				placeholder: 'e.g., mt_abc123 or mt_abc123@draft',
 				description:
-					'ID of a stored method whose MTHDS source supplies the bundle (sent as method_id; hosted API only). Combinable with MTHDS Bundles, or usable alone instead of pasting them inline.',
+					'ID of a stored method to run (sent as method_id; hosted API only). The bare ID runs its latest published version, mt_abc123@3 runs version 3, and mt_abc123@draft runs its current draft. Leave it empty to define the method inline instead: the two are alternatives, not combinable.',
 				displayOptions: {
 					show: {
 						operation: START_OPERATIONS,

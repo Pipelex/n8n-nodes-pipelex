@@ -22,6 +22,7 @@ import {
 	mapResultResponse,
 	missingBinaryMessage,
 	parseStorageError,
+	problemMessage,
 	readBinaryInputMappings,
 	readUploadGrant,
 	runFailureData,
@@ -470,6 +471,82 @@ describe('mapResultResponse (mirrors mthds-js getRunResult)', () => {
 			statusCode: 418,
 			message: 'Unexpected response status 418',
 		});
+	});
+});
+
+describe('problemMessage (the text a platform error is shown with)', () => {
+	// The hosted API's refusal of a malformed Method ID version suffix, as the
+	// platform's validation handler renders it: the useful sentence is the field
+	// error's, the `detail` only points at the list.
+	const MALFORMED_SUFFIX = {
+		type: 'https://docs.pipelex.com/errors/validation_failed',
+		title: 'Validation failed',
+		status: 422,
+		code: 'validation_failed',
+		detail: 'Request body failed validation. See `errors` for the per-field breakdown.',
+		errors: [
+			{
+				field: 'method_id',
+				code: 'malformed_version_suffix',
+				detail:
+					"method_id 'mt_abc' carries a version suffix that names no version. After the `@`, write a published version's number (a positive number without a leading zero, as in `@3`) or `draft` in lower case; leave the suffix out to name the latest published version.",
+			},
+		],
+	};
+
+	it("leads with the field errors, since a 422's detail only points at them", () => {
+		expect(problemMessage(MALFORMED_SUFFIX)).toBe(
+			"method_id: method_id 'mt_abc' carries a version suffix that names no version. After the `@`, write a published version's number (a positive number without a leading zero, as in `@3`) or `draft` in lower case; leave the suffix out to name the latest published version.",
+		);
+	});
+
+	it('names each field, leaves a whole-request error unnamed, and ends every sentence', () => {
+		const body = {
+			detail: 'Request body failed validation.',
+			errors: [
+				{ field: 'inputs', code: 'dict_type', detail: 'Input should be a valid dictionary' },
+				{ field: '<root>', code: 'value_error', detail: 'Provide pipe_code or method_id.' },
+				{ field: 'output_name', code: 'string_too_long' },
+			],
+		};
+		expect(problemMessage(body)).toBe(
+			'inputs: Input should be a valid dictionary. Provide pipe_code or method_id. output_name: string_too_long.',
+		);
+	});
+
+	it('skips field errors with nothing to say, and falls back to the detail when none is left', () => {
+		const body = {
+			detail: 'Request body failed validation.',
+			errors: [{ field: 'method_id', detail: '  ' }, null, 'not an object'],
+		};
+		expect(problemMessage(body as unknown as IDataObject)).toBe('Request body failed validation.');
+	});
+
+	it('reads the two method-selector errors by their detail, which says what to do', () => {
+		expect(
+			problemMessage({
+				title: 'Method not published',
+				status: 409,
+				code: 'method_not_published',
+				detail:
+					"Method 'mt_abc' has no published version. Address its draft as `mt_abc@draft`, or publish it first.",
+			}),
+		).toBe(
+			"Method 'mt_abc' has no published version. Address its draft as `mt_abc@draft`, or publish it first.",
+		);
+		expect(
+			problemMessage({
+				title: 'Method version not found',
+				status: 404,
+				code: 'method_version_not_found',
+				detail: "Method 'mt_abc' has no version 7.",
+			}),
+		).toBe("Method 'mt_abc' has no version 7.");
+	});
+
+	it('falls back to the title, then to nothing', () => {
+		expect(problemMessage({ title: 'Conflict', errors: [] })).toBe('Conflict');
+		expect(problemMessage({ errors: 'not a list' })).toBeUndefined();
 	});
 });
 

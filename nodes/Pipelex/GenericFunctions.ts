@@ -426,17 +426,52 @@ export type ResultOutcome =
  * rather than the headline.
  */
 function withServerDetail(message: string, body: IDataObject): string {
-	const detail = extractProblemDetail(body);
+	const detail = problemMessage(body);
 	return detail ? `${message} (Server: ${detail})` : message;
 }
 
-function extractProblemDetail(body: IDataObject): string | undefined {
-	// Platform errors are RFC 9457 problem+json: prefer `detail`, then `title`.
+/**
+ * The most specific text a platform error carries. Platform errors are RFC 9457
+ * `problem+json`: the per-field `errors` come first when there are any, then
+ * `detail`, then `title`.
+ *
+ * The field errors lead because a `422`'s `detail` only says to read them
+ * ("Request body failed validation. See `errors` for the per-field
+ * breakdown."), and n8n shows neither the attached body nor its `errors` list:
+ * the reason the hosted API gives for a malformed Method ID version suffix
+ * lives in `errors[].detail` and nowhere else. The `detail` is not lost either,
+ * since `NodeApiError` picks it out of the body as the error's description when
+ * the message differs from it.
+ */
+export function problemMessage(body: IDataObject): string | undefined {
+	const fieldErrors = problemFieldErrors(body);
+	if (fieldErrors.length > 0) return fieldErrors.join(' ');
 	const detail = body.detail;
 	if (typeof detail === 'string' && detail.length > 0) return detail;
 	const title = body.title;
 	if (typeof title === 'string' && title.length > 0) return title;
 	return undefined;
+}
+
+/**
+ * A problem's `errors[]`, one sentence each: `field: detail`, or the detail
+ * alone for an error on the request as a whole (`<root>`). An entry with no
+ * detail falls back to its `code`; one with neither is skipped.
+ */
+function problemFieldErrors(body: IDataObject): string[] {
+	const errors = body.errors;
+	if (!Array.isArray(errors)) return [];
+	return errors.flatMap((entry: unknown) => {
+		if (entry === null || typeof entry !== 'object') return [];
+		const { field, detail, code } = entry as { field?: unknown; detail?: unknown; code?: unknown };
+		const text = [detail, code]
+			.find((value): value is string => typeof value === 'string' && value.trim().length > 0)
+			?.trim();
+		if (text === undefined) return [];
+		const sentence = /[.!?]$/.test(text) ? text : `${text}.`;
+		const named = typeof field === 'string' && field.length > 0 && field !== '<root>';
+		return [named ? `${field}: ${sentence}` : sentence];
+	});
 }
 
 /**
@@ -497,14 +532,14 @@ export function mapResultResponse(
 		case 409:
 			return {
 				kind: 'failed',
-				message: extractProblemDetail(body) ?? 'Run finished with a non-completed status',
+				message: problemMessage(body) ?? 'Run finished with a non-completed status',
 				body,
 			};
 		default:
 			return {
 				kind: 'unexpected',
 				statusCode,
-				message: extractProblemDetail(body) ?? `Unexpected response status ${statusCode}`,
+				message: problemMessage(body) ?? `Unexpected response status ${statusCode}`,
 				body,
 			};
 	}
@@ -512,9 +547,17 @@ export function mapResultResponse(
 
 /**
  * `POST /v1/start` with an `Idempotency-Key` — answers `202 StartAck`
- * (`{ pipeline_run_id, state, created_at }`; the id is server-generated and
- * authoritative). A 403 is translated to an actionable error; a non-2xx
- * otherwise surfaces as a `NodeApiError` with the problem detail.
+ * (`{ pipeline_run_id, state, created_at }`, plus `method_version` for a run
+ * started from a Method ID; the id is server-generated and authoritative). A
+ * 403 is translated to an actionable error; a non-2xx otherwise surfaces as a
+ * `NodeApiError` with the problem's own text ({@link problemMessage}).
+ *
+ * That text is what explains a Method ID the hosted API could not resolve, and
+ * it is written to be shown as it is: a `409 method_not_published` for a bare id
+ * of a method with no published version, whose detail names the `@draft` form
+ * and publishing; a `404 method_version_not_found` for a pinned version that was
+ * never published; a `422 validation_failed` whose `method_id` field error says
+ * what a version suffix may be.
  */
 export async function requestStart(
 	ctx: IExecuteFunctions,
@@ -555,9 +598,8 @@ export async function requestStart(
 		});
 	}
 	if (response.statusCode < 200 || response.statusCode >= 300) {
-		const detail = extractProblemDetail(responseBody) ?? 'Failed to start run';
 		throw new NodeApiError(ctx.getNode(), responseBody as JsonObject, {
-			message: detail,
+			message: problemMessage(responseBody) ?? 'Failed to start run',
 			httpCode: String(response.statusCode),
 			itemIndex,
 		});
