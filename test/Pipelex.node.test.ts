@@ -21,6 +21,7 @@ vi.mock('../nodes/Pipelex/GenericFunctions', async (importOriginal) => {
 import {
 	FORBIDDEN_MESSAGE,
 	NOT_FOUND_MESSAGE,
+	ROLE_NOT_PERMITTED_MESSAGE,
 	SERVICE_UNAVAILABLE_MESSAGE,
 	UPLOAD_UNAVAILABLE_MESSAGE,
 } from '../nodes/Pipelex/GenericFunctions';
@@ -606,6 +607,31 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(FORBIDDEN_MESSAGE);
 	});
 
+	it('says a role refusal is the role, not missing API access (403 role_not_permitted)', async () => {
+		// A role that runs only published versions, starting a method's draft.
+		const detail =
+			"Your role in this organization is runner: it runs the organization's published versions and changes no method.";
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: { methodId: 'mt_abc@draft', inputs: '{}' },
+			httpImpl: () =>
+				fullResponse(403, {
+					title: 'Role not permitted',
+					status: 403,
+					code: 'role_not_permitted',
+					error_domain: 'config',
+					retryable: false,
+					detail,
+				}),
+		});
+
+		const error = await Pipelex.prototype.execute.call(ctx).catch((thrown: unknown) => thrown);
+		expect(error).toMatchObject({ message: `${ROLE_NOT_PERMITTED_MESSAGE} ${detail}`, httpCode: '403' });
+		expect((error as Error).message).not.toContain(FORBIDDEN_MESSAGE);
+		// Nothing started, so nothing is polled.
+		expect(httpFn).toHaveBeenCalledTimes(1);
+	});
+
 	it('surfaces a failed start with its problem detail', async () => {
 		const { ctx } = makeContext({
 			operation: 'startAndPoll',
@@ -1058,6 +1084,19 @@ describe('Pipelex node — Start Pipeline (start only, no polling)', () => {
 		});
 
 		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(FORBIDDEN_MESSAGE);
+	});
+
+	it('puts a role refusal of an inline method in the item error with Continue On Fail', async () => {
+		const detail = 'You hold no recognised role in this organization: running a method needs the runner, member or admin role.';
+		const { ctx } = makeContext({
+			operation: 'start',
+			params: { inlineMethod: true, mthdsContents: ['domain = "d"'], inputs: '{}' },
+			continueOnFail: true,
+			httpImpl: () => fullResponse(403, { status: 403, code: 'role_not_permitted', detail }),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json).toEqual({ error: `${ROLE_NOT_PERMITTED_MESSAGE} ${detail}` });
 	});
 
 	it('raises when the server acks without a pipeline_run_id', async () => {
