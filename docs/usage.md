@@ -34,7 +34,7 @@ The Pipelex API base URL is configured on the credential, not on the node. Open 
 
 > ⚠️ **Running on n8n Cloud or any deployed n8n instance?** `localhost`/`127.0.0.1` URLs won't be reachable from n8n. Use a Base URL that n8n can reach over the network.
 
-The credential test hits `GET <Base URL>/v1/auth/verify` to verify both reachability and the Bearer Token. Note it only checks the token is **valid** — not that it can **start runs**. Access to the run API is granted per **account**, not per key, so a perfectly valid key can pass the test and still be refused with a `403` on a real run. That is not a key you can re-scope: ask Pipelex to enable API access for your account.
+The credential test hits `GET <Base URL>/v1/auth/verify` to verify both reachability and the Bearer Token. Note it only checks the token is **valid** — not that it can **start runs**. Access to the run API is granted per **account**, not per key, so a perfectly valid key can pass the test and still be refused with a `403` on a real run. That is not a key you can re-scope: ask Pipelex to enable API access for your account. A `403` whose message starts with *"Your role in this organization does not allow this"* is a different refusal, by your role in the organization rather than by your account (see [When your role in the organization refuses the run](#when-your-role-in-the-organization-refuses-the-run)).
 
 ## Client identification (`User-Agent`)
 
@@ -72,6 +72,10 @@ A bare id follows the method as it is published, so the workflow picks up each n
 The node sends the id exactly as you type it, trimmed of surrounding spaces, and the Pipelex API reads the suffix. After the `@` it accepts a version number without a leading zero, or `draft` in lower case; anything else is refused with a `422`, and the error on the item is the API's own explanation of what a suffix may be.
 
 Both start operations add `method_version` to their item: the number of the version that ran, or `draft`. A workflow that runs a bare id can therefore tell which version it got. **Poll & Get Result** and **Get Run Result** read a run by its `pipeline_run_id` alone, and their items do not carry it.
+
+### When your role in the organization refuses the run
+
+An API key acts with the role its owner holds in the organization the key belongs to, and the role decides what the key may do: a role that runs only the organization's published versions, for example, is refused a `@draft` Method ID and an inline method. The Pipelex API answers such a request with `403` and the problem code `role_not_permitted`, and the node's error, or the item's `error` under **Continue On Fail**, reads *"Your role in this organization does not allow this."* followed by the API's own sentence, which names the role you hold and what the request needs. The node assumes no role of its own, because the same code also answers other roles refused other actions. Retrying fails the same way: run a published version instead, or ask an admin of the organization to change your role. Pipelex support cannot change a role.
 
 ### Custom PipeFunc Python
 

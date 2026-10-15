@@ -44,6 +44,19 @@ import { USER_AGENT } from './UserAgent';
 export const FORBIDDEN_MESSAGE =
 	'Pipelex refused this run (HTTP 403). Access to the run API is granted per account, not per key, so a valid key can still be refused — the credential test only checks that the token is valid. This is not a setting you can switch on yourself: ask Pipelex to enable API access for your account (https://go.pipelex.com/discord).';
 
+// The problem `code` the platform gives a `403` that refuses the caller's ROLE
+// in the organization, not the credential: a role that runs only the
+// organization's published versions starting a draft or an inline method, or a
+// member asking for an admin-only action. One code answers every such gate, so
+// the node never assumes which role the caller holds: it shows this role-neutral
+// headline, then the server's `detail`, which each gate writes for a person and
+// which names the caller's actual role (or "no recognised role") and what the
+// action needs. It never sends the person to Pipelex support, which cannot change
+// a role; an admin of their organization can. Every `403` reader checks this code
+// first and falls back to its generic `403` message only when it is absent.
+export const ROLE_NOT_PERMITTED_CODE = 'role_not_permitted';
+export const ROLE_NOT_PERMITTED_MESSAGE = 'Your role in this organization does not allow this.';
+
 // A 404 on the results endpoint is overloaded: either the pipeline_run_id is
 // wrong/expired (the common case), or the credential Base URL points at a
 // runner that has no durable run lifecycle (e.g. a bare/self-hosted
@@ -431,6 +444,28 @@ function withServerDetail(message: string, body: IDataObject): string {
 }
 
 /**
+ * The message for a refusal by the caller's role in the organization (a problem
+ * whose `code` is {@link ROLE_NOT_PERMITTED_CODE}), or `undefined` when the body
+ * is not one. The headline assumes no role; the server's `detail` follows it
+ * as the sentence that says which role the caller holds and what the action
+ * needs. Unlike {@link withServerDetail}, the detail is not set apart as a
+ * supporting fact: each gate writes it for the person reading it.
+ */
+export function roleRefusalMessage(body: IDataObject): string | undefined {
+	if (body.code !== ROLE_NOT_PERMITTED_CODE) return undefined;
+	const detail = typeof body.detail === 'string' ? body.detail.trim() : '';
+	return detail.length > 0 ? `${ROLE_NOT_PERMITTED_MESSAGE} ${detail}` : ROLE_NOT_PERMITTED_MESSAGE;
+}
+
+/**
+ * The message for a `403` on the run routes: a refusal by role when the problem
+ * says so, else the generic {@link FORBIDDEN_MESSAGE} with the server's detail.
+ */
+function forbiddenMessage(body: IDataObject): string {
+	return roleRefusalMessage(body) ?? withServerDetail(FORBIDDEN_MESSAGE, body);
+}
+
+/**
  * The most specific text a platform error carries. Platform errors are RFC 9457
  * `problem+json`: the per-field `errors` come first when there are any, then
  * `detail`, then `title`.
@@ -495,7 +530,9 @@ function problemFieldErrors(body: IDataObject): string[] {
  *         TIMED_OUT), with the status in the problem detail
  *   404 → not found: bad/expired pipeline_run_id, or a Base URL with no run
  *         lifecycle (actionable; see NOT_FOUND_MESSAGE)
- *   403 → account API access not enabled (actionable; see FORBIDDEN_MESSAGE)
+ *   403 → forbidden: a refusal by the caller's role in the organization when
+ *         the problem's code is `role_not_permitted` (see
+ *         ROLE_NOT_PERMITTED_MESSAGE), else the generic FORBIDDEN_MESSAGE
  *   other → unexpected (→ NodeApiError)
  */
 export function mapResultResponse(
@@ -526,7 +563,7 @@ export function mapResultResponse(
 			}
 			return { kind: 'completed', body };
 		case 403:
-			return { kind: 'forbidden', message: withServerDetail(FORBIDDEN_MESSAGE, body), body };
+			return { kind: 'forbidden', message: forbiddenMessage(body), body };
 		case 404:
 			return { kind: 'notFound', message: NOT_FOUND_MESSAGE, body };
 		case 409:
@@ -549,8 +586,10 @@ export function mapResultResponse(
  * `POST /v1/start` with an `Idempotency-Key` — answers `202 StartAck`
  * (`{ pipeline_run_id, state, created_at }`, plus `method_version` for a run
  * started from a Method ID; the id is server-generated and authoritative). A
- * 403 is translated to an actionable error; a non-2xx otherwise surfaces as a
- * `NodeApiError` with the problem's own text ({@link problemMessage}).
+ * 403 is translated to an actionable error, a refusal by the caller's role
+ * first ({@link roleRefusalMessage}): the role that runs only published versions
+ * is refused a `@draft` Method ID and an inline method. A non-2xx otherwise
+ * surfaces as a `NodeApiError` with the problem's own text ({@link problemMessage}).
  *
  * That text is what explains a Method ID the hosted API could not resolve, and
  * it is written to be shown as it is: a `409 method_not_published` for a bare id
@@ -592,7 +631,7 @@ export async function requestStart(
 	const responseBody = (response.body ?? {}) as IDataObject;
 	if (response.statusCode === 403) {
 		throw new NodeApiError(ctx.getNode(), responseBody as JsonObject, {
-			message: withServerDetail(FORBIDDEN_MESSAGE, responseBody),
+			message: forbiddenMessage(responseBody),
 			httpCode: '403',
 			itemIndex,
 		});
@@ -1188,12 +1227,18 @@ export function uploadGrantRefusalMessage(
 			);
 		// The storage routes are gated by identity alone on the platform (an
 		// org-less caller is a 400), so a 403 comes from the gateway's access rules,
-		// not from the per-account run gate FORBIDDEN_MESSAGE describes.
-		case 403:
+		// not from the per-account run gate FORBIDDEN_MESSAGE describes. A refusal
+		// by role is still read first, as on every 403, so that a role gate added
+		// to these routes later is never worded as a credential problem; it keeps
+		// the file's name, since one item can store several files.
+		case 403: {
+			const roleRefusal = roleRefusalMessage(body);
+			if (roleRefusal) return `Pipelex refused to store ${subject}. ${roleRefusal}`;
 			return withServerDetail(
 				`Pipelex refused to store ${subject} (HTTP 403): the credential's token is not allowed to upload files. Ask Pipelex to check your account's API access (https://go.pipelex.com/discord).`,
 				body,
 			);
+		}
 		case 404:
 			return UPLOAD_UNAVAILABLE_MESSAGE;
 		default: {

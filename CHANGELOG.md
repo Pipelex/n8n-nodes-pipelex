@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Refusals by role**: when the Pipelex API refuses a request because of the caller's role in the organization (`403` with the problem code `role_not_permitted`), as it refuses a role that runs only published versions a `@draft` Method ID or an inline method, the node's error says *"Your role in this organization does not allow this."* followed by the API's own sentence naming the role held and what the request needs, instead of telling the user to ask Pipelex to enable API access.
+
 ## [v0.3.1] - 2026-10-08
 
 ### Added
