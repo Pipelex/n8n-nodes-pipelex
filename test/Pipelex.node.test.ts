@@ -20,9 +20,11 @@ vi.mock('../nodes/Pipelex/GenericFunctions', async (importOriginal) => {
 
 import {
 	FORBIDDEN_MESSAGE,
+	MAX_INLINE_BINARY_BYTES,
 	NOT_FOUND_MESSAGE,
 	ROLE_NOT_PERMITTED_MESSAGE,
 	SERVICE_UNAVAILABLE_MESSAGE,
+	START_TOO_LARGE_MESSAGE,
 	UPLOAD_UNAVAILABLE_MESSAGE,
 } from '../nodes/Pipelex/GenericFunctions';
 import { Pipelex } from '../nodes/Pipelex/Pipelex.node';
@@ -939,20 +941,31 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		expect(error).toMatch(/Method ID/);
 	});
 
+	it("never blames a method's files for a 413 on a run by Method ID", async () => {
+		// The request carried no file: what weighs is its Inputs.
+		const { ctx } = makeContext({
+			operation: 'start',
+			params: { inputs: '{"text": "a long text"}', methodId: 'mt_abc123' },
+			continueOnFail: true,
+			httpImpl: () => fullResponse(413, {}),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		const error = String(result[0][0].json.error);
+		expect(error).toBe(START_TOO_LARGE_MESSAGE);
+		expect(error).not.toMatch(/method defined inline/);
+	});
+
 	it("shows the API's refusal of the method's files as it wrote it", async () => {
-		const detail = "The method's files are not a method tree: the keys 'README.md' and 'readme.md' collide.";
+		// The API judges every tree it receives, past what the node checks locally.
+		const detail = "The method's files are not a method tree: the key 'README.md' is refused.";
 		const { ctx } = makeContext({
 			operation: 'start',
 			params: {
 				inputs: '{}',
 				inlineMethod: true,
 				mthdsContents: ['m'],
-				pythonFiles: {
-					file: [
-						{ path: 'README.md', content: 'a' },
-						{ path: 'readme.md', content: 'b' },
-					],
-				},
+				pythonFiles: { file: [{ path: 'README.md', content: 'a' }] },
 			},
 			continueOnFail: true,
 			httpImpl: () => fullResponse(422, { code: 'invalid_method_files', detail }),
@@ -2978,5 +2991,151 @@ describe('Pipelex node — method binary files (an n8n file becomes a file of th
 		const [first, second] = [await run(), await run()];
 		expect(second.headers['Idempotency-Key']).toBe(first.headers['Idempotency-Key']);
 		expect(second.body).toEqual(first.body);
+	});
+
+	it('gives a retry whose method file changed its own key, so it starts a new run instead of drawing a 409', async () => {
+		const run = async (template: TestBinary) => {
+			const { ctx, httpFn } = makeContext({
+				operation: 'start',
+				params: {
+					inputs: '{}',
+					inlineMethod: true,
+					mthdsContents: { bundle: [{ content: BUNDLE }] },
+					methodBinaryFiles: { file: [{ path: 'templates/letterhead.docx', binaryPropertyName: 'data' }] },
+				},
+				items: [{ json: {}, binary: { data: template } }],
+				httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+			});
+			await Pipelex.prototype.execute.call(ctx);
+			return httpFn.mock.calls[0][0];
+		};
+
+		const first = await run(DOCX);
+		const changed = await run({ ...DOCX, data: Buffer.from([0x50, 0x4b, 0x05, 0x06]).toString('base64') });
+		expect(first.headers['Idempotency-Key']).toMatch(/^exec-1:node-1:0:0:method-[0-9a-f]{32}$/);
+		expect(changed.headers['Idempotency-Key']).toMatch(/^exec-1:node-1:0:0:method-[0-9a-f]{32}$/);
+		expect(changed.headers['Idempotency-Key']).not.toBe(first.headers['Idempotency-Key']);
+	});
+
+	it('says there is nothing to run before judging a Binary Inputs row', async () => {
+		// The run source comes first, as it did before method files existed.
+		const { ctx, httpFn, bufferFn } = makeContext({
+			operation: 'start',
+			params: {
+				inputs: '{}',
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'missing' }] },
+			},
+			items: [{ json: {}, binary: { data: DOCX } }],
+			continueOnFail: true,
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toMatch(/^Nothing to run/);
+		expect(bufferFn).not.toHaveBeenCalled();
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+});
+
+describe('Pipelex node — the inline budget (a method too large to send is refused before it is loaded)', () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		storedUploads.clear();
+	});
+
+	const BUNDLE = 'domain = "letters"\nmain_pipe = "write_letter"';
+	const SMALL = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+	/** A binary whose size n8n's metadata records, with small bytes standing in for the file. */
+	const sized = (bytes: number): TestBinary => ({
+		data: SMALL.toString('base64'),
+		mimeType: 'application/octet-stream',
+		bytes,
+	});
+	const params = (rows: Array<{ path: string; binaryPropertyName: string }>) => ({
+		inputs: '{}',
+		inlineMethod: true,
+		mthdsContents: { bundle: [{ content: BUNDLE }] },
+		methodBinaryFiles: { file: rows },
+	});
+
+	it('refuses a single file past the budget from its metadata, loading nothing', async () => {
+		const { ctx, httpFn, bufferFn } = makeContext({
+			operation: 'start',
+			params: params([{ path: 'templates/big.docx', binaryPropertyName: 'data' }]),
+			items: [{ json: {}, binary: { data: sized(MAX_INLINE_BINARY_BYTES + 1) } }],
+			continueOnFail: true,
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		const error = String(result[0][0].json.error);
+		expect(error).toContain('Method binary file "templates/big.docx"');
+		expect(error).toContain('7 MiB');
+		expect(error).toMatch(/Method ID/);
+		expect(bufferFn).not.toHaveBeenCalled();
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('refuses files that together pass the budget from their metadata, loading none of them', async () => {
+		const half = Math.floor(MAX_INLINE_BINARY_BYTES / 2) + 1024;
+		const { ctx, httpFn, bufferFn } = makeContext({
+			operation: 'start',
+			params: params([
+				{ path: 'templates/a.docx', binaryPropertyName: 'a' },
+				{ path: 'templates/b.docx', binaryPropertyName: 'b' },
+			]),
+			items: [{ json: {}, binary: { a: sized(half), b: sized(half) } }],
+			continueOnFail: true,
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		const error = String(result[0][0].json.error);
+		expect(error).toContain('With method binary file "templates/b.docx"');
+		expect(error).toMatch(/Method ID/);
+		expect(bufferFn).not.toHaveBeenCalled();
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('measures a file whose size the metadata does not give once loaded, and loads no file after it', async () => {
+		// Kept outside memory, with no metadata reader: only loading tells its size.
+		const big = Buffer.alloc(MAX_INLINE_BINARY_BYTES + 1, 0x41);
+		const { ctx, httpFn, bufferFn } = makeContext({
+			operation: 'start',
+			params: params([
+				{ path: 'templates/big.docx', binaryPropertyName: 'big' },
+				{ path: 'templates/next.docx', binaryPropertyName: 'next' },
+			]),
+			items: [
+				{
+					json: {},
+					binary: {
+						big: { data: big.toString('base64'), mimeType: 'application/octet-stream', id: 'fs:big' },
+						next: { data: SMALL.toString('base64'), mimeType: 'application/octet-stream', id: 'fs:next' },
+					},
+				},
+			],
+			continueOnFail: true,
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toContain('Method binary file "templates/big.docx"');
+		expect(bufferFn.mock.calls).toEqual([[0, 'big']]);
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('sends a method within the budget, its text counted with its binary files', async () => {
+		// The pasted bundle takes some of the budget too, so 7 MiB of binary files
+		// beside it would pass it; a little less does not.
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: params([{ path: 'templates/a.docx', binaryPropertyName: 'data' }]),
+			items: [{ json: {}, binary: { data: sized(MAX_INLINE_BINARY_BYTES - 1024) } }],
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		expect(httpFn.mock.calls[0][0].body.files['templates/a.docx']).toEqual({ base64: SMALL.toString('base64') });
 	});
 });

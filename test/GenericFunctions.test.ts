@@ -3,12 +3,17 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
 	FORBIDDEN_MESSAGE,
+	MAX_INLINE_BINARY_BYTES,
+	MAX_INLINE_METHOD_BYTES,
+	METHOD_FILES_TOO_LARGE_MESSAGE,
 	MISSING_MAIN_STUFF_MESSAGE,
 	NOT_FOUND_MESSAGE,
 	RESULT_MID_WRITE_MESSAGE,
 	ROLE_NOT_PERMITTED_MESSAGE,
+	START_TOO_LARGE_MESSAGE,
 	UPLOAD_UNAVAILABLE_MESSAGE,
 	base64FileEntry,
+	base64Length,
 	binaryByteSize,
 	binaryFieldNames,
 	binaryInputConflictError,
@@ -19,14 +24,18 @@ import {
 	describeNetworkFailure,
 	eitherSignal,
 	idempotencyKey,
+	inlineBudgetError,
 	isTimeoutFailure,
 	mapResultResponse,
 	missingBinaryMessage,
+	methodFilesDigest,
 	parseStorageError,
+	pathCollisions,
 	planMethodFiles,
 	problemMessage,
 	readBinaryInputMappings,
 	readMethodBinaryFileRows,
+	readMethodTextFileRows,
 	readUploadGrant,
 	roleRefusalMessage,
 	runFailureData,
@@ -37,6 +46,7 @@ import {
 	storageRefusalMessage,
 	storedFileInput,
 	storedFileReferences,
+	textEntryBytes,
 	treePathError,
 	uploadGrantRefusalMessage,
 	withRunId,
@@ -268,6 +278,48 @@ describe('planMethodFiles (an inline method becomes one files map)', () => {
 		expect(across.error).toMatch(/more than once/);
 	});
 
+	it('refuses paths that collide once case-folded, or a file named like a folder, naming them', () => {
+		// The standard's collision rule, as mthds-js's pathCollisions: a tree written
+		// out on a case-insensitive disk must lose no file.
+		const cases: Array<[string[], string[]]> = [
+			[['README.md', 'readme.md'], ['README.md', 'readme.md']],
+			[['straße.txt', 'STRASSE.txt'], ['STRASSE.txt', 'straße.txt']],
+			[['templates', 'templates/letter.html'], ['templates', 'templates/letter.html']],
+			[['Templates', 'templates/letter.html'], ['Templates', 'templates/letter.html']],
+		];
+		for (const [paths, named] of cases) {
+			const plan = planMethodFiles({
+				...NONE,
+				bundles: ['m'],
+				textFiles: paths.map((path) => ({ path, content: 'x' })),
+			});
+			expect(plan.error, paths.join(' + ')).toMatch(/collide/);
+			for (const path of named) expect(plan.error).toContain(`"${path}"`);
+		}
+	});
+
+	it('judges a collision across the text and the binary files', () => {
+		const plan = planMethodFiles({
+			...NONE,
+			bundles: ['m'],
+			textFiles: [{ path: 'Logo.png', content: 'x' }],
+			binaryFiles: [{ path: 'logo.png', binaryPropertyName: 'data' }],
+		});
+		expect(plan.error).toBe(
+			'Method file paths "Logo.png" and "logo.png" collide: a method\'s tree never holds two paths that differ only by letter case, nor a file named like a folder another path goes through, since a case-insensitive disk would keep only one of them. Rename one of them.',
+		);
+	});
+
+	it('steps a generated bundle name aside from a folder the author chose', () => {
+		const plan = planMethodFiles({
+			...NONE,
+			bundles: ['inline'],
+			textFiles: [{ path: 'main.mthds/notes.txt', content: 'x' }],
+		});
+		expect(plan.error).toBeUndefined();
+		expect(Object.keys(plan.textEntries)).toEqual(['bundle-2.mthds', 'main.mthds/notes.txt']);
+	});
+
 	it('refuses files with no method, saying what to do', () => {
 		// Files alone are not runnable; the runner refuses a tree with no bundle.
 		for (const params of [
@@ -279,6 +331,20 @@ describe('planMethodFiles (an inline method becomes one files map)', () => {
 			expect(plan.error).toMatch(/MTHDS Bundles/);
 			expect(plan.error).toMatch(/Method ID/);
 		}
+	});
+
+	it('recognises a bundle by ".mthds" in lower case only, and says so for another case', () => {
+		// The standard and the runtime match the extension case-sensitively, so
+		// main.MTHDS is not a bundle: the refusal names the case, not a missing method.
+		const plan = planMethodFiles({ ...NONE, textFiles: [{ path: 'methods/main.MTHDS', content: 'm' }] });
+		expect(plan.error).toBe(
+			'Method file "methods/main.MTHDS" ends in ".MTHDS", but a bundle\'s name ends in ".mthds", in lower case, so the method files hold no method to run. Rename it to end in ".mthds", or paste the method into "MTHDS Bundles".',
+		);
+		const binary = planMethodFiles({
+			...NONE,
+			binaryFiles: [{ path: 'main.Mthds', binaryPropertyName: 'data' }],
+		});
+		expect(binary.error).toMatch(/ends in "\.Mthds"/);
 	});
 
 	it('takes a .mthds file among the method files as the method', () => {
@@ -360,6 +426,59 @@ describe('base64FileEntry (a binary method file as the standard carries bytes)',
 	});
 });
 
+describe('readMethodTextFileRows (the Method Files rows)', () => {
+	it('reads each row as a path and its text, trimming the path but never the text', () => {
+		expect(
+			readMethodTextFileRows({
+				file: [
+					{ path: ' funcs/score.py ', content: '  def score(): ...\n' },
+					{ path: 'requirements.txt' },
+				],
+			}),
+		).toEqual({
+			files: [
+				{ path: 'funcs/score.py', content: '  def score(): ...\n' },
+				{ path: 'requirements.txt', content: '' },
+			],
+		});
+	});
+
+	it('reads a path the way the binary rows read it: a number is its text, anything else is no path', () => {
+		// An expression can resolve a path to a number; both fields take it alike.
+		expect(readMethodTextFileRows({ file: [{ path: 2026, content: 'x' }] })).toEqual({
+			files: [{ path: '2026', content: 'x' }],
+		});
+		expect(readMethodBinaryFileRows({ file: [{ path: 2026, binaryPropertyName: 'data' }] })).toEqual({
+			rows: [{ path: '2026', binaryPropertyName: 'data' }],
+		});
+		expect(readMethodTextFileRows({ file: [{ path: { a: 1 }, content: 'x' }, { path: '  ' }] })).toEqual({
+			files: [],
+		});
+	});
+
+	it('takes a number or a boolean content as its text', () => {
+		expect(readMethodTextFileRows({ file: [{ path: 'v.txt', content: 3 }, { path: 'f.txt', content: false }] })).toEqual({
+			files: [
+				{ path: 'v.txt', content: '3' },
+				{ path: 'f.txt', content: 'false' },
+			],
+		});
+	});
+
+	it('refuses a content that is not text, naming the file', () => {
+		const { error } = readMethodTextFileRows({ file: [{ path: 'data.json', content: { a: 1 } }] });
+		expect(error).toBe(
+			'The content of method file "data.json" must be text, but the expression resolved to object. Convert it to a string first, or give a binary file under Method Binary Files.',
+		);
+		expect(readMethodTextFileRows({ file: [{ path: 'l.txt', content: [1] }] }).error).toMatch(/an array/);
+	});
+
+	it('reads an empty or absent collection as no file', () => {
+		expect(readMethodTextFileRows(undefined)).toEqual({ files: [] });
+		expect(readMethodTextFileRows({})).toEqual({ files: [] });
+	});
+});
+
 describe('readMethodBinaryFileRows (the Method Binary Files rows)', () => {
 	it('reads each row as a path and the binary field that holds the file', () => {
 		expect(
@@ -426,23 +545,42 @@ describe('runSourceError (the run-source rules, judged on the built body)', () =
 	it('does not count an empty files map as a source', () => {
 		expect(runSourceError({ files: {} })).toMatch(/Nothing to run/);
 	});
+
+	it('counts the binary method files still to load as files of the method', () => {
+		// The node judges the run source before it loads any binary method file.
+		expect(runSourceError({}, 1)).toBeNull();
+		expect(runSourceError({ method_id: 'm' }, 1)).toMatch(/Choose one/);
+		expect(runSourceError({}, 0)).toMatch(/Nothing to run/);
+	});
 });
 
 describe("startRefusalMessage (a refused start, in the node's words where the API's are not enough)", () => {
-	it("reads the gateway's bare 413 as a request too large to carry the method's files", () => {
-		const message = startRefusalMessage(413, { message: 'Request Entity Too Large' });
-		expect(message).toMatch(/too large/);
+	it("reads the gateway's bare 413 on a request carrying files as a method too large to send inline", () => {
+		const message = startRefusalMessage(413, { message: 'Request Entity Too Large' }, true);
+		expect(message).toContain(METHOD_FILES_TOO_LARGE_MESSAGE);
 		expect(message).toMatch(/Method ID/);
 	});
 
 	it("reads the platform's inline limit the same way, keeping its detail", () => {
-		const message = startRefusalMessage(422, {
-			code: 'method_tree_too_large',
-			detail: "This request's method tree takes 8000000 bytes of its body, past this deployment's limit of 7340032 bytes.",
-			limit: { name: 'max_inline_bytes', value: 7340032, reached: 8000000 },
-		});
+		const message = startRefusalMessage(
+			422,
+			{
+				code: 'method_tree_too_large',
+				detail: "This request's method tree takes 8000000 bytes of its body, past this deployment's limit of 7340032 bytes.",
+				limit: { name: 'max_inline_bytes', value: 7340032, reached: 8000000 },
+			},
+			true,
+		);
 		expect(message).toMatch(/Method ID/);
 		expect(message).toContain('(Server: This request');
+	});
+
+	it('never blames a method\'s files for a 413 on a request that carried none', () => {
+		// A run by Method ID with large Inputs: saving the method would change nothing.
+		expect(startRefusalMessage(413, {}, false)).toBe(START_TOO_LARGE_MESSAGE);
+		const detail = 'The request body is too large.';
+		expect(startRefusalMessage(413, { detail }, false)).toBe(detail);
+		expect(startRefusalMessage(413, {}, false)).not.toMatch(/method defined inline/);
 	});
 
 	it("leaves a tree past the deployment's other limits to the API's own sentence", () => {
@@ -450,21 +588,84 @@ describe("startRefusalMessage (a refused start, in the node's words where the AP
 		// limit, which every holder of a tree applies; the API names the limit.
 		const detail = "This request's method tree holds 2000 files, past this deployment's limit of 1000 files in a method tree.";
 		expect(
-			startRefusalMessage(422, {
-				code: 'method_tree_too_large',
-				detail,
-				limit: { name: 'max_files', value: 1000, reached: 2000 },
-			}),
+			startRefusalMessage(
+				422,
+				{ code: 'method_tree_too_large', detail, limit: { name: 'max_files', value: 1000, reached: 2000 } },
+				true,
+			),
 		).toBe(detail);
 	});
 
 	it("shows the API's refusal of a files map as it wrote it, naming the key", () => {
-		const detail = "The method's files are not a method tree: the keys 'README.md' and 'readme.md' collide.";
-		expect(startRefusalMessage(422, { code: 'invalid_method_files', detail })).toBe(detail);
+		const detail = "The method's files are not a method tree: the key 'main.mthds' holds no bundle.";
+		expect(startRefusalMessage(422, { code: 'invalid_method_files', detail }, true)).toBe(detail);
 	});
 
 	it('falls back to a generic sentence when the body says nothing', () => {
-		expect(startRefusalMessage(500, {})).toBe('Failed to start run');
+		expect(startRefusalMessage(500, {}, false)).toBe('Failed to start run');
+		expect(startRefusalMessage(500, {}, true)).toBe('Failed to start run');
+	});
+});
+
+describe('the inline budget (what a method defined inline may carry)', () => {
+	it('derives the budget from the API gateway: 7 MiB of binary files, under 10 MB once in Base64', () => {
+		expect(MAX_INLINE_BINARY_BYTES).toBe(7 * 1024 * 1024);
+		expect(MAX_INLINE_METHOD_BYTES).toBe(base64Length(7 * 1024 * 1024));
+		expect(MAX_INLINE_METHOD_BYTES).toBeLessThan(10_000_000);
+	});
+
+	it('measures Base64 as the standard writes it, padded', () => {
+		expect(base64Length(0)).toBe(0);
+		expect(base64Length(1)).toBe(4);
+		expect(base64Length(3)).toBe(4);
+		expect(base64Length(4)).toBe(8);
+		for (const length of [0, 1, 2, 3, 100, 1001]) {
+			expect(base64Length(length)).toBe(Buffer.alloc(length).toString('base64').length);
+		}
+	});
+
+	it('counts the text entries by their UTF-8 bytes', () => {
+		expect(textEntryBytes({ 'main.mthds': 'abc', 'notes.txt': 'é', 'logo.png': { base64: 'AAAA' } })).toBe(5);
+	});
+
+	it('refuses a single file past the budget, naming it and the way out', () => {
+		const file = { path: 'templates/big.docx', binaryPropertyName: 'data' };
+		const size = MAX_INLINE_BINARY_BYTES + 1;
+		const error = inlineBudgetError(file, size, base64Length(size));
+		expect(error).toContain('"templates/big.docx"');
+		expect(error).toContain(`${size} bytes`);
+		expect(error).toContain('7 MiB');
+		expect(error).toMatch(/Method ID/);
+		expect(inlineBudgetError(file, MAX_INLINE_BINARY_BYTES, MAX_INLINE_METHOD_BYTES)).toBeNull();
+	});
+
+	it('refuses the file that brings the total past the budget', () => {
+		const file = { path: 'b.png', binaryPropertyName: 'data' };
+		const error = inlineBudgetError(file, 10, MAX_INLINE_METHOD_BYTES + 1);
+		expect(error).toContain('"b.png"');
+		expect(error).toContain(`${MAX_INLINE_METHOD_BYTES + 1} bytes`);
+		expect(error).toMatch(/Method ID/);
+	});
+});
+
+describe('pathCollisions (the standard\'s collision rule, by Unicode full case folding)', () => {
+	it('folds as the standard does, beyond lower-casing', () => {
+		expect(pathCollisions(['straße.txt', 'STRASSE.txt'])).toEqual(['STRASSE.txt', 'straße.txt']);
+		expect(pathCollisions(['ẞ.txt', 'ß.txt'])).toEqual(['ß.txt', 'ẞ.txt']);
+		expect(pathCollisions(['σ.txt', 'ς.txt'])).toEqual(['ς.txt', 'σ.txt']);
+		expect(pathCollisions(['ſ.txt', 's.txt'])).toEqual(['s.txt', 'ſ.txt']);
+	});
+
+	it('compares paths in NFC, so a decomposed spelling collides with the composed one', () => {
+		expect(pathCollisions(['cafe\u0301.txt', 'CAFÉ.txt'])).toHaveLength(2);
+	});
+
+	it('names a file and every path under the folder it is named like', () => {
+		expect(pathCollisions(['a', 'A/b.txt', 'a/c.txt', 'd.txt'])).toEqual(['A/b.txt', 'a', 'a/c.txt']);
+	});
+
+	it('leaves paths that merely share a prefix or a folder alone', () => {
+		expect(pathCollisions(['a.txt', 'a.txt.bak', 'funcs/a.py', 'funcs/b.py'])).toEqual([]);
 	});
 });
 
@@ -483,6 +684,41 @@ describe('idempotencyKey', () => {
 	it("differs across a loop's passes of the same node and item", () => {
 		// Each pass numbers its items from 0 again; the run index tells them apart.
 		expect(idempotencyKey('exec-abc', 'node-1', 1, 0)).not.toBe(idempotencyKey('exec-abc', 'node-1', 0, 0));
+	});
+});
+
+describe('idempotencyKey with a method defined inline', () => {
+	const FILES = { 'main.mthds': 'm', 'templates/a.docx': { base64: 'UEs=' } };
+
+	it('folds a digest of the method files into the key', () => {
+		expect(idempotencyKey('e', 'n', 0, 0, [], FILES)).toMatch(/^e:n:0:0:method-[0-9a-f]{32}$/);
+	});
+
+	it('gives the same files the same key, whatever the order of the map', () => {
+		const reordered = { 'templates/a.docx': { base64: 'UEs=' }, 'main.mthds': 'm' };
+		expect(idempotencyKey('e', 'n', 0, 0, [], reordered)).toBe(idempotencyKey('e', 'n', 0, 0, [], FILES));
+	});
+
+	it('gives other files another key, so a retry whose files changed starts a new run instead of a 409', () => {
+		const base = idempotencyKey('e', 'n', 0, 0, [], FILES);
+		expect(idempotencyKey('e', 'n', 0, 0, [], { ...FILES, 'main.mthds': 'm2' })).not.toBe(base);
+		expect(idempotencyKey('e', 'n', 0, 0, [], { ...FILES, 'templates/a.docx': { base64: 'UEsD' } })).not.toBe(base);
+		// The same bytes as text or as Base64 are two different requests.
+		expect(idempotencyKey('e', 'n', 0, 0, [], { 'main.mthds': { base64: 'bQ==' } })).not.toBe(
+			idempotencyKey('e', 'n', 0, 0, [], { 'main.mthds': 'm' }),
+		);
+	});
+
+	it('keeps the plain key when the body carries no method file', () => {
+		expect(idempotencyKey('e', 'n', 0, 0, [], {})).toBe('e:n:0:0');
+		expect(idempotencyKey('e', 'n', 0, 0, [], undefined)).toBe('e:n:0:0');
+		expect(methodFilesDigest({})).toBeUndefined();
+	});
+
+	it('covers the stored input files and the method files together', () => {
+		expect(idempotencyKey('e', 'n', 0, 0, ['document=pipelex-storage://a.pdf'], FILES)).toMatch(
+			/^e:n:0:0:files-[0-9a-f]{32}:method-[0-9a-f]{32}$/,
+		);
 	});
 });
 

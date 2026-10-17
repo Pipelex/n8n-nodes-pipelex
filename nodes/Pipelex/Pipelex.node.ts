@@ -17,6 +17,7 @@ import {
 	SERVICE_UNAVAILABLE_MESSAGE,
 	abortableSleep,
 	base64FileEntry,
+	base64Length,
 	binaryByteSize,
 	binaryFieldNames,
 	binaryInputConflictError,
@@ -26,12 +27,14 @@ import {
 	defineFileEntry,
 	describeBinaryFile,
 	idempotencyKey,
+	inlineBudgetError,
 	mapResultResponse,
 	missingBinaryMessage,
 	missingMethodBinaryMessage,
 	planMethodFiles,
 	readBinaryInputMappings,
 	readMethodBinaryFileRows,
+	readMethodTextFileRows,
 	requestResult,
 	requestRunStatus,
 	requestStart,
@@ -40,6 +43,7 @@ import {
 	runFailureMessage,
 	runSourceError,
 	storedFileReferences,
+	textEntryBytes,
 	uploadBinaryFile,
 	withRunId,
 	type ApiConnection,
@@ -136,40 +140,15 @@ function readMthdsContents(raw: unknown): string[] {
 }
 
 /**
- * Read the `Method Files` collection (internal name `pythonFiles`, kept so a
- * saved workflow keeps its rows) into text files. Entries with a blank path are
- * dropped (the UI persists a row as soon as the add button is clicked); a blank
- * CONTENT is kept — an empty `requirements.txt` or `__init__.py` is a legitimate
- * member of a tree. A path given twice is refused with the other method files,
- * in `planMethodFiles`, never kept as the last row.
- *
- * Contents are coerced to text rather than forwarded verbatim: `getNodeParameter`
- * is `unknown` because an expression can resolve to anything, and a non-string
- * would leave the node and come back as an opaque server 422 instead of a local,
- * item-scoped error.
+ * Read the `Method Files` rows (internal name `pythonFiles`, kept so a saved
+ * workflow keeps its rows); see `readMethodTextFileRows`.
  */
-function readTextFiles(ctx: IExecuteFunctions, itemIndex: number): MethodTextFile[] {
-	const collection = ctx.getNodeParameter('pythonFiles', itemIndex, {}) as {
-		file?: Array<{ path?: unknown; content?: unknown }>;
-	};
-	const files: MethodTextFile[] = [];
-	for (const entry of collection.file ?? []) {
-		const path = typeof entry.path === 'string' ? entry.path.trim() : '';
-		if (!path) continue;
-		const content = entry.content;
-		if (content === undefined || content === null) {
-			files.push({ path, content: '' });
-		} else if (typeof content === 'string') {
-			files.push({ path, content });
-		} else if (typeof content === 'number' || typeof content === 'boolean') {
-			files.push({ path, content: String(content) });
-		} else {
-			throw new NodeOperationError(
-				ctx.getNode(),
-				`The content of method file "${path}" must be text, but the expression resolved to ${Array.isArray(content) ? 'an array' : typeof content}. Convert it to a string first, or give a binary file under Method Binary Files.`,
-				{ itemIndex },
-			);
-		}
+function readTextFileRows(ctx: IExecuteFunctions, itemIndex: number): MethodTextFile[] {
+	const { files, error } = readMethodTextFileRows(
+		ctx.getNodeParameter('pythonFiles', itemIndex, {}),
+	);
+	if (error) {
+		throw new NodeOperationError(ctx.getNode(), error, { itemIndex });
 	}
 	return files;
 }
@@ -212,6 +191,29 @@ function resolveBinary(
 }
 
 /**
+ * n8n's description of a binary field a row reads, or an item-scoped error
+ * when the item has no such field: `missingMessage` words it for the row, given
+ * the binary fields the item does carry. Shared by `Binary Inputs` and
+ * `Method Binary Files`.
+ */
+function requireBinary(
+	ctx: IExecuteFunctions,
+	itemIndex: number,
+	binaryPropertyName: string,
+	missingMessage: (available: string[]) => string,
+): IBinaryData {
+	const binaryData = resolveBinary(ctx, itemIndex, binaryPropertyName);
+	if (!binaryData) {
+		throw new NodeOperationError(
+			ctx.getNode(),
+			missingMessage(binaryFieldNames(ctx.getInputData()[itemIndex])),
+			{ itemIndex },
+		);
+	}
+	return binaryData;
+}
+
+/**
  * Read + validate the `Binary Inputs` rows for one item: every row names a
  * distinct input, none of them is also set in the JSON `Inputs`, and the item
  * carries every binary field a row reads. Synchronous and network-free, so a
@@ -233,58 +235,88 @@ function readBinaryInputs(
 		throw new NodeOperationError(ctx.getNode(), conflict, { itemIndex });
 	}
 
-	const sources: BinarySource[] = [];
-	for (const mapping of mappings) {
-		const binaryData = resolveBinary(ctx, itemIndex, mapping.binaryPropertyName);
-		if (!binaryData) {
-			throw new NodeOperationError(
-				ctx.getNode(),
-				missingBinaryMessage(mapping, binaryFieldNames(ctx.getInputData()[itemIndex])),
-				{ itemIndex },
-			);
-		}
-		sources.push({ mapping, binaryData });
-	}
-	return sources;
+	return mappings.map((mapping) => ({
+		mapping,
+		binaryData: requireBinary(ctx, itemIndex, mapping.binaryPropertyName, (available) =>
+			missingBinaryMessage(mapping, available),
+		),
+	}));
+}
+
+/** A `Method Binary Files` row resolved on the item: the row, and n8n's description of its file. */
+interface MethodBinarySource {
+	file: MethodBinaryFile;
+	binaryData: IBinaryData;
 }
 
 /**
- * Check that the item carries every binary field a `Method Binary Files` row
- * reads, through n8n's own resolution (see `resolveBinary`), so a missing file
- * fails the item before any file is loaded or anything is sent.
+ * Resolve every `Method Binary Files` row on the item, so a missing field fails
+ * the item before any file is loaded or anything is sent.
  */
-function assertMethodBinaryFields(
+function resolveMethodBinaryFiles(
 	ctx: IExecuteFunctions,
 	itemIndex: number,
 	files: MethodBinaryFile[],
-): void {
-	for (const file of files) {
-		if (!resolveBinary(ctx, itemIndex, file.binaryPropertyName)) {
-			throw new NodeOperationError(
-				ctx.getNode(),
-				missingMethodBinaryMessage(file, binaryFieldNames(ctx.getInputData()[itemIndex])),
-				{ itemIndex },
-			);
-		}
-	}
+): MethodBinarySource[] {
+	return files.map((file) => ({
+		file,
+		binaryData: requireBinary(ctx, itemIndex, file.binaryPropertyName, (available) =>
+			missingMethodBinaryMessage(file, available),
+		),
+	}));
+}
+
+/** n8n's reader of a binary's metadata, when this n8n has one (see `binaryByteSize`). */
+function binaryMetadataReader(
+	ctx: IExecuteFunctions,
+): ((binaryDataId: string) => Promise<{ fileSize: number }>) | undefined {
+	return typeof ctx.helpers.getBinaryMetadata === 'function'
+		? (binaryDataId: string) => ctx.helpers.getBinaryMetadata(binaryDataId)
+		: undefined;
 }
 
 /**
  * The method's whole `files` map: the text entries the plan holds, then each
  * binary file loaded through n8n's helper (which reads a file kept outside
- * memory too) and added as its `{ base64 }` entry, at its path. The node holds
- * no limit of its own on a method file's size: the deployment sets its limits,
- * and the hosted API names the one a method passes when it refuses the start.
+ * memory too) and added as its `{ base64 }` entry, at its path.
+ *
+ * The files are held to the node's inline budget (`inlineBudgetError`) twice.
+ * First from n8n's metadata, before any file is loaded, so a file that alone
+ * passes it, or files that together pass it, fail the item with nothing read.
+ * Then from each file's real length, once it is loaded and before it is
+ * encoded, which also catches a file whose size the metadata did not give. The
+ * files are loaded one at a time, so the loop stops at the first that passes the
+ * budget, and the item never holds more than the budget allows.
  */
 async function loadMethodFiles(
 	ctx: IExecuteFunctions,
 	itemIndex: number,
 	textEntries: MethodFiles,
-	binaryFiles: MethodBinaryFile[],
+	sources: MethodBinarySource[],
 ): Promise<MethodFiles> {
+	const textBytes = textEntryBytes(textEntries);
+	const assertWithinBudget = (file: MethodBinaryFile, size: number, total: number): void => {
+		const budgetError = inlineBudgetError(file, size, total);
+		if (budgetError) {
+			throw new NodeOperationError(ctx.getNode(), budgetError, { itemIndex });
+		}
+	};
+
+	const getMetadata = binaryMetadataReader(ctx);
+	let measured = textBytes;
+	for (const { file, binaryData } of sources) {
+		const size = await binaryByteSize(binaryData, getMetadata);
+		if (size === undefined) continue;
+		measured += base64Length(size);
+		assertWithinBudget(file, size, measured);
+	}
+
 	const files: MethodFiles = { ...textEntries };
-	for (const file of binaryFiles) {
+	let loaded = textBytes;
+	for (const { file } of sources) {
 		const bytes = await ctx.helpers.getBinaryDataBuffer(itemIndex, file.binaryPropertyName);
+		loaded += base64Length(bytes.length);
+		assertWithinBudget(file, bytes.length, loaded);
 		defineFileEntry(files, file.path, base64FileEntry(bytes));
 	}
 	return files;
@@ -363,10 +395,7 @@ async function storeBinaryInputs(
 	runIndex: number,
 	itemIndex: number,
 ): Promise<Record<string, StoredFileInput>> {
-	const getMetadata =
-		typeof ctx.helpers.getBinaryMetadata === 'function'
-			? (binaryDataId: string) => ctx.helpers.getBinaryMetadata(binaryDataId)
-			: undefined;
+	const getMetadata = binaryMetadataReader(ctx);
 	for (const source of sources) {
 		const size = await binaryByteSize(source.binaryData, getMetadata);
 		if (size !== undefined) assertBinarySize(ctx, source, size, itemIndex);
@@ -406,9 +435,10 @@ interface RunDefinition {
  * opaque server 422.
  *
  * A method defined inline becomes the `files` map: every field is read and
- * checked first, then the binary method files are loaded into it. Loading reads
- * the item's own data and sends nothing, so a refused row never leaves a file
- * stored anywhere.
+ * checked first, the run source included, then the binary method files are
+ * measured against the node's budget and loaded into it, one at a time. Loading
+ * reads the item's own data and sends nothing, so a refused row never leaves a
+ * file stored anywhere.
  */
 async function readRunDefinition(
 	ctx: IExecuteFunctions,
@@ -462,7 +492,7 @@ async function readRunDefinition(
 	}
 
 	const bundles: string[] = inlineMethod ? readMthdsContents(mthdsContentsRaw) : [];
-	const textFiles = inlineMethod ? readTextFiles(ctx, itemIndex) : [];
+	const textFiles = inlineMethod ? readTextFileRows(ctx, itemIndex) : [];
 	const binaryFiles = inlineMethod ? readBinaryFileRows(ctx, itemIndex) : [];
 
 	// Either/or, enforced before anything else so the message is about the choice
@@ -506,8 +536,6 @@ async function readRunDefinition(
 	if (plan.error) {
 		throw new NodeOperationError(ctx.getNode(), plan.error, { itemIndex });
 	}
-	assertMethodBinaryFields(ctx, itemIndex, plan.binaryFiles);
-	const binaryInputs = readBinaryInputs(ctx, itemIndex, inputs);
 
 	const body = buildStartBody({
 		pipeCode,
@@ -516,14 +544,22 @@ async function readRunDefinition(
 		outputName,
 		outputMultiplicity,
 		dynamicOutputConceptRef,
-		files: await loadMethodFiles(ctx, itemIndex, plan.textEntries, plan.binaryFiles),
+		files: plan.textEntries,
 	});
 
-	// Validate the BUILT body: `buildStartBody` has already dropped an empty map,
-	// so the rules are judged on what would actually be sent.
-	const sourceError = runSourceError(body);
+	// Validate the BUILT body, before any file is loaded: `buildStartBody` has
+	// already dropped an empty map, and the binary method files still to load
+	// count as files of the method. Judged before the Binary Inputs rows, so a
+	// node with nothing to run says so first.
+	const sourceError = runSourceError(body, plan.binaryFiles.length);
 	if (sourceError) {
 		throw new NodeOperationError(ctx.getNode(), sourceError, { itemIndex });
+	}
+	const methodBinaryFiles = resolveMethodBinaryFiles(ctx, itemIndex, plan.binaryFiles);
+	const binaryInputs = readBinaryInputs(ctx, itemIndex, inputs);
+
+	if (methodBinaryFiles.length > 0) {
+		body.files = await loadMethodFiles(ctx, itemIndex, plan.textEntries, methodBinaryFiles);
 	}
 	return { body, binaryInputs };
 }
@@ -787,6 +823,7 @@ async function startRun(
 		runIndex,
 		itemIndex,
 		storedFiles,
+		body.files,
 	);
 	const startAck = await requestStart(ctx, conn, body, idempotency, itemIndex);
 	if (!startAck.pipeline_run_id) {
@@ -1151,7 +1188,7 @@ export class Pipelex implements INodeType {
 				},
 				default: {},
 				description:
-					"Files of the method taken from the incoming item, such as a Word template or a logo downloaded from Google Drive, each placed at its path from the method's root and sent with the method in Base64. They belong to the method, as a step's template_file does; a file the method takes as an input goes under Binary Inputs instead.",
+					"Files of the method taken from the incoming item, such as a Word template or a logo downloaded from Google Drive, each placed at its path from the method's root and sent with the method in Base64. They belong to the method, as a step's template_file does; a file the method takes as an input goes under Binary Inputs instead. Up to 7 MiB in all: save a larger method to Pipelex and run it by Method ID.",
 				displayOptions: {
 					show: {
 						operation: START_OPERATIONS,

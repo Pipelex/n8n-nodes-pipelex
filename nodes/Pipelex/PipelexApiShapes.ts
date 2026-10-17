@@ -34,6 +34,9 @@
  *    - `mthds-js/src/protocol/file_entries.ts` and the standard's
  *      `method-tree.md` → `FileEntry` / `MethodFiles`, the tree path rule and
  *      the names no tree admits, replicated in `GenericFunctions.treePathError`
+ *    - `mthds-js/src/method-tree/tree-path.ts` and `case-folding-table.ts` →
+ *      the collision rule, replicated in `GenericFunctions.pathCollisions`
+ *      over the folding table copied into `CaseFolding.ts`
  *    - `pipelex-sdk-js/src/product-models.ts` → `UploadGrantRequest` /
  *      `UploadGrant` (the SDK's `UploadGrantInput` / `UploadGrant`)
  *    - `pipelex-sdk-js/src/upload-grant.ts` → the storage `PUT` and its error
