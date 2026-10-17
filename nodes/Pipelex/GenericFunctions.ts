@@ -22,7 +22,10 @@ import {
 	guessContentType,
 	parseRetryAfter,
 	uploadTimeoutMs,
+	type Base64FileEntry,
+	type FileEntry,
 	type HostedStartBody,
+	type MethodFiles,
 	type StartAck,
 	type StoredFileInput,
 	type UploadGrant,
@@ -192,13 +195,12 @@ export function buildApiConnection(credentials: ICredentialDataDecryptedObject):
 export interface BuildStartParams {
 	pipeCode?: string;
 	methodId?: string;
-	mthdsContents?: string[];
 	inputs?: Record<string, unknown>;
 	outputName?: string;
 	outputMultiplicity?: string;
 	dynamicOutputConceptRef?: string;
-	/** Method bundle as `{ relativePath: text }` — carries custom PipeFunc Python. */
-	files?: Record<string, string>;
+	/** The method defined inline, as its tree: text and Base64 entries. */
+	files?: MethodFiles;
 }
 
 /**
@@ -212,9 +214,6 @@ export function buildStartBody(params: BuildStartParams): HostedStartBody {
 	if (params.inputs !== undefined) body.inputs = params.inputs;
 	if (params.methodId) body.method_id = params.methodId;
 	if (params.pipeCode) body.pipe_code = params.pipeCode;
-	if (params.mthdsContents && params.mthdsContents.length > 0) {
-		body.mthds_contents = params.mthdsContents;
-	}
 	if (params.files && Object.keys(params.files).length > 0) body.files = params.files;
 	if (params.outputName) body.output_name = params.outputName;
 	if (params.outputMultiplicity) body.output_multiplicity = params.outputMultiplicity;
@@ -224,43 +223,133 @@ export function buildStartBody(params: BuildStartParams): HostedStartBody {
 	return body;
 }
 
+// ── A method defined inline becomes its tree ────────────────────────────────
+//
+// The MTHDS standard sends a method as its tree: a map from tree path to file
+// entry (`PipelexApiShapes.MethodFiles`). The node builds that map from the
+// fields of `Define Method Inline`: each pasted bundle and each text file is a
+// text entry, and each binary file a `{ base64 }` entry. Every path is checked
+// here against the standard's rule, so a mistake fails the item at once, naming
+// the row, instead of coming back as the API's `422 invalid_method_files`. The
+// one rule left to the API is the collision of two paths that differ only by
+// case, which the standard defines by Unicode full case folding, a table this
+// node does not carry; the API's refusal names both keys.
+
+/** The longest segment a tree path may hold, in bytes of UTF-8. */
+const MAX_SEGMENT_BYTES = 255;
+/** The longest tree path, in bytes of UTF-8. */
+const MAX_TREE_PATH_BYTES = 1024;
+/** A code point UTF-8 cannot encode, which in JavaScript is a lone surrogate. */
+const LONE_SURROGATE = /[\uD800-\uDFFF]/u;
+/** A character of Unicode general category `Cc`. */
+const CONTROL_CHARACTER = /\p{Cc}/u;
+/** The directories the membership rule's defaults exclude by their name alone. */
+const EXCLUDED_DIRECTORY_NAMES = new Set(['__pycache__', 'node_modules']);
+/** The names of a run's inputs file, which the standard keeps out of every tree at any depth. */
+const RUN_INPUTS_NAMES = new Set(['inputs.json', 'inputs.toml']);
+/** The marker of a Python virtual environment, which excludes the directory holding it. */
+const VENV_MARKER_NAME = 'pyvenv.cfg';
+/** The manifest, which marks the root, and below it a nested package. */
+const MANIFEST_NAME = 'METHODS.toml';
+/** The extension of a bundle, which a method needs at least one of. */
+const BUNDLE_EXTENSION = '.mthds';
+
 /**
- * Reject a bundle entry path the runner would reject anyway, but locally and
- * item-scoped. Mirrors `_safe_relpath` in pipelex's `api/pipelex_api/bundle.py`: no
- * absolute paths, no `..` traversal, no backslashes, no `:` (a Windows
- * drive/stream form). Returns a message, or `null` when the path is fine.
+ * Why `path` cannot be the key of a method's `files` map, as a sentence naming
+ * it, or `null` when it can. Replicates the standard's tree path
+ * (`mthds/docs/spec/method-tree.md`, "Tree Paths") and its refusal of a key the
+ * membership rule could never admit ("The File Entry"), in the order
+ * `mthds-js`'s `treePathViolation` and `isExcludedName` check them. A key is
+ * never normalized, so one not already in NFC is refused rather than rewritten.
  */
-export function bundleEntryPathError(path: string): string | null {
-	if (path.includes('\\')) {
-		return `Bundle path "${path}" uses backslashes — use forward-slash relative paths (e.g. "funcs/score.py").`;
-	}
-	if (path.includes(':')) {
-		return `Bundle path "${path}" contains ":" — use a plain relative path (e.g. "funcs/score.py").`;
-	}
+export function treePathError(path: string): string | null {
+	const named = `Method file path "${path}"`;
+	if (LONE_SURROGATE.test(path)) return `${named} holds a character UTF-8 cannot encode.`;
 	if (path.startsWith('/')) {
-		return `Bundle path "${path}" is absolute — use a path relative to the bundle root (e.g. "funcs/score.py").`;
+		return `${named} starts with "/" — write it relative to the method's root (e.g. "funcs/score.py").`;
 	}
-	if (path.split('/').some((part) => part === '..')) {
-		return `Bundle path "${path}" escapes the bundle root via "..".`;
+	if (path.endsWith('/')) return `${named} ends with "/" — name a file, not a directory.`;
+	const segments = path.split('/');
+	for (const segment of segments) {
+		if (segment === '') return `${named} holds an empty segment ("//").`;
+		if (segment === '.' || segment === '..') {
+			return `${named} holds the segment "${segment}" — every path names a file from the method's root, and stays inside it.`;
+		}
+		if (segment.includes('\\')) {
+			return `${named} holds a backslash — separate its folders with "/" (e.g. "funcs/score.py").`;
+		}
+		if (segment.includes(':')) return `${named} holds ":", which no tree path may hold.`;
+		if (CONTROL_CHARACTER.test(segment)) return `${named} holds a control character.`;
+		if (utf8Length(segment) > MAX_SEGMENT_BYTES) {
+			return `${named} holds a segment longer than ${MAX_SEGMENT_BYTES} bytes.`;
+		}
+	}
+	if (path.normalize('NFC') !== path) {
+		return `${named} is not in Unicode NFC form, the form a tree path is written in — retype its accented letters.`;
+	}
+	if (utf8Length(path) > MAX_TREE_PATH_BYTES) {
+		return `${named} is longer than ${MAX_TREE_PATH_BYTES} bytes.`;
+	}
+	const name = segments[segments.length - 1];
+	const dotted = segments.find((segment) => segment.startsWith('.'));
+	if (dotted !== undefined) {
+		return `${named} holds "${dotted}", which starts with a dot: no method tree holds a dotfile, which is what keeps a file such as .env from ever travelling with a method.`;
+	}
+	const excludedDirectory = segments
+		.slice(0, -1)
+		.find((segment) => EXCLUDED_DIRECTORY_NAMES.has(segment));
+	if (excludedDirectory !== undefined) {
+		return `${named} is inside a "${excludedDirectory}" folder, which no method tree holds.`;
+	}
+	if (RUN_INPUTS_NAMES.has(name)) {
+		return `${named} names a run's inputs file, which never travels with a method — give example inputs another name, such as "examples/inputs-example.json".`;
+	}
+	if (name === VENV_MARKER_NAME) {
+		return `${named} names a Python virtual environment's marker, which no method tree holds.`;
+	}
+	if (name === MANIFEST_NAME && segments.length > 1) {
+		return `${named} names a ${MANIFEST_NAME} below the root, which would make its folder another package: only the root's own ${MANIFEST_NAME} belongs to the method.`;
 	}
 	return null;
 }
 
-/** What {@link assembleRunSources} produced: the run sources, or the reason it can't. */
-export interface AssembledRunSources {
-	/** Inline bundle contents to send as `mthds_contents` — emptied when folded into `files`. */
-	mthdsContents: string[];
-	/** The assembled method bundle, or undefined when there is none. */
-	files?: Record<string, string>;
-	/** Set when the combination is unusable; the node turns it into an item-scoped error. */
+/** The number of bytes `text` takes in UTF-8. */
+function utf8Length(text: string): number {
+	return Buffer.byteLength(text, 'utf8');
+}
+
+/** A text file of the method: its path from the method's root and its content. */
+export interface MethodTextFile {
+	path: string;
+	content: string;
+}
+
+/** A binary file of the method: its path from the method's root, and the binary field holding it. */
+export interface MethodBinaryFile {
+	path: string;
+	binaryPropertyName: string;
+}
+
+/** What {@link planMethodFiles} produced: the text entries and the binary files to load, or why not. */
+export interface MethodFilesPlan {
+	/** The pasted bundles under their generated names, then the text files, each as a text entry. */
+	textEntries: MethodFiles;
+	/** The binary files, each at a path no text entry takes, to load and send as `{ base64 }` entries. */
+	binaryFiles: MethodBinaryFile[];
+	/** Set when the files cannot be sent; the node turns it into an item-scoped error. */
 	error?: string;
 }
 
-/** Deterministic names for inline bundle contents folded into a `files` map. */
+/**
+ * The name a pasted bundle travels under: `main.mthds` for the first, then
+ * `bundle-2.mthds`, `bundle-3.mthds`, …, stepping aside from any path the author
+ * chose. `taken` holds the paths in lower case, so a generated name never sits
+ * beside one that differs from it only by case, which no tree may hold.
+ */
 function inlineBundleName(index: number, taken: Set<string>): string {
 	let name = index === 0 ? 'main.mthds' : `bundle-${index + 1}.mthds`;
 	let suffix = index + 1;
-	while (taken.has(name)) {
+	while (taken.has(name.toLowerCase())) {
 		suffix += 1;
 		name = `bundle-${suffix}.mthds`;
 	}
@@ -268,98 +357,117 @@ function inlineBundleName(index: number, taken: Set<string>): string {
 }
 
 /**
- * Turn the pasted method + its Python files into the run source to send.
- *
- * The node offers exactly two ways to say what to run:
- *   1. **Method ID** — a stored method, which already carries its own Python.
- *   2. **MTHDS Bundles + Python Files** — the method pasted inline, plus the
- *      `funcs/*.py` / `structures/*.py` / `requirements.txt` it needs.
- *
- * Without Python, (2) is just `mthds_contents` and nothing happens here. With
- * Python it has to become a `files` bundle, because `files` is the only transport
- * that can carry `.py` — and the protocol makes a bundle mutually exclusive with
- * `mthds_contents`, since a bundle carries its own `.mthds`. Taken literally that
- * would make "paste my method, attach my Python" impossible.
- *
- * So the pasted contents are folded INTO the bundle as generated `.mthds`
- * entries and `files` is sent alone. That is exactly what the server does with
- * any bundle anyway: `pipelex-api`'s run path splits the `.mthds` entries back
- * out into `mthds_contents` and materializes only the rest as a library
- * directory. Same request, same run — the assembly just removes a manual step.
- *
- * Pure, so the whole matrix is unit-testable.
+ * Add a file to a map of file entries as an own property: assigning to a key
+ * such as `__proto__`, a tree path like any other, would set the object's
+ * prototype instead of adding the file. As `mthds-js`'s `defineFileEntry`.
  */
-export function assembleRunSources(params: {
-	mthdsContents: string[];
-	pythonFiles: Record<string, string>;
-}): AssembledRunSources {
-	const { mthdsContents, pythonFiles } = params;
-
-	const pythonPaths = Object.keys(pythonFiles);
-	if (pythonPaths.length === 0) {
-		return { mthdsContents };
-	}
-
-	for (const path of pythonPaths) {
-		const pathError = bundleEntryPathError(path);
-		if (pathError) return { mthdsContents, error: pathError };
-	}
-
-	// Python is not a method. It can only ride along with a pasted one — a stored
-	// method (Method ID) already carries its own Python, and there is no way to
-	// graft extra files onto it.
-	if (mthdsContents.length === 0) {
-		return {
-			mthdsContents,
-			error:
-				'Python Files needs the method it belongs to: paste it into "MTHDS Bundles" and the two are sent together. (A stored method used via "Method ID" already carries its own Python.)',
-		};
-	}
-
-	const taken = new Set(pythonPaths);
-	const files: Record<string, string> = {};
-	mthdsContents.forEach((content, index) => {
-		const name = inlineBundleName(index, taken);
-		taken.add(name);
-		files[name] = content;
+export function defineFileEntry(files: MethodFiles, path: string, entry: FileEntry): void {
+	Object.defineProperty(files, path, {
+		value: entry,
+		enumerable: true,
+		writable: true,
+		configurable: true,
 	});
-
-	// The pasted contents now travel inside the bundle, so they must NOT also be
-	// sent as `mthds_contents` — that is exactly what the protocol forbids.
-	return { mthdsContents: [], files: { ...files, ...pythonFiles } };
 }
 
 /**
- * Last-line check on the BUILT body: it must name something to run, and must
- * never carry a bundle beside `mthds_contents`.
+ * Plan the `files` map of a method defined inline, from the fields that hold it:
+ * the pasted bundles, the text files and the binary files.
  *
- * The exclusivity half replicates `mthds/protocol`'s `assertExclusiveRunSources`
- * and should be unreachable in practice — `assembleRunSources` folds the pasted
- * contents INTO the bundle precisely so the two never travel together. It stays
- * as a backstop, because getting it wrong means sending the method twice and an
- * opaque server 422.
+ * Pure and network-free, so every check runs before any binary file is loaded:
+ * each path is a tree path no rule excludes ({@link treePathError}); no path is
+ * given twice, within one field or across them, since a map keeps one entry per
+ * key and keeping the last would silently drop a file the author configured; no
+ * text holds a character UTF-8 cannot encode; and files come with their method,
+ * a tree holding at least one `.mthds` file, pasted or given among the files,
+ * since a tree without one has nothing to run.
  *
- * `method_id` is refused alongside a pasted method. The hosted API would accept
- * the combination (it runs the inline method and records `method_id` as the
- * run-history linkage), but two run sources in one node means "what is this
- * running?" has no single answer in the editor, so the node treats it as a
- * mistake. The node-level check fires first with a message about the toggle; this
- * is the backstop.
+ * The bundles are named after the files are read, so a generated name steps
+ * aside from every path the author chose.
+ */
+export function planMethodFiles(params: {
+	bundles: string[];
+	textFiles: MethodTextFile[];
+	binaryFiles: MethodBinaryFile[];
+}): MethodFilesPlan {
+	const { bundles, textFiles, binaryFiles } = params;
+	const fail = (error: string): MethodFilesPlan => ({ textEntries: {}, binaryFiles: [], error });
+
+	const seen = new Set<string>();
+	const paths = [...textFiles.map((file) => file.path), ...binaryFiles.map((file) => file.path)];
+	for (const path of paths) {
+		const pathError = treePathError(path);
+		if (pathError) return fail(pathError);
+		if (seen.has(path)) {
+			return fail(
+				`Method file path "${path}" is listed more than once — each path may appear only once, across Method Files and Method Binary Files. Rename one of the entries or remove the duplicate.`,
+			);
+		}
+		seen.add(path);
+	}
+	for (const file of textFiles) {
+		if (LONE_SURROGATE.test(file.content)) {
+			return fail(
+				`The content of method file "${file.path}" holds a character UTF-8 cannot encode, so it cannot be sent as text. Fix the text, or give the file under Method Binary Files.`,
+			);
+		}
+	}
+	for (const [index, content] of bundles.entries()) {
+		if (LONE_SURROGATE.test(content)) {
+			return fail(
+				`MTHDS bundle ${index + 1} holds a character UTF-8 cannot encode, so it cannot be sent as text. Fix the pasted text.`,
+			);
+		}
+	}
+
+	const hasFiles = seen.size > 0;
+	const givesBundle = [...seen].some((path) => path.endsWith(BUNDLE_EXTENSION));
+	if (hasFiles && bundles.length === 0 && !givesBundle) {
+		return fail(
+			'The method files need the method they belong to: paste it into "MTHDS Bundles", or add its .mthds file among them, and they are sent together. (A stored method run by "Method ID" already carries its own files.)',
+		);
+	}
+
+	const taken = new Set([...seen].map((path) => path.toLowerCase()));
+	const textEntries: MethodFiles = {};
+	for (const [index, content] of bundles.entries()) {
+		const name = inlineBundleName(index, taken);
+		taken.add(name.toLowerCase());
+		defineFileEntry(textEntries, name, content);
+	}
+	for (const file of textFiles) defineFileEntry(textEntries, file.path, file.content);
+	return { textEntries, binaryFiles };
+}
+
+/**
+ * A binary file's entry: its bytes in padded standard Base64 with no line break.
+ * Node's encoder writes every pad bit as zero, so the encoding is the canonical
+ * one the standard requires, and a receiver decodes exactly these bytes.
+ */
+export function base64FileEntry(bytes: Buffer): Base64FileEntry {
+	return { base64: bytes.toString('base64') };
+}
+
+/**
+ * Last-line check on the BUILT body: it must name something to run, and never
+ * a stored method beside an inline one.
+ *
+ * `method_id` is refused alongside a method defined inline. The hosted API
+ * would accept the combination (it runs the inline method and records
+ * `method_id` as the run-history linkage), but two run sources in one node
+ * means "what is this running?" has no single answer in the editor, so the node
+ * treats it as a mistake. The node-level check fires first with a message about
+ * the toggle; this is the backstop.
  *
  * Returned rather than thrown so it stays pure; the node turns it into a
  * `NodeOperationError` with an `itemIndex`.
  */
 export function runSourceError(body: HostedStartBody): string | null {
-	const hasFiles = body.files !== undefined;
-	const hasContents = body.mthds_contents !== undefined && body.mthds_contents.length > 0;
-
-	if (hasFiles && hasContents) {
-		return 'Internal: a method bundle cannot be sent together with mthds_contents. This is a bug in the node — please report it.';
-	}
-	if (body.method_id && (hasFiles || hasContents)) {
+	const hasFiles = body.files !== undefined && Object.keys(body.files).length > 0;
+	if (body.method_id && hasFiles) {
 		return 'Choose one: a stored method ("Method ID") or an inline one ("Define Method Inline"), not both.';
 	}
-	if (!hasContents && !hasFiles && !body.method_id && !body.pipe_code) {
+	if (!hasFiles && !body.method_id && !body.pipe_code) {
 		return 'Nothing to run: paste your method into "MTHDS Bundles", or set a "Method ID" to run a stored method.';
 	}
 	return null;
@@ -629,21 +737,52 @@ export async function requestStart(
 	})) as IN8nHttpFullResponse;
 
 	const responseBody = (response.body ?? {}) as IDataObject;
-	if (response.statusCode === 403) {
-		throw new NodeApiError(ctx.getNode(), responseBody as JsonObject, {
-			message: forbiddenMessage(responseBody),
-			httpCode: '403',
-			itemIndex,
-		});
-	}
 	if (response.statusCode < 200 || response.statusCode >= 300) {
 		throw new NodeApiError(ctx.getNode(), responseBody as JsonObject, {
-			message: problemMessage(responseBody) ?? 'Failed to start run',
+			message: startRefusalMessage(response.statusCode, responseBody),
 			httpCode: String(response.statusCode),
 			itemIndex,
 		});
 	}
 	return responseBody as unknown as StartAck;
+}
+
+/** The problem code of a method tree past one of the deployment's limits. */
+export const METHOD_TREE_TOO_LARGE_CODE = 'method_tree_too_large';
+
+/** The limit on the bytes a request's method files take in its body, which the platform names. */
+const INLINE_LIMIT_NAME = 'max_inline_bytes';
+
+/**
+ * A method too large to travel inside the start request. The node sends a
+ * method defined inline as Base64 and text in the request body, never by hash,
+ * so a body past the platform's inline limit, or past the API gateway's own
+ * ceiling, which answers a bare `413`, has one remedy here: a stored method,
+ * which the start names by its id and which sends no file.
+ */
+export const METHOD_FILES_TOO_LARGE_MESSAGE =
+	'The method defined inline is too large to send in one request: its files travel inside the start request, binary files in Base64. Save the method to Pipelex and run it by its "Method ID" instead, which sends no file.';
+
+/**
+ * The message for a refused `POST /v1/start`: a refusal by role or by account
+ * on a `403` ({@link forbiddenMessage}), a method too large to send inline on a
+ * `413` or on the platform's `422 method_tree_too_large` naming its inline
+ * limit ({@link METHOD_FILES_TOO_LARGE_MESSAGE}, with the server's detail), and
+ * otherwise the problem's own text ({@link problemMessage}).
+ *
+ * A tree past the deployment's other limits, its file count, a file's size or
+ * its total, keeps the API's sentence, which names the limit: every holder of a
+ * tree applies those, a stored method included, so the node has nothing to add.
+ */
+export function startRefusalMessage(statusCode: number, body: IDataObject): string {
+	if (statusCode === 403) return forbiddenMessage(body);
+	const limit = body.limit as { name?: unknown } | undefined;
+	const pastInlineLimit =
+		body.code === METHOD_TREE_TOO_LARGE_CODE && limit?.name === INLINE_LIMIT_NAME;
+	if (statusCode === 413 || pastInlineLimit) {
+		return withServerDetail(METHOD_FILES_TOO_LARGE_MESSAGE, body);
+	}
+	return problemMessage(body) ?? 'Failed to start run';
 }
 
 /**
@@ -1006,10 +1145,66 @@ export function binaryInputConflictError(
  * `attachment_1`, …, so "no field data" alone sends the author hunting.
  */
 export function missingBinaryMessage(mapping: BinaryInputMapping, available: string[]): string {
-	const lead = `Binary input "${mapping.inputName}" reads the binary field "${mapping.binaryPropertyName}", but this item has no such field.`;
+	return missingFieldMessage(
+		`Binary input "${mapping.inputName}" reads the binary field "${mapping.binaryPropertyName}", but this item has no such field.`,
+		available,
+	);
+}
+
+/** The same message for a `Method Binary Files` row, naming the file's path. */
+export function missingMethodBinaryMessage(file: MethodBinaryFile, available: string[]): string {
+	return missingFieldMessage(
+		`Method binary file "${file.path}" reads the binary field "${file.binaryPropertyName}", but this item has no such field.`,
+		available,
+	);
+}
+
+function missingFieldMessage(lead: string, available: string[]): string {
 	return available.length > 0
 		? `${lead} Its binary fields are: ${available.join(', ')}.`
 		: `${lead} It carries no binary data at all — check that the node before this one outputs a file.`;
+}
+
+/**
+ * Read the `Method Binary Files` fixedCollection
+ * (`{ file: [{ path, binaryPropertyName }] }`) into rows. Pure — the node turns
+ * the returned error into an item-scoped one. The rules of `Binary Inputs`
+ * ({@link readBinaryInputMappings}), keyed by the path:
+ *
+ * - A row with a blank path is dropped: the editor persists a row as soon as its
+ *   add button is clicked, with the binary field prefilled. The path is trimmed.
+ * - A binary field left out of the stored row falls back to `data`; one
+ *   explicitly cleared is refused, since guessing which field the author meant
+ *   would send the wrong file as part of the method.
+ *
+ * A path given twice is judged with the other method files, in
+ * {@link planMethodFiles}.
+ */
+export function readMethodBinaryFileRows(raw: unknown): {
+	rows: MethodBinaryFile[];
+	error?: string;
+} {
+	const entries = (raw as { file?: unknown } | undefined)?.file;
+	const rows: MethodBinaryFile[] = [];
+	if (!Array.isArray(entries)) return { rows };
+	for (const entry of entries) {
+		const { path: rawPath, binaryPropertyName } = (entry ?? {}) as {
+			path?: unknown;
+			binaryPropertyName?: unknown;
+		};
+		const path = scalarText(rawPath);
+		if (!path) continue;
+		const property =
+			binaryPropertyName === undefined ? DEFAULT_BINARY_PROPERTY : scalarText(binaryPropertyName);
+		if (!property) {
+			return {
+				rows,
+				error: `Method binary file "${path}" names no binary field. Set "Input Binary Field" to the field that holds the file (n8n's default is "${DEFAULT_BINARY_PROPERTY}").`,
+			};
+		}
+		rows.push({ path, binaryPropertyName: property });
+	}
+	return { rows };
 }
 
 /** n8n's own test for a binary value (`isBinaryValue`), owned here: it is not in every n8n-workflow the node runs on. */

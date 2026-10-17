@@ -5,6 +5,13 @@
 ### Added
 
 - **Refusals by role**: when the Pipelex API refuses a request because of the caller's role in the organization (`403` with the problem code `role_not_permitted`), as it refuses a role that runs only published versions a `@draft` Method ID or an inline method, the node's error says *"Your role in this organization does not allow this."* followed by the API's own sentence naming the role held and what the request needs, instead of telling the user to ask Pipelex to enable API access.
+- **`Method Binary Files` on the start operations**: an inline method can now carry files from the incoming item, such as a Word template or a logo downloaded from Google Drive, by adding a row that names the file's path in the method and its binary field (`data` by default, or the path to the file in the item's JSON under n8n's *combined* binary mode); each one is sent with the method in Base64. A `.mthds` file given this way or under `Method Files` counts as the method's bundle, so a method kept as files need not be pasted.
+
+### Changed
+
+- **An inline method is sent as its `files` (Breaking)**: the start operations no longer send `mthds_contents`; the pasted bundles travel in the method's `files` as `main.mthds`, then `bundle-2.mthds` and so on, beside its other files. Before anything is sent, every path is checked against the MTHDS standard's rules for a method's tree, so a path such as `.env`, `inputs.json`, `node_modules/x.js` or one holding `..` fails the item with an error naming it, and a method whose pasted bundles declare more than one `main_pipe` now needs `Pipe Code` to say which pipe runs.
+- **`Python Files` is now `Method Files`**: the field takes any text file the inline method carries, such as an HTML template or a `requirements.txt` as well as PipeFunc Python, and a saved workflow keeps its rows.
+- **A method too large to send inline says what to do**: when the hosted API refuses a start because the inline method's files pass what one request may carry, with its gateway's `413` or with `422 method_tree_too_large` on its inline limit, the node's error says to save the method to Pipelex and run it by `Method ID`, followed by the API's own detail.
 
 ## [v0.3.1] - 2026-10-08
 

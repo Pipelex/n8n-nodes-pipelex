@@ -374,8 +374,10 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		});
 
 		await Pipelex.prototype.execute.call(ctx);
+		// Each pasted bundle is a text entry of the method's files, the blank row
+		// dropped before the names are given.
 		expect(httpFn.mock.calls[0][0].body).toEqual({
-			mthds_contents: ['domain = "a"', 'domain = "b"'],
+			files: { 'main.mthds': 'domain = "a"', 'bundle-2.mthds': 'domain = "b"' },
 			inputs: {},
 		});
 	});
@@ -392,9 +394,27 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 
 		await Pipelex.prototype.execute.call(ctx);
 		expect(httpFn.mock.calls[0][0].body).toEqual({
-			mthds_contents: ['legacy bundle'],
+			files: { 'main.mthds': 'legacy bundle' },
 			inputs: {},
 		});
+	});
+
+	it('never sends the retired mthds_contents, whatever the inline method holds', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: {
+				inlineMethod: true,
+				mthdsContents: { bundle: [{ content: 'domain = "a"' }] },
+				pipeCode: 'p',
+				inputs: '{}',
+			},
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		const body = httpFn.mock.calls[0][0].body;
+		expect(body).not.toHaveProperty('mthds_contents');
+		expect(body).toEqual({ pipe_code: 'p', files: { 'main.mthds': 'domain = "a"' }, inputs: {} });
 	});
 
 	it('never silently switches to the stored method on a pre-0.2.0 workflow', async () => {
@@ -438,7 +458,7 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		expect(httpFn).not.toHaveBeenCalled();
 	});
 
-	it('rejects a duplicate Python file path instead of overwriting it', async () => {
+	it('rejects a duplicate method file path instead of overwriting it', async () => {
 		// Regression, greptile P1. `files[path] = content` is last-write-wins, so a
 		// repeated path silently dropped a file and ran content the author did not
 		// intend as the only version.
@@ -495,20 +515,23 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		// n8n keeps a hidden field's stored value. A user who pastes a method, then
 		// switches back to a stored one, must not trip the either/or error on fields
 		// they can no longer see — nor silently send them.
-		const { ctx, httpFn } = makeContext({
+		const { ctx, httpFn, bufferFn } = makeContext({
 			operation: 'startAndPoll',
 			params: {
 				methodId: 'method-42',
 				inlineMethod: false,
 				mthdsContents: ['leftover'],
 				pythonFiles: { file: [{ path: 'funcs/old.py', content: 'stale' }] },
+				methodBinaryFiles: { file: [{ path: 'templates/old.docx', binaryPropertyName: 'data' }] },
 				inputs: '{}',
 			},
+			items: [{ json: {}, binary: { data: { data: 'UEs=', mimeType: 'application/octet-stream' } } }],
 			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
 		});
 
 		await Pipelex.prototype.execute.call(ctx);
 		expect(httpFn.mock.calls[0][0].body).toEqual({ method_id: 'method-42', inputs: {} });
+		expect(bufferFn).not.toHaveBeenCalled();
 	});
 
 	it('keeps polling while running (202), honoring Retry-After, then returns when completed', async () => {
@@ -792,7 +815,7 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		expect(httpFn).not.toHaveBeenCalled();
 	});
 
-	it('sends the pasted method plus its Python as one files bundle', async () => {
+	it('sends the pasted method plus its text files as one files map', async () => {
 		const { ctx, httpFn } = makeContext({
 			operation: 'startAndPoll',
 			params: {
@@ -823,10 +846,9 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		});
 	});
 
-	it('ships inline MTHDS Bundles together with Python Files as one bundle', async () => {
-		// The headline flow: paste the method, attach its Python, run. The protocol
-		// forbids `mthds_contents` beside a bundle, so the node folds the inline
-		// contents INTO the bundle rather than rejecting the combination.
+	it('ships inline MTHDS Bundles together with Method Files as one tree', async () => {
+		// The headline flow: paste the method, attach its Python, run. The pasted
+		// bundles are files of the method's tree like the others.
 		const { ctx, httpFn } = makeContext({
 			operation: 'startAndPoll',
 			params: {
@@ -848,7 +870,7 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		});
 	});
 
-	it('fails fast (no run) when Python is supplied with no method', async () => {
+	it('fails fast (no run) when files are supplied with no method', async () => {
 		const { ctx, httpFn } = makeContext({
 			operation: 'startAndPoll',
 			params: {
@@ -861,11 +883,11 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		});
 
 		const result = await Pipelex.prototype.execute.call(ctx);
-		expect(String(result[0][0].json.error)).toMatch(/needs the method/);
+		expect(String(result[0][0].json.error)).toMatch(/need the method/);
 		expect(httpFn).not.toHaveBeenCalled();
 	});
 
-	it('fails fast (no run) on an unsafe Python path', async () => {
+	it('fails fast (no run) on a path that leaves the tree', async () => {
 		const { ctx, httpFn } = makeContext({
 			operation: 'startAndPoll',
 			params: {
@@ -879,8 +901,65 @@ describe('Pipelex node — Start & Wait for Result (start + internal poll)', () 
 		});
 
 		const result = await Pipelex.prototype.execute.call(ctx);
-		expect(String(result[0][0].json.error)).toMatch(/escapes the bundle root/);
+		expect(String(result[0][0].json.error)).toMatch(/"\.\."/);
 		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('fails fast (no run) on a file no tree holds, such as a dotfile', async () => {
+		// The standard keeps dotfiles out of every tree, which is what keeps a `.env`
+		// from ever travelling with a method; the API would refuse the key.
+		const { ctx, httpFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				inputs: '{}',
+				inlineMethod: true,
+				mthdsContents: ['m'],
+				pythonFiles: { file: [{ path: '.env', content: 'KEY=x' }] },
+			},
+			continueOnFail: true,
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toMatch(/starts with a dot/);
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it("explains the gateway's 413 on a method too large to send inline", async () => {
+		const { ctx } = makeContext({
+			operation: 'start',
+			params: { inputs: '{}', inlineMethod: true, mthdsContents: ['m'] },
+			continueOnFail: true,
+			httpImpl: () => fullResponse(413, { message: 'Request Entity Too Large' }),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		const error = String(result[0][0].json.error);
+		expect(error).toMatch(/too large/);
+		expect(error).toMatch(/Method ID/);
+	});
+
+	it("shows the API's refusal of the method's files as it wrote it", async () => {
+		const detail = "The method's files are not a method tree: the keys 'README.md' and 'readme.md' collide.";
+		const { ctx } = makeContext({
+			operation: 'start',
+			params: {
+				inputs: '{}',
+				inlineMethod: true,
+				mthdsContents: ['m'],
+				pythonFiles: {
+					file: [
+						{ path: 'README.md', content: 'a' },
+						{ path: 'readme.md', content: 'b' },
+					],
+				},
+			},
+			continueOnFail: true,
+			httpImpl: () => fullResponse(422, { code: 'invalid_method_files', detail }),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toBe(detail);
 	});
 
 	it('relays tokens_usages and usage_assembly_error to the item', async () => {
@@ -1058,7 +1137,7 @@ describe('Pipelex node — Start Pipeline (start only, no polling)', () => {
 
 		await Pipelex.prototype.execute.call(ctx);
 		expect(httpFn.mock.calls[0][0].body).toEqual({
-			mthds_contents: ['bundle'],
+			files: { 'main.mthds': 'bundle' },
 			inputs: {},
 		});
 	});
@@ -1209,7 +1288,7 @@ describe('Pipelex node — Poll & Get Result (waitForResult by id)', () => {
 describe('Pipelex node — expression-fed text fields', () => {
 	beforeEach(() => vi.clearAllMocks());
 
-	it('rejects non-text Python file content, naming the offending path', async () => {
+	it('rejects non-text method file content, naming the offending path', async () => {
 		const { ctx, httpFn } = makeContext({
 			operation: 'startAndPoll',
 			params: {
@@ -1473,21 +1552,42 @@ describe('Pipelex node — operation surface (description sanity)', () => {
 		return (property?.displayOptions?.show?.operation ?? []) as string[];
 	};
 
-	it('orders the start fields: Method ID → inline toggle → the inline pair → Inputs', () => {
+	it('orders the start fields: Method ID → inline toggle → the inline method → Inputs', () => {
 		// Field order IS the explanation of the node: you pick a stored method, or
 		// open the toggle to paste one, and only then fill the inputs. Pinned because
 		// property order is display order and a careless insert reshuffles the UI.
 		const startFields = properties
 			.filter((p: INodeProperties) => showOperations(p.name).includes('startAndPoll'))
 			.map((p: INodeProperties) => p.name);
-		expect(startFields.slice(0, 6)).toEqual([
+		expect(startFields.slice(0, 7)).toEqual([
 			'methodId',
 			'inlineMethod',
 			'mthdsContents',
 			'pythonFiles',
+			'methodBinaryFiles',
 			'inputs',
 			'binaryInputs',
 		]);
+	});
+
+	it('labels the text files of an inline method as method files, not as Python only', () => {
+		// The internal name stays `pythonFiles`, so a saved workflow keeps its rows;
+		// what the field holds is any text file of the method's tree.
+		const property = properties.find((p: INodeProperties) => p.name === 'pythonFiles');
+		expect(property?.displayName).toBe('Method Files');
+		const row = (property?.options ?? [])[0] as { name: string; values: INodeProperties[] };
+		expect(row.values.map((value) => value.name)).toEqual(['path', 'content']);
+	});
+
+	it('offers Method Binary Files as rows of path + binary field, the field defaulting to data', () => {
+		const property = properties.find((p: INodeProperties) => p.name === 'methodBinaryFiles');
+		expect(property?.displayName).toBe('Method Binary Files');
+		expect(property?.type).toBe('fixedCollection');
+		expect(property?.typeOptions?.multipleValues).toBe(true);
+		const row = (property?.options ?? [])[0] as { name: string; values: INodeProperties[] };
+		expect(row.name).toBe('file');
+		expect(row.values.map((value) => value.name)).toEqual(['path', 'binaryPropertyName']);
+		expect(row.values.find((value) => value.name === 'binaryPropertyName')?.default).toBe('data');
 	});
 
 	it('offers Binary Inputs as rows of input name + binary field, the field defaulting to data', () => {
@@ -1500,12 +1600,12 @@ describe('Pipelex node — operation surface (description sanity)', () => {
 		expect(row.values.find((value) => value.name === 'binaryPropertyName')?.default).toBe('data');
 	});
 
-	it('renders both halves of the inline method as the same kind of control', () => {
-		// They hold the two halves of one thing, so they must look like one control.
+	it('renders every part of the inline method as the same kind of control', () => {
+		// They hold the parts of one thing, so they must look like one control.
 		// A multi-value `string` renders a wide full-width add-button while a
 		// fixedCollection renders the compact `+ Add …` row; side by side those read
 		// as unrelated widgets, which is exactly how this looked before.
-		for (const name of ['mthdsContents', 'pythonFiles']) {
+		for (const name of ['mthdsContents', 'pythonFiles', 'methodBinaryFiles']) {
 			const property = properties.find((p: INodeProperties) => p.name === name);
 			expect(property?.type, name).toBe('fixedCollection');
 			expect(property?.typeOptions?.multipleValues, name).toBe(true);
@@ -1513,8 +1613,8 @@ describe('Pipelex node — operation surface (description sanity)', () => {
 		}
 	});
 
-	it('hides the inline pair behind the toggle', () => {
-		for (const name of ['mthdsContents', 'pythonFiles']) {
+	it('hides the inline method behind the toggle', () => {
+		for (const name of ['mthdsContents', 'pythonFiles', 'methodBinaryFiles']) {
 			const property = properties.find((p: INodeProperties) => p.name === name);
 			expect(property?.displayOptions?.show?.inlineMethod, name).toEqual([true]);
 		}
@@ -1574,6 +1674,8 @@ describe('Pipelex node — operation surface (description sanity)', () => {
 	it('shows the run-definition fields on both start operations (and the legacy execute value)', () => {
 		for (const field of [
 			'mthdsContents',
+			'pythonFiles',
+			'methodBinaryFiles',
 			'methodId',
 			'inputs',
 			'binaryInputs',
@@ -2636,5 +2738,245 @@ describe('Pipelex node — binary inputs (an n8n file becomes a method input)', 
 			'Binary input "document" reads the binary field "data", but this item has no such field. Its binary fields are: attachment_0.',
 		);
 		expect(httpFn).not.toHaveBeenCalled();
+	});
+});
+
+describe('Pipelex node — method binary files (an n8n file becomes a file of the method)', () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		storedUploads.clear();
+	});
+
+	// The first bytes of a .docx (a zip): not UTF-8 text, so only Base64 carries them.
+	const DOCX_BYTES = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x06, 0x00, 0xff, 0xfe]);
+	const DOCX: TestBinary = {
+		data: DOCX_BYTES.toString('base64'),
+		mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+		fileName: 'letterhead.docx',
+	};
+	const LOGO_BYTES = Buffer.from('\x89PNG a logo');
+	const LOGO: TestBinary = { data: LOGO_BYTES.toString('base64'), mimeType: 'image/png', fileName: 'logo.png' };
+
+	const BUNDLE = 'domain = "letters"\nmain_pipe = "write_letter"';
+
+	it('sends a binary field as a base64 entry at its path, beside the pasted bundle', async () => {
+		const { ctx, httpFn, bufferFn } = makeContext({
+			operation: 'startAndPoll',
+			params: {
+				inputs: '{}',
+				inlineMethod: true,
+				mthdsContents: { bundle: [{ content: BUNDLE }] },
+				methodBinaryFiles: {
+					file: [
+						{ path: 'templates/letterhead.docx', binaryPropertyName: 'data' },
+						// Blank path — the UI persists a row on "Add" before typing.
+						{ path: '  ', binaryPropertyName: 'data' },
+						{ path: 'templates/logo.png', binaryPropertyName: 'attachment_0' },
+					],
+				},
+			},
+			items: [{ json: {}, binary: { data: DOCX, attachment_0: LOGO } }],
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json.status).toBe('COMPLETED');
+		expect(httpFn.mock.calls[0][0].url).toBe('https://api.test/v1/start');
+		expect(httpFn.mock.calls[0][0].body).toEqual({
+			inputs: {},
+			files: {
+				'main.mthds': BUNDLE,
+				'templates/letterhead.docx': { base64: DOCX_BYTES.toString('base64') },
+				'templates/logo.png': { base64: LOGO_BYTES.toString('base64') },
+			},
+		});
+		// Loaded through n8n's helper, which reads a file kept outside memory too.
+		expect(bufferFn.mock.calls).toEqual([
+			[0, 'data'],
+			[0, 'attachment_0'],
+		]);
+	});
+
+	it('sends each item its own file', async () => {
+		const other = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: {
+				inputs: '{}',
+				inlineMethod: true,
+				mthdsContents: { bundle: [{ content: BUNDLE }] },
+				methodBinaryFiles: { file: [{ path: 'templates/letterhead.docx', binaryPropertyName: 'data' }] },
+			},
+			items: [
+				{ json: {}, binary: { data: DOCX } },
+				{ json: {}, binary: { data: { ...DOCX, data: other.toString('base64') } } },
+			],
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		const sent = httpFn.mock.calls.map((call) => call[0].body.files['templates/letterhead.docx']);
+		expect(sent).toEqual([{ base64: DOCX_BYTES.toString('base64') }, { base64: other.toString('base64') }]);
+	});
+
+	it('runs a method whose bundle itself arrives as a binary field', async () => {
+		// A method kept as files elsewhere, such as a Drive folder, need not be pasted.
+		const bundleBytes = Buffer.from(BUNDLE, 'utf8');
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: {
+				inputs: '{}',
+				inlineMethod: true,
+				methodBinaryFiles: { file: [{ path: 'main.mthds', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: { data: bundleBytes.toString('base64'), mimeType: 'text/plain' } } }],
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		expect(httpFn.mock.calls[0][0].body).toEqual({
+			inputs: {},
+			files: { 'main.mthds': { base64: bundleBytes.toString('base64') } },
+		});
+	});
+
+	it("finds a file kept in the item's JSON under the combined binary mode", async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: {
+				inputs: '{}',
+				inlineMethod: true,
+				mthdsContents: { bundle: [{ content: BUNDLE }] },
+				methodBinaryFiles: { file: [{ path: 'templates/letterhead.docx', binaryPropertyName: 'data' }] },
+			},
+			binaryMode: 'combined',
+			items: [{ json: { data: DOCX as unknown as Record<string, unknown> } }],
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		expect(httpFn.mock.calls[0][0].body.files['templates/letterhead.docx']).toEqual({
+			base64: DOCX_BYTES.toString('base64'),
+		});
+	});
+
+	it('names the binary fields the item does carry when the mapped one is missing, before loading or sending anything', async () => {
+		const { ctx, httpFn, bufferFn } = makeContext({
+			operation: 'start',
+			params: {
+				inputs: '{}',
+				inlineMethod: true,
+				mthdsContents: { bundle: [{ content: BUNDLE }] },
+				methodBinaryFiles: { file: [{ path: 'templates/letterhead.docx', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { attachment_0: DOCX } }],
+			continueOnFail: true,
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(String(result[0][0].json.error)).toBe(
+			'Method binary file "templates/letterhead.docx" reads the binary field "data", but this item has no such field. Its binary fields are: attachment_0.',
+		);
+		expect(bufferFn).not.toHaveBeenCalled();
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('refuses a path given both as a text file and as a binary file, before loading anything', async () => {
+		const { ctx, httpFn, bufferFn } = makeContext({
+			operation: 'start',
+			params: {
+				inputs: '{}',
+				inlineMethod: true,
+				mthdsContents: { bundle: [{ content: BUNDLE }] },
+				pythonFiles: { file: [{ path: 'templates/letter.html', content: '<p/>' }] },
+				methodBinaryFiles: { file: [{ path: 'templates/letter.html', binaryPropertyName: 'data' }] },
+			},
+			items: [{ json: {}, binary: { data: DOCX } }],
+			continueOnFail: true,
+			httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		const error = String(result[0][0].json.error);
+		expect(error).toContain('templates/letter.html');
+		expect(error).toMatch(/more than once/);
+		expect(bufferFn).not.toHaveBeenCalled();
+		expect(httpFn).not.toHaveBeenCalled();
+	});
+
+	it('loads the method files before uploading any binary input, so a bad row stores nothing', async () => {
+		const log: string[] = [];
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: {
+				inputs: '{}',
+				inlineMethod: true,
+				mthdsContents: { bundle: [{ content: BUNDLE }] },
+				methodBinaryFiles: { file: [{ path: 'templates/letterhead.docx', binaryPropertyName: 'template' }] },
+				binaryInputs: { input: [{ name: 'document', binaryPropertyName: 'data' }] },
+			},
+			items: [
+				{
+					json: {},
+					binary: {
+						template: DOCX,
+						data: { data: Buffer.from('%PDF').toString('base64'), mimeType: 'application/pdf', fileName: 'a.pdf' },
+					},
+				},
+			],
+			log,
+			httpImpl: (options) => {
+				const url = String(options.url);
+				log.push(`${options.method} ${url.split('?')[0]}`);
+				if (url === 'https://api.test/v1/upload/grant') {
+					return fullResponse(200, {
+						uri: 'pipelex-storage://orgs/o/assets/a.pdf',
+						url: 'https://bucket.test/orgs/o/assets/a.pdf?sig=x',
+						headers: { 'If-None-Match': '*' },
+						expires_at: '2026-09-28T12:05:00Z',
+						max_bytes: 52428800,
+					});
+				}
+				if (url.startsWith('https://bucket.test')) {
+					return { statusCode: 200, body: '', headers: {} } as unknown as IN8nHttpFullResponse;
+				}
+				return fullResponse(202, START_ACK);
+			},
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		expect(log).toEqual([
+			'load template',
+			'load data',
+			'POST https://api.test/v1/upload/grant',
+			'PUT https://bucket.test/orgs/o/assets/a.pdf',
+			'POST https://api.test/v1/start',
+		]);
+		const startBody = httpFn.mock.calls[httpFn.mock.calls.length - 1][0].body;
+		expect(startBody.files['templates/letterhead.docx']).toEqual({ base64: DOCX_BYTES.toString('base64') });
+		expect(startBody.inputs.document.url).toBe('pipelex-storage://orgs/o/assets/a.pdf');
+	});
+
+	it('replays the same start on Retry On Fail, since the same files make the same request', async () => {
+		const run = async () => {
+			const { ctx, httpFn } = makeContext({
+				operation: 'start',
+				params: {
+					inputs: '{}',
+					inlineMethod: true,
+					mthdsContents: { bundle: [{ content: BUNDLE }] },
+					methodBinaryFiles: { file: [{ path: 'templates/letterhead.docx', binaryPropertyName: 'data' }] },
+				},
+				items: [{ json: {}, binary: { data: DOCX } }],
+				httpImpl: startThenResults(() => fullResponse(200, COMPLETED_RESULT)),
+			});
+			await Pipelex.prototype.execute.call(ctx);
+			return httpFn.mock.calls[0][0];
+		};
+
+		const [first, second] = [await run(), await run()];
+		expect(second.headers['Idempotency-Key']).toBe(first.headers['Idempotency-Key']);
+		expect(second.body).toEqual(first.body);
 	});
 });

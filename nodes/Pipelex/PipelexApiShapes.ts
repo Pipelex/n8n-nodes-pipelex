@@ -29,8 +29,11 @@
  *    - `pipelex-sdk-js/src/client.ts` → `start` / `getRunResult` (incl. the
  *      `main_stuff` invariant and `DEFAULT_DEGRADED_RETRY_SECONDS`)
  *    - `mthds/protocol` (`options.ts`, `models.ts`) → the `RunRequest` /
- *      `StartRequest` field set, `RunResultStart`, and the run-source
- *      exclusivity rules replicated in `GenericFunctions.runSourceError`
+ *      `StartRequest` field set, `RunResultStart`, and the run-source rules
+ *      replicated in `GenericFunctions.runSourceError`
+ *    - `mthds-js/src/protocol/file_entries.ts` and the standard's
+ *      `method-tree.md` → `FileEntry` / `MethodFiles`, the tree path rule and
+ *      the names no tree admits, replicated in `GenericFunctions.treePathError`
  *    - `pipelex-sdk-js/src/product-models.ts` → `UploadGrantRequest` /
  *      `UploadGrant` (the SDK's `UploadGrantInput` / `UploadGrant`)
  *    - `pipelex-sdk-js/src/upload-grant.ts` → the storage `PUT` and its error
@@ -93,6 +96,39 @@ export type RunStatus =
 	| 'TERMINATED'
 	| 'TIMED_OUT';
 
+// ── A method as it travels: the map of file entries ────────────────────────
+// The MTHDS standard's file entry (`mthds/docs/spec/method-tree.md`, "The File
+// Entry", standard 7.0.0 and later), which the HTTP Runner Protocol's `files`
+// carries and the hosted API's `POST /v1/start` takes (`HostedRunRequest.files`
+// in `pipelex-server/platform/src/pipelex_platform/routers/v1/execution.py`).
+// Replicated from `mthds-js`'s `src/protocol/file_entries.ts`, the same shapes
+// `mthds-python` declares in `mthds.method_tree.file_entry`.
+
+/** A file's text: its bytes are the UTF-8 encoding of the string, exactly. */
+export type TextFileEntry = string;
+
+/** Any bytes, in canonical padded standard Base64 (RFC 4648) with no line break. */
+export interface Base64FileEntry {
+	base64: string;
+}
+
+/**
+ * Bytes the receiver already holds in its blob store, named by their SHA-256 and
+ * length. Declared because the wire has it; the node never sends one, since it
+ * never uploads a method file to a blob store first (`POST /v1/blobs/missing`).
+ */
+export interface HashFileEntry {
+	/** The SHA-256 of the bytes, in lowercase hexadecimal. */
+	sha256: string;
+	/** Their length in bytes, a JSON integer written without a fraction or an exponent. */
+	size: number;
+}
+
+export type FileEntry = TextFileEntry | Base64FileEntry | HashFileEntry;
+
+/** A method tree as it travels: a map from tree path to file entry, holding at least one file. */
+export type MethodFiles = Record<string, FileEntry>;
+
 /**
  * Body of `POST /v1/start` — the subset of the protocol's `StartRequest` (plus
  * the hosted `method_id` extension) this node sends. Field names are the
@@ -102,10 +138,9 @@ export type RunStatus =
  * - `pipeline_run_id` — the hosted API rejects a client-supplied run id with a
  *   422 by design (the StartAck's id is always authoritative).
  * - `callback_urls` — webhooks need a receivable endpoint; the node polls instead.
- * - `bundle_b64` — the API accepts the method bundle as a base64 zip as well as
- *   a `files` map, but the node exposes ONE way to send a method (paste it, plus
- *   Python files if it needs them). A second encoding is a third run source in
- *   the editor for no user-visible gain.
+ * - `mthds_contents`, `bundle_b64` and `resources` — the run fields the protocol's
+ *   `files` replaced, which the hosted API retires. A method travels as its tree
+ *   alone, so the node has one way to send one.
  *
  * `method_id` is the HOSTED extension (a stored method in the active org's
  * catalog). It is a method selector, sent exactly as the user typed it (trimmed
@@ -115,22 +150,21 @@ export type RunStatus =
  * checks nor rewrites it, and it travels in the JSON body, never in a URL, so
  * the `@` needs no encoding.
  *
- * `files` is the PIPELEX-API method-bundle extension: the whole method (the
- * `.mthds` plus its `funcs/*.py`, `structures/*.py` and an optional
- * `requirements.txt`) rather than only inline `.mthds` text — the only way to
- * run a method whose custom PipeFunc Python must travel with it. The node
- * assembles it from the pasted method + Python files; see `assembleRunSources`.
+ * `files` is the method defined inline, as its whole tree: the pasted bundles
+ * and the text files as text entries, and each binary file as a `{ base64 }`
+ * entry. The node builds it in `GenericFunctions.planMethodFiles`, then loads the
+ * binary files into it; the hosted API reads the map under the standard's rule
+ * and against the deployment's limits before the run starts.
  */
 export interface HostedStartBody {
 	pipe_code?: string;
-	mthds_contents?: string[];
 	method_id?: string;
 	inputs?: Record<string, unknown>;
 	output_name?: string;
 	output_multiplicity?: string;
 	dynamic_output_concept_ref?: string;
-	/** Method bundle as a `{ relativePath: text }` map. Never sent beside `mthds_contents`. */
-	files?: Record<string, string>;
+	/** The method's tree. Never sent beside `method_id`, which the node refuses. */
+	files?: MethodFiles;
 }
 
 /**

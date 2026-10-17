@@ -8,7 +8,7 @@ import {
 	RESULT_MID_WRITE_MESSAGE,
 	ROLE_NOT_PERMITTED_MESSAGE,
 	UPLOAD_UNAVAILABLE_MESSAGE,
-	assembleRunSources,
+	base64FileEntry,
 	binaryByteSize,
 	binaryFieldNames,
 	binaryInputConflictError,
@@ -23,17 +23,21 @@ import {
 	mapResultResponse,
 	missingBinaryMessage,
 	parseStorageError,
+	planMethodFiles,
 	problemMessage,
 	readBinaryInputMappings,
+	readMethodBinaryFileRows,
 	readUploadGrant,
 	roleRefusalMessage,
 	runFailureData,
 	runFailureDescription,
 	runFailureMessage,
 	runSourceError,
+	startRefusalMessage,
 	storageRefusalMessage,
 	storedFileInput,
 	storedFileReferences,
+	treePathError,
 	uploadGrantRefusalMessage,
 	withRunId,
 } from '../nodes/Pipelex/GenericFunctions';
@@ -64,26 +68,15 @@ describe('buildStartBody', () => {
 		expect(body).toEqual({ pipe_code: 'my-pipe', inputs: { a: 1 } });
 	});
 
-	it('maps mthds_contents only and drops nothing', () => {
-		const body = buildStartBody({ mthdsContents: ['bundle-1', 'bundle-2'] });
-		expect(body).toEqual({ mthds_contents: ['bundle-1', 'bundle-2'] });
-	});
-
-	it('allows both pipe_code and mthds_contents (a bundle + a chosen pipe)', () => {
-		const body = buildStartBody({ pipeCode: 'p', mthdsContents: ['b'] });
+	it('allows both pipe_code and files (a method + a chosen pipe)', () => {
+		const body = buildStartBody({ pipeCode: 'p', files: { 'main.mthds': 'b' } });
 		expect(body.pipe_code).toBe('p');
-		expect(body.mthds_contents).toEqual(['b']);
+		expect(body.files).toEqual({ 'main.mthds': 'b' });
 	});
 
 	it('maps method_id (hosted stored-method extension)', () => {
 		const body = buildStartBody({ methodId: 'method-42' });
 		expect(body).toEqual({ method_id: 'method-42' });
-	});
-
-	it('passes method_id + mthds_contents through together (hosted precedence rule: inline runs)', () => {
-		const body = buildStartBody({ methodId: 'm', mthdsContents: ['b'] });
-		expect(body.method_id).toBe('m');
-		expect(body.mthds_contents).toEqual(['b']);
 	});
 
 	it('maps overrides to snake_case', () => {
@@ -98,11 +91,11 @@ describe('buildStartBody', () => {
 		expect(body.dynamic_output_concept_ref).toBe('concept.ref');
 	});
 
-	it('omits empty strings and empty arrays', () => {
+	it('omits empty strings and an empty files map', () => {
 		const body = buildStartBody({
 			pipeCode: '',
 			methodId: '',
-			mthdsContents: [],
+			files: {},
 			outputName: '',
 			outputMultiplicity: '',
 			dynamicOutputConceptRef: '',
@@ -120,8 +113,12 @@ describe('buildStartBody', () => {
 		expect('inputs' in body).toBe(false);
 	});
 
-	it('maps a method bundle to files (custom PipeFunc Python travels with the run)', () => {
-		const files = { 'main.mthds': 'domain = "d"', 'funcs/f.py': 'def go(): ...' };
+	it('maps the method files to files, text and Base64 entries as they are', () => {
+		const files = {
+			'main.mthds': 'domain = "d"',
+			'funcs/f.py': 'def go(): ...',
+			'templates/letter.docx': { base64: 'UEsDBA==' },
+		};
 		const body = buildStartBody({ files });
 		expect(body).toEqual({ files });
 	});
@@ -132,116 +129,285 @@ describe('buildStartBody', () => {
 	});
 });
 
-describe('assembleRunSources (inline method + custom Python travel together)', () => {
-	const NONE = { mthdsContents: [], pythonFiles: {} };
-
-	it('leaves inline contents alone when there is no bundle', () => {
-		expect(assembleRunSources({ ...NONE, mthdsContents: ['bundle'] })).toEqual({
-			mthdsContents: ['bundle'],
-		});
-	});
-
-	it('folds inline contents into the bundle when Python is attached', () => {
-		// The point of the whole helper: `mthds_contents` is mutually exclusive with
-		// a bundle, so without folding, "paste the method + attach Python" would be
-		// rejected and the user would have to re-type the method as a file row.
-		const result = assembleRunSources({
-			...NONE,
-			mthdsContents: ['domain = "d"'],
-			pythonFiles: { 'funcs/score.py': 'def score(): ...' },
-		});
-		expect(result).toEqual({
-			mthdsContents: [],
-			files: { 'main.mthds': 'domain = "d"', 'funcs/score.py': 'def score(): ...' },
-		});
-	});
-
-	it('names multiple inline bundles deterministically', () => {
-		const result = assembleRunSources({
-			...NONE,
-			mthdsContents: ['one', 'two', 'three'],
-			pythonFiles: { 'f.py': 'x' },
-		});
-		expect(Object.keys(result.files ?? {}).sort()).toEqual([
-			'bundle-2.mthds',
-			'bundle-3.mthds',
-			'f.py',
-			'main.mthds',
-		]);
-		expect(result.files?.['main.mthds']).toBe('one');
-		expect(result.files?.['bundle-2.mthds']).toBe('two');
-	});
-
-	it('never lets a generated name clobber a Python path', () => {
-		// Contrived, but the collision is real: a user could name a Python file
-		// `main.mthds`. The generated name must step aside rather than overwrite.
-		const result = assembleRunSources({
-			mthdsContents: ['inline'],
-			pythonFiles: { 'main.mthds': 'theirs' },
-		});
-		expect(result.files?.['main.mthds']).toBe('theirs');
-		expect(Object.values(result.files ?? {})).toContain('inline');
-	});
-
-	it('rejects Python with no method, saying what to do', () => {
-		// Python alone is not runnable; the runner answers 422. Catch it locally.
-		const result = assembleRunSources({
-			...NONE,
-			pythonFiles: { 'funcs/a.py': 'a' },
-		});
-		expect(result.error).toMatch(/needs the method/);
-		expect(result.error).toMatch(/MTHDS Bundles/);
-		expect(result.error).toMatch(/Method ID/);
+describe("treePathError (the standard's tree path, and the names no tree admits)", () => {
+	it.each([
+		['main.mthds'],
+		['funcs/score.py'],
+		['structures/models/invoice.py'],
+		['requirements.txt'],
+		// The root's own manifest is the one METHODS.toml a tree holds.
+		['METHODS.toml'],
+		// Spaces and accents are ordinary in a tree path; it is a name, never a storage key.
+		['templates/Lettre à en-tête.docx'],
+		// The defaults exclude a DIRECTORY of these names; a file of that name is ordinary.
+		['node_modules'],
+		['funcs/__pycache__'],
+		// Run inputs files match byte for byte, so another case is an ordinary member.
+		['examples/Inputs.json'],
+		// A directory named pyvenv.cfg marks nothing: only a file of that name does.
+		['pyvenv.cfg/notes.txt'],
+		['a'.repeat(255)],
+	])('accepts %s', (path) => {
+		expect(treePathError(path)).toBeNull();
 	});
 
 	it.each([
-		['/etc/passwd', /absolute/],
-		['../escape.py', /escapes the bundle root/],
-		['funcs\\score.py', /backslashes/],
-		['C:funcs.py', /contains ":"/],
-	])('rejects the unsafe path %s locally', (path, expected) => {
-		const result = assembleRunSources({
-			mthdsContents: ['m'],
-			pythonFiles: { [path]: 'x' },
+		['/etc/passwd', /starts with "\/"/],
+		['funcs/', /ends with "\/"/],
+		['funcs//score.py', /empty segment/],
+		['../escape.py', /"\.\."/],
+		['funcs/../../escape.py', /"\.\."/],
+		['./main.mthds', /"\."/],
+		['funcs\\score.py', /backslash/],
+		['C:funcs.py', /":"/],
+		['funcs/a\u0007.py', /control character/],
+		// "é" written decomposed: a key is never normalized, so it must already be NFC.
+		['templates/é.txt', /NFC/],
+		['a\uD800.txt', /cannot encode/],
+		[`${'a'.repeat(256)}`, /255 bytes/],
+		[`${'a/'.repeat(512)}b`, /1024 bytes/],
+		['.env', /starts with a dot/],
+		['funcs/.secret.py', /starts with a dot/],
+		['__pycache__/score.pyc', /__pycache__/],
+		['web/node_modules/lib.js', /node_modules/],
+		['pyvenv.cfg', /pyvenv\.cfg/],
+		['inputs.json', /run's inputs/],
+		['examples/inputs.toml', /run's inputs/],
+		['vendor/METHODS.toml', /METHODS\.toml/],
+	])('refuses %s, saying why', (path, expected) => {
+		const error = treePathError(path);
+		expect(error).toMatch(expected);
+		// Every message names the path it refuses, so a row is easy to find.
+		expect(error).toContain('Method file path "');
+	});
+});
+
+describe('planMethodFiles (an inline method becomes one files map)', () => {
+	const NONE = { bundles: [], textFiles: [], binaryFiles: [] };
+
+	it('names the pasted bundles main.mthds, then bundle-2.mthds, deterministically', () => {
+		const plan = planMethodFiles({ ...NONE, bundles: ['one', 'two', 'three'] });
+		expect(plan.error).toBeUndefined();
+		expect(plan.textEntries).toEqual({
+			'main.mthds': 'one',
+			'bundle-2.mthds': 'two',
+			'bundle-3.mthds': 'three',
 		});
-		expect(result.error).toMatch(expected);
+		expect(plan.binaryFiles).toEqual([]);
 	});
 
-	it('accepts nested forward-slash paths', () => {
-		const result = assembleRunSources({
-			mthdsContents: ['m'],
-			pythonFiles: { 'structures/models/invoice.py': 'x' },
+	it('sends the pasted method and its text files as one map of text entries', () => {
+		// The headline flow: paste the method, add its Python, run. The bundles are
+		// files of the tree like any other, so they travel in the same map.
+		const plan = planMethodFiles({
+			...NONE,
+			bundles: ['domain = "d"'],
+			textFiles: [
+				{ path: 'funcs/score.py', content: 'def score(): ...' },
+				{ path: 'requirements.txt', content: '' },
+			],
 		});
-		expect(result.error).toBeUndefined();
-		expect(result.files?.['structures/models/invoice.py']).toBe('x');
+		expect(plan.textEntries).toEqual({
+			'main.mthds': 'domain = "d"',
+			'funcs/score.py': 'def score(): ...',
+			'requirements.txt': '',
+		});
+	});
+
+	it('keeps the binary rows for loading, at their paths', () => {
+		const plan = planMethodFiles({
+			...NONE,
+			bundles: ['m'],
+			binaryFiles: [{ path: 'templates/letter.docx', binaryPropertyName: 'data' }],
+		});
+		expect(plan.error).toBeUndefined();
+		expect(plan.textEntries).toEqual({ 'main.mthds': 'm' });
+		expect(plan.binaryFiles).toEqual([{ path: 'templates/letter.docx', binaryPropertyName: 'data' }]);
+	});
+
+	it('never lets a generated name clobber a path the author chose, whatever its case', () => {
+		// A tree never holds two paths that differ only by case, so the generated
+		// name steps aside from `Main.mthds` as it does from `main.mthds`.
+		const exact = planMethodFiles({
+			...NONE,
+			bundles: ['inline'],
+			textFiles: [{ path: 'main.mthds', content: 'theirs' }],
+		});
+		expect(exact.textEntries['main.mthds']).toBe('theirs');
+		expect(Object.values(exact.textEntries)).toContain('inline');
+
+		const cased = planMethodFiles({
+			...NONE,
+			bundles: ['inline'],
+			binaryFiles: [{ path: 'Main.mthds', binaryPropertyName: 'data' }],
+		});
+		expect(Object.keys(cased.textEntries)).toEqual(['bundle-2.mthds']);
+	});
+
+	it('refuses a path given twice, within one field or across both, naming it', () => {
+		// A map holds one entry per path; keeping the last would silently drop a
+		// file the author configured.
+		const within = planMethodFiles({
+			...NONE,
+			bundles: ['m'],
+			textFiles: [
+				{ path: 'funcs/score.py', content: '1' },
+				{ path: 'funcs/score.py', content: '2' },
+			],
+		});
+		expect(within.error).toContain('funcs/score.py');
+		expect(within.error).toMatch(/more than once/);
+
+		const across = planMethodFiles({
+			...NONE,
+			bundles: ['m'],
+			textFiles: [{ path: 'templates/letter.html', content: '<p/>' }],
+			binaryFiles: [{ path: 'templates/letter.html', binaryPropertyName: 'data' }],
+		});
+		expect(across.error).toContain('templates/letter.html');
+		expect(across.error).toMatch(/more than once/);
+	});
+
+	it('refuses files with no method, saying what to do', () => {
+		// Files alone are not runnable; the runner refuses a tree with no bundle.
+		for (const params of [
+			{ ...NONE, textFiles: [{ path: 'funcs/a.py', content: 'a' }] },
+			{ ...NONE, binaryFiles: [{ path: 'templates/a.docx', binaryPropertyName: 'data' }] },
+		]) {
+			const plan = planMethodFiles(params);
+			expect(plan.error).toMatch(/need the method/);
+			expect(plan.error).toMatch(/MTHDS Bundles/);
+			expect(plan.error).toMatch(/Method ID/);
+		}
+	});
+
+	it('takes a .mthds file among the method files as the method', () => {
+		// A method kept as files elsewhere (a Drive folder, an HTTP download) need
+		// not be pasted: its bundle can arrive as a file like the rest.
+		expect(
+			planMethodFiles({ ...NONE, textFiles: [{ path: 'methods/main.mthds', content: 'm' }] }).error,
+		).toBeUndefined();
+		expect(
+			planMethodFiles({ ...NONE, binaryFiles: [{ path: 'main.mthds', binaryPropertyName: 'data' }] })
+				.error,
+		).toBeUndefined();
+	});
+
+	it('refuses a path no tree admits, before anything is loaded', () => {
+		const text = planMethodFiles({ ...NONE, bundles: ['m'], textFiles: [{ path: '../x.py', content: 'x' }] });
+		expect(text.error).toMatch(/"\.\."/);
+		const binary = planMethodFiles({
+			...NONE,
+			bundles: ['m'],
+			binaryFiles: [{ path: '.env', binaryPropertyName: 'data' }],
+		});
+		expect(binary.error).toMatch(/starts with a dot/);
+	});
+
+	it('refuses text UTF-8 cannot encode, naming its path', () => {
+		const plan = planMethodFiles({
+			...NONE,
+			bundles: ['m'],
+			textFiles: [{ path: 'notes.txt', content: 'broken \uD800 text' }],
+		});
+		expect(plan.error).toContain('notes.txt');
+		expect(plan.error).toMatch(/cannot be sent as text/);
+	});
+
+	it('keeps a path spelled like an object prototype as a file of its own', () => {
+		// `files[path] = …` with the path `__proto__` would set the map's prototype
+		// and send nothing; the entry must be an own property like any other.
+		const plan = planMethodFiles({
+			...NONE,
+			bundles: ['m'],
+			textFiles: [{ path: '__proto__', content: 'x' }],
+		});
+		expect(Object.keys(plan.textEntries)).toEqual(['main.mthds', '__proto__']);
+		expect(JSON.stringify(plan.textEntries)).toBe('{"main.mthds":"m","__proto__":"x"}');
+	});
+
+	it('plans nothing, and refuses nothing, when no field holds a file', () => {
+		expect(planMethodFiles(NONE)).toEqual({ textEntries: {}, binaryFiles: [] });
 	});
 
 	it('produces a body that passes the run-source rules', () => {
-		// End-to-end invariant: whatever the assembler emits must be legal, or the
-		// user gets a confusing "cannot be combined" error for something the node
-		// itself built.
-		const assembled = assembleRunSources({
-			...NONE,
-			mthdsContents: ['m'],
-			pythonFiles: { 'f.py': 'x' },
-		});
-		const body = buildStartBody({
-			mthdsContents: assembled.mthdsContents,
-			files: assembled.files,
-		});
+		const plan = planMethodFiles({ ...NONE, bundles: ['m'], textFiles: [{ path: 'f.py', content: 'x' }] });
+		const body = buildStartBody({ files: plan.textEntries });
 		expect(runSourceError(body)).toBeNull();
 		expect(body).not.toHaveProperty('mthds_contents');
 	});
 });
 
-describe('runSourceError (ports mthds/protocol assertExclusiveRunSources)', () => {
+describe('base64FileEntry (a binary method file as the standard carries bytes)', () => {
+	it('encodes the bytes in padded standard Base64, with no line break', () => {
+		expect(base64FileEntry(Buffer.from([0xff, 0xfe, 0x00]))).toEqual({ base64: '//4A' });
+		expect(base64FileEntry(Buffer.from([0xfb]))).toEqual({ base64: '+w==' });
+		expect(base64FileEntry(Buffer.from([0xfb, 0xef]))).toEqual({ base64: '++8=' });
+		const large = base64FileEntry(Buffer.alloc(100_000, 0xab));
+		expect(large.base64).not.toMatch(/\s/);
+		expect(Buffer.from(large.base64, 'base64')).toEqual(Buffer.alloc(100_000, 0xab));
+	});
+
+	it('carries an empty file, which is a member of a tree like any other', () => {
+		expect(base64FileEntry(Buffer.alloc(0))).toEqual({ base64: '' });
+	});
+
+	it('is canonical: its pad bits are zero, so it encodes back to itself', () => {
+		for (const length of [1, 2, 3, 4, 5]) {
+			const { base64 } = base64FileEntry(Buffer.alloc(length, 0xff));
+			expect(Buffer.from(base64, 'base64').toString('base64')).toBe(base64);
+		}
+	});
+});
+
+describe('readMethodBinaryFileRows (the Method Binary Files rows)', () => {
+	it('reads each row as a path and the binary field that holds the file', () => {
+		expect(
+			readMethodBinaryFileRows({
+				file: [
+					{ path: 'templates/letter.docx', binaryPropertyName: 'data' },
+					{ path: '  assets/logo.png ', binaryPropertyName: 'attachment_0' },
+				],
+			}),
+		).toEqual({
+			rows: [
+				{ path: 'templates/letter.docx', binaryPropertyName: 'data' },
+				{ path: 'assets/logo.png', binaryPropertyName: 'attachment_0' },
+			],
+		});
+	});
+
+	it('reads an empty or absent collection as no file', () => {
+		expect(readMethodBinaryFileRows(undefined)).toEqual({ rows: [] });
+		expect(readMethodBinaryFileRows({})).toEqual({ rows: [] });
+	});
+
+	it('drops a row whose path is blank (the editor persists a row on add)', () => {
+		expect(readMethodBinaryFileRows({ file: [{ path: '  ', binaryPropertyName: 'data' }] })).toEqual({
+			rows: [],
+		});
+	});
+
+	it('falls back to the "data" field when the stored row has none', () => {
+		expect(readMethodBinaryFileRows({ file: [{ path: 'a.docx' }] })).toEqual({
+			rows: [{ path: 'a.docx', binaryPropertyName: 'data' }],
+		});
+	});
+
+	it('refuses a binary field explicitly cleared, rather than guessing one', () => {
+		const { error } = readMethodBinaryFileRows({ file: [{ path: 'a.docx', binaryPropertyName: ' ' }] });
+		expect(error).toContain('a.docx');
+		expect(error).toMatch(/names no binary field/);
+	});
+});
+
+describe('runSourceError (the run-source rules, judged on the built body)', () => {
 	it.each([
 		['pipe_code alone', { pipe_code: 'p' }],
-		['mthds_contents alone', { mthds_contents: ['b'] }],
 		['method_id alone', { method_id: 'm' }],
-		['an assembled bundle alone (it carries its own .mthds)', { files: { 'a.mthds': 'x' } }],
+		['a method sent as files', { files: { 'a.mthds': 'x' } }],
 		['method_id + pipe_code (pick a pipe inside the stored method)', { method_id: 'm', pipe_code: 'p' }],
-		['pipe_code + mthds_contents (a bundle plus a chosen pipe)', { pipe_code: 'p', mthds_contents: ['b'] }],
+		['pipe_code + files (a method plus a chosen pipe)', { pipe_code: 'p', files: { 'a.mthds': 'x' } }],
 	])('accepts %s', (_label, body) => {
 		expect(runSourceError(body)).toBeNull();
 	});
@@ -249,17 +415,7 @@ describe('runSourceError (ports mthds/protocol assertExclusiveRunSources)', () =
 	it('rejects a stored method together with an inline one', () => {
 		// The hosted API would accept this and treat method_id as run-history
 		// linkage; the node refuses it so "what does this node run?" has one answer.
-		expect(runSourceError({ method_id: 'm', mthds_contents: ['b'] })).toMatch(/Choose one/);
 		expect(runSourceError({ method_id: 'm', files: { 'a.mthds': 'x' } })).toMatch(/Choose one/);
-	});
-
-	it('rejects a bundle sent together with mthds_contents (backstop — assembly prevents it)', () => {
-		// Unreachable through the node: `assembleRunSources` folds the pasted
-		// contents INTO the bundle so the two never travel together. Kept because
-		// the failure mode is the method on the wire twice and an opaque 422.
-		expect(runSourceError({ files: { 'a.mthds': 'x' }, mthds_contents: ['b'] })).toMatch(
-			/cannot be sent together/,
-		);
 	});
 
 	it('rejects a body with no run source at all', () => {
@@ -267,8 +423,48 @@ describe('runSourceError (ports mthds/protocol assertExclusiveRunSources)', () =
 		expect(runSourceError({ inputs: { a: 1 } })).toMatch(/Nothing to run/);
 	});
 
-	it('does not count an empty mthds_contents as a source', () => {
-		expect(runSourceError({ mthds_contents: [] })).toMatch(/Nothing to run/);
+	it('does not count an empty files map as a source', () => {
+		expect(runSourceError({ files: {} })).toMatch(/Nothing to run/);
+	});
+});
+
+describe("startRefusalMessage (a refused start, in the node's words where the API's are not enough)", () => {
+	it("reads the gateway's bare 413 as a request too large to carry the method's files", () => {
+		const message = startRefusalMessage(413, { message: 'Request Entity Too Large' });
+		expect(message).toMatch(/too large/);
+		expect(message).toMatch(/Method ID/);
+	});
+
+	it("reads the platform's inline limit the same way, keeping its detail", () => {
+		const message = startRefusalMessage(422, {
+			code: 'method_tree_too_large',
+			detail: "This request's method tree takes 8000000 bytes of its body, past this deployment's limit of 7340032 bytes.",
+			limit: { name: 'max_inline_bytes', value: 7340032, reached: 8000000 },
+		});
+		expect(message).toMatch(/Method ID/);
+		expect(message).toContain('(Server: This request');
+	});
+
+	it("leaves a tree past the deployment's other limits to the API's own sentence", () => {
+		// Saving the method would not help a tree over the file-count or total-size
+		// limit, which every holder of a tree applies; the API names the limit.
+		const detail = "This request's method tree holds 2000 files, past this deployment's limit of 1000 files in a method tree.";
+		expect(
+			startRefusalMessage(422, {
+				code: 'method_tree_too_large',
+				detail,
+				limit: { name: 'max_files', value: 1000, reached: 2000 },
+			}),
+		).toBe(detail);
+	});
+
+	it("shows the API's refusal of a files map as it wrote it, naming the key", () => {
+		const detail = "The method's files are not a method tree: the keys 'README.md' and 'readme.md' collide.";
+		expect(startRefusalMessage(422, { code: 'invalid_method_files', detail })).toBe(detail);
+	});
+
+	it('falls back to a generic sentence when the body says nothing', () => {
+		expect(startRefusalMessage(500, {})).toBe('Failed to start run');
 	});
 });
 

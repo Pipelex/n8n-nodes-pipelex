@@ -27,7 +27,7 @@ Use a **Pipelex Bearer Token** credential. While the hosted API (`https://api.pi
 #### Pipe Code
 Leave empty (we'll use an inline MTHDS bundle)
 
-#### MTHDS Bundles (`mthds_contents`)
+#### MTHDS Bundles
 
 <details>
 <summary>Click to expand full MTHDS pipeline definition</summary>
@@ -262,7 +262,7 @@ process_interview_feedback
 ```
 (or leave empty and use an inline MTHDS bundle)
 
-#### MTHDS Bundles (`mthds_contents`)
+#### MTHDS Bundles
 
 <details>
 <summary>Click to expand full MTHDS pipeline definition</summary>

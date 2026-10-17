@@ -48,8 +48,8 @@ These fields apply to the two start operations (**Start & Wait for Result** and 
 
 | | How |
 | --- | --- |
-| **A stored method** (default) | put its id in **Method ID**, with a suffix when you want a particular version (see [Which version a Method ID runs](#which-version-a-method-id-runs)). It already carries its own Python. |
-| **An inline method** | turn on **Define Method Inline**, then paste the bundle into **MTHDS Bundles** (one entry per bundle file) and add any custom PipeFunc Python under **Python Files**. |
+| **A stored method** (default) | put its id in **Method ID**, with a suffix when you want a particular version (see [Which version a Method ID runs](#which-version-a-method-id-runs)). It already carries its own files, its Python and its templates included, so this is the simplest way to run a method. |
+| **An inline method** | turn on **Define Method Inline**, then paste the bundle into **MTHDS Bundles** (one entry per bundle file), add the text files it carries, such as custom PipeFunc Python, under **Method Files**, and the files that come from the incoming item, such as a Word template downloaded from Drive, under **Method Binary Files** (see [The files of an inline method](#the-files-of-an-inline-method)). |
 
 Setting a `Method ID` *and* an inline method is an error — "what is this node running?" must have one answer. (The API itself would accept both, running the inline method and filing the run under the stored one in history; the node refuses it deliberately.)
 
@@ -77,29 +77,48 @@ Both start operations add `method_version` to their item: the number of the vers
 
 An API key acts with the role its owner holds in the organization the key belongs to, and the role decides what the key may do: a role that runs only the organization's published versions, for example, is refused a `@draft` Method ID and an inline method. The Pipelex API answers such a request with `403` and the problem code `role_not_permitted`, and the node's error, or the item's `error` under **Continue On Fail**, reads *"Your role in this organization does not allow this."* followed by the API's own sentence, which names the role you hold and what the request needs. The node assumes no role of its own, because the same code also answers other roles refused other actions. Retrying fails the same way: run a published version instead, or ask an admin of the organization to change your role. Pipelex support cannot change a role.
 
-### Custom PipeFunc Python
+### The files of an inline method
 
-`MTHDS Bundles` carries `.mthds` text only. If your method's pipes use custom **PipeFunc Python**, add those files under **Python Files** — one row each — and the node ships them together with the pasted method as a single bundle:
+A method is a tree of files: its bundles, and every file they use, such as the Python a `PipeFunc` imports, a `requirements.txt`, or the template a step names in its `template_file`. The node sends an inline method as that tree, the MTHDS standard's `files` map, in which each file sits under its path from the method's root. Three fields fill it, and all of them are optional apart from the method itself:
 
-| Path | Content |
-| --- | --- |
-| `funcs/score.py` | the custom PipeFunc |
-| `structures/models.py` | custom structured outputs |
-| `requirements.txt` | extra Python deps (may be empty) |
+| Field | Each row | Sent as |
+| --- | --- | --- |
+| **MTHDS Bundles** | a bundle, pasted | text, under `main.mthds` for the first, then `bundle-2.mthds`, `bundle-3.mthds`, … at the root |
+| **Method Files** | a **Path** and the file's text **Content** | text, at its path |
+| **Method Binary Files** | a **Path** and the **Input Binary Field** that holds the file on the incoming item (`data` by default) | its bytes in Base64, `{ "base64": "…" }`, at its path |
 
-Paths are relative to the bundle root, use forward slashes, and must match what your method references. Leave the field empty unless your method uses PipeFunc.
+For example, a method that fills a Word letterhead with a `PipeFunc`'s figures could take:
 
-Checked before anything is sent, so you get an immediate error on the item instead of a server `422`: Python Files with nothing pasted in `MTHDS Bundles` (Python is not a method), and unsafe paths like `../x.py`. An empty row is dropped; **blank content is kept**, since an empty `requirements.txt` is legitimate.
+| Field | Path | From |
+| --- | --- | --- |
+| Method Files | `funcs/totals.py` | the Python behind `function_name = "funcs.totals.compute"` |
+| Method Files | `requirements.txt` | its extra Python packages (may be empty) |
+| Method Binary Files | `templates/letterhead.docx` | the `data` field of a Google Drive **Download** before the Pipelex node |
 
-> **Custom Python requires a sandbox-hosted runner.** The hosted Pipelex API is one. A bare self-hosted `pipelex-api` refuses a bundle containing `.py` rather than importing untrusted code into its own process.
+A path is written from the method's root with forward slashes, as the method names the file: a `PipeFunc`'s `function_name` is the import path of its module from the root, and a `template_file` is read from the folder of the bundle that names it, which for a pasted bundle is the root. A `.mthds` file given under **Method Files** or **Method Binary Files** counts as a bundle, so a method you keep as files, in a Drive folder for instance, need not be pasted at all.
 
-Under the hood the node sends one `files` map, with the pasted method folded in as `main.mthds` (then `bundle-2.mthds`, …). That is the same split the server performs on any bundle — `.mthds` entries become the method, everything else is materialized beside it — so the run is identical either way.
+**Method Binary Files** carry the method's own files. A file the method takes as an **input** on each run, such as the invoice it reads, goes under [Binary Inputs](#files-from-earlier-nodes-binary-inputs) instead, which stores it and passes its reference.
+
+Checked before anything is loaded or sent, so you get an immediate error on the item, naming the row, instead of a server `422`:
+
+- **Files with no method**: files with nothing pasted in **MTHDS Bundles** and no `.mthds` file among them have nothing to run.
+- **Paths no method tree holds**, by the MTHDS standard's rules: an absolute path, one that ends with `/`, holds an empty segment, `.` or `..`, a backslash, a `:` or a control character, one not written in Unicode NFC, or one too long; a path with a segment starting with a dot, such as `.env`, which is how a secret file is kept from ever travelling with a method; a file inside a `__pycache__` or `node_modules` folder; a file named `pyvenv.cfg`, `inputs.json` or `inputs.toml` (a run's inputs never travel with the method); and a `METHODS.toml` anywhere but the root.
+- **A path given twice**, within one field or across **Method Files** and **Method Binary Files**, rather than keeping one of them.
+- **A binary field the item does not carry**, naming the fields it does carry.
+
+One rule is left to the Pipelex API, which names both paths when it refuses: two paths that differ only by case, such as `README.md` and `readme.md`, since a method's tree must survive a file system that ignores case. An empty row is dropped; **blank content is kept**, since an empty `requirements.txt` or `__init__.py` is legitimate.
+
+> **Custom Python requires a sandbox-hosted runner.** The hosted Pipelex API is one. A bare self-hosted `pipelex-api` refuses a method containing `.py` rather than importing untrusted code into its own process.
+
+#### Size
+
+The files of an inline method travel inside the start request, a binary file in Base64, which takes a third more room than the file. The hosted API holds that part of the request to a limit set per deployment, which `GET /v1/version` reports, and refuses a larger one with `422` `method_tree_too_large`; a request past the API gateway's own ceiling is refused with `413` before it arrives. Either way the node's error says what to do: save the method to Pipelex and run it by its **Method ID**, which sends no file. The other limits of a method's tree, on its number of files and their total size, apply to a stored method too, and the API's refusal names the one a method passes.
 
 ### Pipe Code
 
 Optional, and independent of the choice above: **Pipe Code** names which pipe to run. Leave it empty to use the method's declared `main_pipe`; set it to pick a different pipe out of the method (or to name a pipe already registered in a self-hosted server's library, which is a run source on its own).
 
-An inline method with no `main_pipe` and no **Pipe Code** has nothing to run.
+An inline method with no `main_pipe` and no **Pipe Code** has nothing to run, and one whose bundles declare more than one `main_pipe` needs **Pipe Code** to say which pipe runs.
 
 ---
 
