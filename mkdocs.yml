@@ -85,6 +85,7 @@ nav:
   - n8n:
     - Getting Started: index.md
     - Usage Guide: usage.md
+    - Team Files: team-files.md
     - Examples: examples.md
     - Contribute:
       - Contributing: contributing.md

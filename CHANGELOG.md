@@ -4,6 +4,7 @@
 
 ### Added
 
+- **`File` resource, with `Get Many` and `Download`**: the node gains a `Resource` selector, `Run` by default with the run operations as before, and `File`, which reads your organization's files in Pipelex: `Get Many` lists them newest first, one item per file, with the hosted API's filters (search, kind, format, media type, creator, method, run and creation dates), and `Download` puts one file's bytes in a binary field, found by its ID or by its name compared ignoring case, `If Several Files Have This Name` choosing the newest or failing the item. The bytes come from Pipelex storage through a fresh link, so the n8n instance must reach storage, and a backend of your own must serve `GET /v1/files`, `GET /v1/files/{file_id}` and `POST /v1/files/links` as the hosted API's files contract defines them.
 - **Refusals by role**: when the Pipelex API refuses a request because of the caller's role in the organization (`403` with the problem code `role_not_permitted`), as it refuses a role that runs only published versions a `@draft` Method ID or an inline method, the node's error says *"Your role in this organization does not allow this."* followed by the API's own sentence naming the role held and what the request needs, instead of telling the user to ask Pipelex to enable API access.
 
 ## [v0.3.1] - 2026-10-08
