@@ -438,7 +438,7 @@ export type ResultOutcome =
  * consumer (it names internal feature flags), so it reads as a supporting fact
  * rather than the headline.
  */
-function withServerDetail(message: string, body: IDataObject): string {
+export function withServerDetail(message: string, body: IDataObject): string {
 	const detail = problemMessage(body);
 	return detail ? `${message} (Server: ${detail})` : message;
 }
@@ -1189,7 +1189,7 @@ export function readUploadGrant(body: unknown): UploadGrant | undefined {
 }
 
 /** The origin of a grant URL, or `undefined` when it is not one the node will send a file to. */
-function storageOrigin(url: string): string | undefined {
+export function storageOrigin(url: string): string | undefined {
 	let target: URL;
 	try {
 		target = new URL(url);
