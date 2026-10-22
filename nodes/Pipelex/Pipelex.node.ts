@@ -900,7 +900,7 @@ export class Pipelex implements INodeType {
 			},
 		],
 		properties: [
-			// Two resources: Run, the node's first surface and the default, and
+			// The resources: Run, the node's first surface and the default, and
 			// File, the organization's files (`FileDescription.ts`). Each has its
 			// own Operation selector, and the File operations' values are not the
 			// Run operations', so a field shown on an operation value belongs to
@@ -1285,9 +1285,13 @@ export class Pipelex implements INodeType {
 		for (let i = 0; i < items.length; i++) {
 			try {
 				// A File operation gives its own items: one per listed file, or one
-				// carrying the downloaded file as binary data.
+				// carrying the downloaded file as binary data. They are appended one
+				// by one, since spreading a Return All of a large organization's
+				// files into one call passes the engine's limit on arguments.
 				if (resource === FILE_RESOURCE) {
-					returnData.push(...(await executeFileOperation(this, conn, operation, i)));
+					for (const row of await executeFileOperation(this, conn, operation, i)) {
+						returnData.push(row);
+					}
 					continue;
 				}
 				if (resource !== RUN_RESOURCE) {

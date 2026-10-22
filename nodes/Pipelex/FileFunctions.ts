@@ -36,7 +36,9 @@ import {
 	isTimeoutFailure,
 	parseStorageError,
 	roleRefusalMessage,
+	scalarText,
 	storageOrigin,
+	withoutFinalPeriod,
 	withServerDetail,
 	type ApiConnection,
 	type StorageRefusal,
@@ -55,18 +57,6 @@ import { uploadTimeoutMs } from './PipelexApiShapes';
 /** Said when the credential's Base URL serves no files routes, as a bare runner does not. */
 export const FILES_UNAVAILABLE_MESSAGE =
 	"The credential's Base URL offers no files routes (it has no /v1/files), so your organization's files cannot be read from here. Point the Base URL at the hosted Pipelex API.";
-
-/** A string, a number or a boolean as trimmed text; anything else as empty. */
-function scalarText(value: unknown): string {
-	if (typeof value === 'string') return value.trim();
-	if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-	return '';
-}
-
-/** A message whose own final period would double the one the sentence adds after it. */
-function withoutFinalPeriod(message: string): string {
-	return message.replace(/\.\s*$/, '');
-}
 
 /** The response body as a problem document, or an empty one when it is not an object. */
 function objectBody(body: unknown): IDataObject {
@@ -133,11 +123,17 @@ function zonedWallTimeToUtc(wallAsUtcMs: number, timeZone: string): number {
  * `{{ $now.minus({ days: 1 }) }}`, is the instant it says. A luxon `DateTime` or
  * a `Date` that an expression resolves to is taken as the instant it holds.
  * Anything else is refused with the field's name, before any request.
+ *
+ * A date with no time at all, such as `2026-10-01`, is midnight at the start of
+ * that day, unless `endOfDay` is set, as it is for the upper bound of a range:
+ * then it is the last millisecond of that day, so "created to 2026-10-01"
+ * includes the files of October 1 rather than leaving out all but midnight.
  */
 export function toInstant(
 	value: unknown,
 	timeZone: string,
 	fieldName: string,
+	options: { endOfDay?: boolean } = {},
 ): { instant?: string; error?: string } {
 	if (value === undefined || value === null || value === '') return {};
 	const refusal = {
@@ -148,7 +144,7 @@ export function toInstant(
 	}
 	if (typeof value === 'object' && typeof (value as { toISO?: unknown }).toISO === 'function') {
 		const iso = (value as { toISO: () => unknown }).toISO();
-		return typeof iso === 'string' ? toInstant(iso, timeZone, fieldName) : refusal;
+		return typeof iso === 'string' ? toInstant(iso, timeZone, fieldName, options) : refusal;
 	}
 	if (typeof value !== 'string') return refusal;
 	const text = value.trim();
@@ -156,7 +152,8 @@ export function toInstant(
 
 	const naive = NAIVE_DATE_TIME.exec(text);
 	if (naive) {
-		const [, year, month, day, hour = '0', minute = '0', second = '0', fraction = ''] = naive;
+		const [, year, month, day, time, minute = '0', second = '0', fraction = ''] = naive;
+		const hour = time ?? '0';
 		const wallAsUtc = Date.UTC(
 			Number(year),
 			Number(month) - 1,
@@ -177,6 +174,12 @@ export function toInstant(
 			date.getUTCMinutes() !== Number(minute)
 		) {
 			return refusal;
+		}
+		if (time === undefined && options.endOfDay) {
+			// The next day's midnight, less a millisecond: a day that skips its
+			// midnight for daylight saving still ends where the next one starts.
+			const nextMidnight = Date.UTC(Number(year), Number(month) - 1, Number(day) + 1);
+			return { instant: new Date(zonedWallTimeToUtc(nextMidnight, timeZone) - 1).toISOString() };
 		}
 		return { instant: new Date(zonedWallTimeToUtc(wallAsUtc, timeZone)).toISOString() };
 	}
@@ -232,11 +235,11 @@ export function readFileListFilters(
 	const mediaTypes = listValues(filters.mediaTypes);
 	if (mediaTypes.length > 0) query.media_type = mediaTypes;
 
-	for (const [field, wire, label] of [
-		['createdFrom', 'created_from', 'Created From'],
-		['createdTo', 'created_to', 'Created To'],
+	for (const [field, wire, label, endOfDay] of [
+		['createdFrom', 'created_from', 'Created From', false],
+		['createdTo', 'created_to', 'Created To', true],
 	] as const) {
-		const { instant, error } = toInstant(filters[field], timeZone, label);
+		const { instant, error } = toInstant(filters[field], timeZone, label, { endOfDay });
 		if (error) return { query, error };
 		if (instant) query[wire] = instant;
 	}
@@ -451,12 +454,18 @@ export async function listFiles(
 
 // ── Download: find the file, link it, read its bytes ────────────────────────
 
-/** A name as Download compares it: Unicode-normalised and case-folded, as the list's search folds it. */
+/**
+ * A name as Download compares it: Unicode-normalised (NFC) and lowercased, so a
+ * name typed on one system finds the same name stored from another, where an
+ * accented letter may be one code point or a letter and a combining mark. The
+ * platform's search folds less, lowercasing alone, which
+ * {@link fileNameSearches} makes up for.
+ */
 function foldName(name: string): string {
 	return name.normalize('NFC').toLowerCase();
 }
 
-/** Whether a listed file carries the name asked for, ignoring case. */
+/** Whether a listed file carries the name asked for, ignoring case and Unicode composition. */
 export function sameFileName(listed: string, wanted: string): boolean {
 	return foldName(listed) === foldName(wanted.trim());
 }
@@ -471,18 +480,49 @@ export function fileSearchText(name: string): string {
 	return Array.from(name.trim()).slice(0, MAX_FILE_SEARCH_CHARS).join('');
 }
 
+/**
+ * The searches that together list every file {@link sameFileName} accepts: the
+ * name as typed, its composed form (NFC) and its decomposed form (NFD), each
+ * once. The platform matches `q` against the stored name lowercased but not
+ * normalised, so a name uploaded from macOS, often decomposed, is missed by the
+ * composed name a person types, and the reverse; a name holding no accent is
+ * the same in every form and needs one search.
+ */
+export function fileNameSearches(name: string): string[] {
+	const typed = name.trim();
+	return [
+		...new Set([typed, typed.normalize('NFC'), typed.normalize('NFD')].map(fileSearchText)),
+	];
+}
+
+/** When a file was created, in milliseconds, or the earliest instant when its date cannot be read. */
+function createdAtMs(file: FileSummary): number {
+	const ms = Date.parse(file.created_at);
+	return Number.isFinite(ms) ? ms : Number.NEGATIVE_INFINITY;
+}
+
+/** Files newest first, as the list orders them, those of the same instant kept in their order. */
+function newestFirst(files: FileSummary[]): FileSummary[] {
+	return [...files].sort((a, b) => createdAtMs(b) - createdAtMs(a));
+}
+
 /** How a file is named in a message that lists candidates: its ID and when it was created. */
 function describeCandidate(file: FileSummary): string {
 	return `${file.file_id} (created ${file.created_at})`;
 }
 
 /**
- * Find a file by its name: list with the name as the search, keep the rows whose
- * name is the one asked for, compared ignoring case, and pick one. The list is
- * newest first, so the first match is the newest: with `newest` the walk stops
- * there, and with `fail` it stops at the second match, which fails the item.
- * Only a file no list row names fails it with "no file", once the whole list
- * has been read, since a filtered page can be empty with more to come.
+ * Find a file by its name: list with the name as the search, in each form
+ * {@link fileNameSearches} gives, keep the rows whose name is the one asked for,
+ * compared ignoring case and Unicode composition, and pick one.
+ *
+ * Each list is newest first, so its first match is its newest: with `newest`
+ * each walk stops there and the newer of those wins; with `fail` each walk stops
+ * at its second match, and two distinct files across the walks fail the item.
+ * The rows are merged by `file_id`, since a name holding both forms of a letter
+ * can come back from more than one search. Only a file no list row names fails
+ * the item with "no file", once every list has been read to its end, since a
+ * filtered page can be empty with more to come.
  */
 export async function findFileByName(
 	ctx: IExecuteFunctions,
@@ -492,22 +532,23 @@ export async function findFileByName(
 	itemIndex: number,
 ): Promise<FileSummary> {
 	const enough = whenSeveral === WHEN_SEVERAL_MATCH.fail ? 2 : 1;
-	const matches: FileSummary[] = [];
-	await visitFilePages(
-		ctx,
-		conn,
-		{ q: fileSearchText(name) },
-		`look up the file named "${name}"`,
-		itemIndex,
-		(rows) => {
+	const found = new Map<string, FileSummary>();
+	for (const search of fileNameSearches(name)) {
+		// With `fail`, two distinct files already settle it; with `newest`, every
+		// search is read, since the newest match may be one only a later one lists.
+		if (enough === 2 && found.size >= 2) break;
+		let matchesHere = 0;
+		await visitFilePages(ctx, conn, { q: search }, `look up the file named "${name}"`, itemIndex, (rows) => {
 			for (const row of rows) {
 				if (!sameFileName(row.name, name)) continue;
-				matches.push(row);
-				if (matches.length >= enough) return true;
+				if (!found.has(row.file_id)) found.set(row.file_id, row);
+				matchesHere += 1;
+				if (matchesHere >= enough) return true;
 			}
 			return false;
-		},
-	);
+		});
+	}
+	const matches = newestFirst([...found.values()]);
 	if (matches.length === 0) {
 		throw new NodeOperationError(
 			ctx.getNode(),
@@ -515,7 +556,7 @@ export async function findFileByName(
 			{ itemIndex },
 		);
 	}
-	if (matches.length > 1) {
+	if (enough === 2 && matches.length > 1) {
 		throw new NodeOperationError(
 			ctx.getNode(),
 			`Several of your organization's files are named "${name}", such as ${describeCandidate(matches[0])} and ${describeCandidate(matches[1])}. Download one by its ID, or set "If Several Files Have This Name" to "Use the Newest".`,
@@ -820,12 +861,46 @@ export function fileExtensionOf(fileName: string): string | undefined {
 	return /[\s/\\?]/.test(extension) ? undefined : extension;
 }
 
+/** Each run of a path separator or another character a file system refuses in a name. */
+const UNSAFE_NAME_CHARACTERS = /[\\/:*?"<>|]+/g;
+
+/** A control, format, private-use, unassigned or lone-surrogate character. */
+const INVISIBLE_CHARACTERS = /\p{C}/gu;
+
+/** A binary file's name when nothing of the Pipelex name is left to make one. */
+export const FALLBACK_BINARY_FILE_NAME = 'file';
+
+/**
+ * A Pipelex name as the name of a binary file, safe for a node that writes the
+ * file where its name says. The platform keeps a name as a member typed it,
+ * `/`, `\` and `..` included, while n8n's other sources give a bare name and a
+ * workflow trusts it as one: written to `/data/{{ $binary.data.fileName }}`, a
+ * file named `../../.ssh/authorized_keys.pdf` would land outside `/data`. So,
+ * as the platform does for the names it gives generated files, each run of a
+ * path separator or another character a file system refuses (`: * ? " < > |`)
+ * becomes a `-`, an invisible character a space (a right-to-left override among
+ * them, which can disguise an extension), runs of whitespace one space, and the
+ * trailing dots and spaces go. What is left is one path segment, whose
+ * extension is the name's own; a name left empty, or with dots alone, which
+ * would be `.` or `..`, becomes {@link FALLBACK_BINARY_FILE_NAME}. The whole
+ * name stays in the item's JSON, as `name`.
+ */
+export function binaryFileNameOf(name: string): string {
+	const safe = name
+		.replace(INVISIBLE_CHARACTERS, ' ')
+		.replace(UNSAFE_NAME_CHARACTERS, '-')
+		.replace(/\s+/g, ' ')
+		.trim()
+		.replace(/[ .]+$/, '');
+	return /^\.*$/.test(safe) ? FALLBACK_BINARY_FILE_NAME : safe;
+}
+
 /**
  * Download: one of the organization's files as n8n binary data, its list row as
  * the item's JSON. The file is found by its name ({@link findFileByName}) or by
  * its ID ({@link requestFileSummary}), linked, read from storage, and stored in
- * the output binary field under the name the link was signed for, so the file
- * keeps the name a person sees in Pipelex.
+ * the output binary field under the name the link was signed for, made safe as
+ * a file name ({@link binaryFileNameOf}); the item's JSON keeps the whole name.
  */
 export async function downloadFile(
 	ctx: IExecuteFunctions,
@@ -886,12 +961,13 @@ export async function downloadFile(
 
 	const link = await requestFileLink(ctx, conn, file, itemIndex);
 	const bytes = await downloadFromLink(ctx, link, file, itemIndex);
-	const fileName = link.name ?? file.name;
+	const fileName = binaryFileNameOf(link.name ?? file.name);
 	const mediaType = link.mediaType ?? (file.media_type || undefined);
 	const binary = await ctx.helpers.prepareBinaryData(bytes, fileName, mediaType);
-	// n8n reads the name as a path, keeping only what follows its last slash and
-	// cutting it at a `?`; a Pipelex name is a name, so it is kept whole, and its
-	// extension is read from the whole name too.
+	// n8n reads the name it is given as a path, keeping what follows its last
+	// slash and cutting it at a `?`. The safe name holds neither, so n8n keeps it
+	// whole; it is set again, with no directory and its own extension, so the
+	// binary carries exactly the safe name whatever n8n's parsing does.
 	binary.fileName = fileName;
 	delete binary.directory;
 	const extension = fileExtensionOf(fileName);

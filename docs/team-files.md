@@ -1,6 +1,6 @@
 # Team Files
 
-Your organization's files in Pipelex are the files its members uploaded (through the app, an SDK, this node's **Binary Inputs** or an agent), the test files the build assistant made, and the final outputs of its runs. It is the same list the app's Files page shows. The node reads it through its **File** resource: set **Resource** to **File**, then pick one of its two operations.
+Your organization's files in Pipelex are the files its members uploaded (through the app, an SDK, this node's **Binary Inputs** or an agent), the test files the build assistant made, and the final outputs of its runs. It is the same list the app's Files page shows. The node reads it through its **File** resource: set **Resource** to **File**, then pick one of its operations.
 
 | Operation | What it does | Endpoints | Output |
 |---|---|---|---|
@@ -50,15 +50,15 @@ Add any of these under **Filters**; a filter you add and leave blank is ignored.
 | **Method ID** | `method_id` | The files of one stored method, by its bare ID: the files its runs and examples took or made. |
 | **Run ID** | `run_id` | The files of one run, by its `pipeline_run_id`: its final outputs and the files given inline as its inputs. This list comes in the order of the files' addresses rather than newest first. |
 | **Created From** | `created_from` | Files created at or after this date and time. |
-| **Created To** | `created_to` | Files created at or before this date and time. |
+| **Created To** | `created_to` | Files created at or before this date and time. A date with no time, such as `2026-10-01`, includes that whole day; a time of 00:00 is midnight at the start of the day, which leaves the day itself out. |
 
-A date picked without a time zone, as n8n's date picker gives it, is read in the workflow's time zone (its settings, or the instance's); a date with an offset or a `Z`, such as one an expression builds, is taken as it is. The node sends both bounds as instants, and a range whose start is after its end is refused by the platform.
+A date picked without a time zone, as n8n's date picker gives it, is read in the workflow's time zone (its settings, or the instance's); a date with an offset or a `Z`, such as one an expression builds, is taken as it is. The picker always gives a time, so to take in a whole day with it, set **Created To** to 23:59:59 that day, or to 00:00 the next day. The node sends both bounds as instants, and a range whose start is after its end is refused by the platform.
 
 ## Download
 
 **Find File By** says how the node finds the file:
 
-- **Name** (the default): type the file's name in **File Name**, extension included, such as `March invoice.pdf`. The node lists your organization's files with the name as the search, keeps only those whose whole name is the one you gave, compared ignoring case (so `march invoice.PDF` finds `March invoice.pdf`, but `Old March invoice.pdf` does not), and downloads the match. The comparison is on the file's current `name`, not on the name it was uploaded under before a rename.
+- **Name** (the default): type the file's name in **File Name**, extension included, such as `March invoice.pdf`. The node lists your organization's files with the name as the search, keeps only those whose whole name is the one you gave, compared ignoring case and the way accented letters are encoded (so `march invoice.PDF` finds `March invoice.pdf`, and an `é` typed in n8n finds the `é` a Mac stored as an `e` and an accent, but `Old March invoice.pdf` does not), and downloads the match. The comparison is on the file's current `name`, not on the name it was uploaded under before a rename.
 - **ID**: put the file's `file_id` in **File ID**, typically mapped from an item of **Get Many** (`{{ $json.file_id }}`). This finds exactly one file, whatever its name.
 
 When no file carries the name, the item fails saying so, once the whole list has been read.
@@ -72,11 +72,11 @@ Names are not unique: two members can upload a `report.pdf` each, and uploading 
 
 ### The binary output
 
-The file lands in the binary field **Put Output File in Field** names (`data` by default), under the name your team sees in Pipelex, kept whole even when it holds a `/`, and with the MIME type Pipelex recorded. The item's JSON is the file's row, the same object **Get Many** gives, whichever way the file was found. A later node takes the file from that binary field, as it would a Gmail attachment or a Google Drive download.
+The file lands in the binary field **Put Output File in Field** names (`data` by default), with the MIME type Pipelex recorded, under the name your team sees in Pipelex made safe as a file name. Pipelex keeps a name as it was typed, slashes and `..` included, while a node that writes the file to disk trusts its name to be a bare file name, so in the binary's name each run of `/`, `\` and the other characters a file system refuses (`: * ? " < > |`) becomes a `-`, control characters become spaces, and trailing dots and spaces go: a file named `../../notes.pdf` lands as `..-..-notes.pdf`, which cannot lead a Read/Write Files from Disk node out of its folder. The extension is kept, and a name with nothing left becomes `file`. The item's JSON keeps the whole name in `name`, the same row **Get Many** gives, whichever way the file was found. A later node takes the file from that binary field, as it would a Gmail attachment or a Google Drive download.
 
 ### How the bytes travel
 
-The node asks the platform for a fresh link to the file (`POST /v1/files/links`), then downloads the bytes from Pipelex storage directly with that link: they do not pass through the Pipelex API. Two things follow:
+The node asks the platform for a fresh link to the file (`POST /v1/files/links`), then downloads the bytes from Pipelex storage directly with that link: they do not pass through the Pipelex API. It follows that:
 
 - **The n8n instance must reach Pipelex storage** as well as the API, which matters on a self-hosted n8n behind an egress allowlist. The storage host is the one **Binary Inputs** uploads to.
 - **The link is a bearer capability**, valid for fifteen minutes to anyone who holds it, so the node never puts it in an item, an error message or an error's details. It asks for a new link on every download, retries included.

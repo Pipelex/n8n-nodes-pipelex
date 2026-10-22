@@ -21,10 +21,13 @@ import {
 } from '../nodes/Pipelex/FileDescription';
 import {
 	FILES_UNAVAILABLE_MESSAGE,
+	FALLBACK_BINARY_FILE_NAME,
+	binaryFileNameOf,
 	bodyBytes,
 	fileExtensionOf,
 	fileLinkErrorMessage,
 	fileListUrl,
+	fileNameSearches,
 	fileSearchText,
 	fileSummaryOf,
 	filesRefusalMessage,
@@ -155,9 +158,15 @@ const linkFor = (file: FileSummary) => ({
 
 const PDF_BYTES = Buffer.from('%PDF-1.7 a team file');
 
-/** The hosted plane, faked: list pages in order, file records by id, links, and storage. */
+/**
+ * The hosted plane, faked: list pages in order, file records by id, links, and
+ * storage. With `searchable`, the list instead searches those rows as the
+ * platform does: `q` lowercased, as a substring of the name lowercased and not
+ * normalised, the matching rows in one page in the order given (newest first).
+ */
 function hostedPlane(config: {
 	pages?: Array<{ items: FileSummary[]; next_cursor: string | null }>;
+	searchable?: FileSummary[];
 	records?: Record<string, Record<string, unknown>>;
 	link?: (file: FileSummary, options: HttpOptions) => IN8nHttpFullResponse;
 	storage?: (options: HttpOptions) => IN8nHttpFullResponse | Promise<IN8nHttpFullResponse>;
@@ -165,11 +174,17 @@ function hostedPlane(config: {
 	const pages = config.pages ?? [];
 	const known = new Map<string, FileSummary>();
 	for (const page of pages) for (const row of page.items) known.set(row.file_id, row);
+	for (const row of config.searchable ?? []) known.set(row.file_id, row);
 	for (const [fileId, record] of Object.entries(config.records ?? {})) {
 		known.set(fileId, record as unknown as FileSummary);
 	}
 	return (options) => {
 		const url = String(options.url);
+		if (url.startsWith('https://api.test/v1/files?') && config.searchable) {
+			const needle = (new URL(url).searchParams.get('q') ?? '').trim().toLowerCase();
+			const items = config.searchable.filter((row) => row.name.toLowerCase().includes(needle));
+			return fullResponse(200, { items, next_cursor: null });
+		}
 		if (url.startsWith('https://api.test/v1/files?')) {
 			const cursor = new URL(url).searchParams.get('cursor');
 			const index = cursor === null ? 0 : Number(cursor.replace('cursor-', ''));
@@ -420,6 +435,25 @@ describe('toInstant — a date filter as an instant with an offset', () => {
 		);
 	});
 
+	it('reads a date with no time as midnight, or as the last millisecond of the day for an upper bound', () => {
+		expect(toInstant('2026-10-01', 'Europe/Paris', 'Created From').instant).toBe('2026-09-30T22:00:00.000Z');
+		expect(toInstant('2026-10-01', 'Europe/Paris', 'Created To', { endOfDay: true }).instant).toBe(
+			'2026-10-01T21:59:59.999Z',
+		);
+		// The day Paris leaves summer time lasts 25 hours, and ends where the next one starts.
+		expect(toInstant('2026-10-25', 'Europe/Paris', 'Created To', { endOfDay: true }).instant).toBe(
+			'2026-10-25T22:59:59.999Z',
+		);
+		expect(toInstant('2026-12-31', 'UTC', 'Created To', { endOfDay: true }).instant).toBe(
+			'2026-12-31T23:59:59.999Z',
+		);
+		// A time, even midnight, is the instant it says.
+		expect(toInstant('2026-10-01T00:00:00', 'UTC', 'Created To', { endOfDay: true }).instant).toBe(
+			'2026-10-01T00:00:00.000Z',
+		);
+		expect(toInstant('2026-02-30', 'UTC', 'Created To', { endOfDay: true }).error).toMatch(/^"Created To"/);
+	});
+
 	it('leaves an empty value out', () => {
 		expect(toInstant('', 'UTC', 'Created From')).toEqual({});
 		expect(toInstant('   ', 'UTC', 'Created From')).toEqual({});
@@ -469,6 +503,13 @@ describe('readFileListFilters — the Filters collection as the list query', () 
 		});
 	});
 
+	it('takes in the whole of a Created To day given without a time, and starts Created From at its midnight', () => {
+		expect(readFileListFilters({ createdFrom: '2026-10-01', createdTo: '2026-10-01' }, 'UTC').query).toEqual({
+			created_from: '2026-10-01T00:00:00.000Z',
+			created_to: '2026-10-01T23:59:59.999Z',
+		});
+	});
+
 	it('leaves out a filter added and left blank', () => {
 		expect(readFileListFilters({ q: '', methodId: '  ', formats: ' , ', createdFrom: '' }, 'UTC')).toEqual({
 			query: {},
@@ -488,6 +529,17 @@ describe('the name a file is found by', () => {
 		expect(sameFileName('Café.pdf', 'Café.pdf')).toBe(true);
 		expect(sameFileName('old march invoice.pdf', 'march invoice.pdf')).toBe(false);
 		expect(sameFileName('march invoice.pdf.pdf', 'march invoice.pdf')).toBe(false);
+	});
+
+	it('searches the name as typed and in each Unicode composition, each once', () => {
+		const composed = 'R\u00e9sum\u00e9.pdf';
+		const decomposed = 'Re\u0301sume\u0301.pdf';
+		expect(fileNameSearches(` ${composed} `)).toEqual([composed, decomposed]);
+		expect(fileNameSearches(decomposed)).toEqual([decomposed, composed]);
+		// Typed half one way, half the other: the name as typed is searched too.
+		const mixed = 'R\u00e9sume\u0301.pdf';
+		expect(fileNameSearches(mixed)).toEqual([mixed, composed, decomposed]);
+		expect(fileNameSearches('March invoice.pdf')).toEqual(['March invoice.pdf']);
 	});
 
 	it('searches by the name, or by its first characters past the search bound, counted in code points', () => {
@@ -660,6 +712,20 @@ describe('File resource — Get Many', () => {
 		expect(listQueries(httpFn)).toHaveLength(3);
 	});
 
+	it("returns a list longer than the engine's limit on a call's arguments", async () => {
+		const many = Array.from({ length: 150_000 }, (_, n) => fileRow(n));
+		const { ctx } = makeContext({
+			operation: 'getAll',
+			params: { returnAll: true },
+			httpImpl: () => fullResponse(200, { items: many, next_cursor: null }),
+		});
+
+		const [items] = await Pipelex.prototype.execute.call(ctx);
+
+		expect(items).toHaveLength(many.length);
+		expect(items[items.length - 1].json.file_id).toBe(`fl_${many.length - 1}`);
+	});
+
 	it('answers no item for an empty list', async () => {
 		const { ctx } = makeContext({ operation: 'getAll', httpImpl: hostedPlane({ pages: [] }) });
 		const [items] = await Pipelex.prototype.execute.call(ctx);
@@ -816,6 +882,81 @@ describe('File resource — Download by name', () => {
 		expect(listQueries(httpFn)).toHaveLength(3);
 	});
 
+	it('finds a name stored decomposed, as a Mac uploads it, from the composed name typed in n8n', async () => {
+		const stored = fileRow(1, { name: 'Re\u0301sume\u0301.pdf' });
+		const { ctx, httpFn } = makeContext({
+			operation: 'download',
+			params: { fileName: 'R\u00e9sum\u00e9.pdf' },
+			httpImpl: hostedPlane({ searchable: [fileRow(2, { name: 'Other.pdf' }), stored] }),
+		});
+
+		const [items] = await Pipelex.prototype.execute.call(ctx);
+
+		expect(items[0].json).toEqual(stored);
+		expect(listQueries(httpFn).map((query) => query.get('q'))).toEqual([
+			'R\u00e9sum\u00e9.pdf',
+			'Re\u0301sume\u0301.pdf',
+		]);
+	});
+
+	it('finds a name stored composed from a decomposed name', async () => {
+		const stored = fileRow(1, { name: 'R\u00e9sum\u00e9.pdf' });
+		const { ctx } = makeContext({
+			operation: 'download',
+			params: { fileName: 'Re\u0301sume\u0301.pdf' },
+			httpImpl: hostedPlane({ searchable: [stored] }),
+		});
+
+		const [items] = await Pipelex.prototype.execute.call(ctx);
+
+		expect(items[0].json).toEqual(stored);
+	});
+
+	it('with Use the Newest, downloads the newer of two files whose names differ only in composition', async () => {
+		const newerDecomposed = fileRow(1, { name: 'Caf\u0065\u0301.pdf' });
+		const olderComposed = fileRow(5, { name: 'Caf\u00e9.pdf' });
+		const { ctx, httpFn } = makeContext({
+			operation: 'download',
+			params: { fileName: 'Caf\u00e9.pdf' },
+			httpImpl: hostedPlane({ searchable: [newerDecomposed, olderComposed] }),
+		});
+
+		const [items] = await Pipelex.prototype.execute.call(ctx);
+
+		expect(items[0].json.file_id).toBe(newerDecomposed.file_id);
+		const linksCall = httpFn.mock.calls
+			.map((call) => call[0] as HttpOptions)
+			.find((options) => options.url === 'https://api.test/v1/files/links');
+		expect(linksCall?.body).toEqual({ files: [{ file_id: newerDecomposed.file_id }] });
+	});
+
+	it('with Fail, fails on two files whose names differ only in composition, naming the newer first', async () => {
+		const { ctx } = makeContext({
+			operation: 'download',
+			params: { fileName: 'Caf\u00e9.pdf', whenSeveralMatch: 'fail' },
+			httpImpl: hostedPlane({
+				searchable: [fileRow(1, { name: 'Caf\u0065\u0301.pdf' }), fileRow(5, { name: 'CAF\u00c9.pdf' })],
+			}),
+		});
+
+		await expect(Pipelex.prototype.execute.call(ctx)).rejects.toThrow(/such as fl_1 \(created .*\) and fl_5 \(created .*\)/);
+	});
+
+	it('with Fail, counts a file listed by more than one search once', async () => {
+		// This list answers the same row to the composed and the decomposed search.
+		const file = fileRow(1, { name: 'Caf\u00e9.pdf' });
+		const { ctx, httpFn } = makeContext({
+			operation: 'download',
+			params: { fileName: 'caf\u00e9.pdf', whenSeveralMatch: 'fail' },
+			httpImpl: hostedPlane({ pages: [{ items: [file], next_cursor: null }] }),
+		});
+
+		const [items] = await Pipelex.prototype.execute.call(ctx);
+
+		expect(items[0].json.file_id).toBe('fl_1');
+		expect(listQueries(httpFn)).toHaveLength(2);
+	});
+
 	it('with Fail, fails on a second file of the same name, naming both', async () => {
 		const { ctx } = makeContext({
 			operation: 'download',
@@ -869,20 +1010,58 @@ describe('File resource — Download by name', () => {
 		expect(listQueries(httpFn)).toHaveLength(2);
 	});
 
-	it('keeps a name holding a slash or a question mark whole', async () => {
-		const file = fileRow(1, { name: 'Q1/Q2 report?.pdf' });
-		const { ctx } = makeContext({
+	it('names the binary safely when the Pipelex name climbs out of a folder, keeping the whole name in the JSON', async () => {
+		const traversal = '../../.ssh/authorized_keys.pdf';
+		const file = fileRow(1, { name: traversal });
+		const { ctx, prepareFn } = makeContext({
 			operation: 'download',
-			params: { fileName: 'Q1/Q2 report?.pdf' },
+			params: { fileName: traversal },
 			httpImpl: hostedPlane({ pages: [{ items: [file], next_cursor: null }] }),
 		});
 
 		const [items] = await Pipelex.prototype.execute.call(ctx);
 
 		const binary = items[0].binary?.data as IBinaryData;
-		expect(binary.fileName).toBe('Q1/Q2 report?.pdf');
+		expect(binary.fileName).toBe('..-..-.ssh-authorized_keys.pdf');
+		expect(binary.fileName).not.toMatch(/[\\/]/);
 		expect(binary.directory).toBeUndefined();
 		expect(binary.fileExtension).toBe('pdf');
+		expect(prepareFn).toHaveBeenCalledWith(PDF_BYTES, '..-..-.ssh-authorized_keys.pdf', 'application/pdf');
+		expect(items[0].json.name).toBe(traversal);
+	});
+
+	it('names the binary safely from the name the link was signed for', async () => {
+		const file = fileRow(1, { name: 'Q1/Q2 report?.pdf' });
+		const { ctx } = makeContext({
+			operation: 'download',
+			params: { fileName: 'Q1/Q2 report?.pdf' },
+			httpImpl: hostedPlane({
+				pages: [{ items: [file], next_cursor: null }],
+				link: (linked) => fullResponse(200, { items: [{ ...linkFor(linked), name: '../Q1 report.pdf' }] }),
+			}),
+		});
+
+		const [items] = await Pipelex.prototype.execute.call(ctx);
+
+		expect((items[0].binary?.data as IBinaryData).fileName).toBe('..-Q1 report.pdf');
+		expect(items[0].json.name).toBe('Q1/Q2 report?.pdf');
+	});
+
+	it('makes a name safe as a binary file name: one path segment, never . or .., its extension kept', () => {
+		expect(binaryFileNameOf('March invoice.pdf')).toBe('March invoice.pdf');
+		expect(binaryFileNameOf('../../.ssh/authorized_keys.pdf')).toBe('..-..-.ssh-authorized_keys.pdf');
+		expect(binaryFileNameOf('..\\..\\Windows\\win.ini')).toBe('..-..-Windows-win.ini');
+		expect(binaryFileNameOf('C:/temp//x?.pdf')).toBe('C-temp-x-.pdf');
+		expect(binaryFileNameOf('a <b> "c" | d*.txt')).toBe('a -b- -c- - d-.txt');
+		// A right-to-left override would make an executable read as a PDF.
+		expect(binaryFileNameOf('invoice\u202Efdp.exe')).toBe('invoice fdp.exe');
+		expect(binaryFileNameOf('  two\tspaces\n.pdf. . ')).toBe('two spaces .pdf');
+		expect(binaryFileNameOf('.env')).toBe('.env');
+		expect(binaryFileNameOf('Caf\u00e9.pdf')).toBe('Caf\u00e9.pdf');
+		for (const nothingLeft of ['', '.', '..', '...', ' . ', '\u200B']) {
+			expect(binaryFileNameOf(nothingLeft), JSON.stringify(nothingLeft)).toBe(FALLBACK_BINARY_FILE_NAME);
+		}
+		expect(binaryFileNameOf('/')).toBe('-');
 	});
 
 	it('reads the extension from the whole name, and drops one n8n read from a cut name', () => {

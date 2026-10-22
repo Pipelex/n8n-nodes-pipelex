@@ -3,7 +3,7 @@ import type { INodeProperties } from 'n8n-workflow';
 /**
  * The node's **File** resource: the organization's files in Pipelex, the same
  * list the app's Files page shows — members' uploads, the build assistant's test
- * files and the final outputs of runs. Two operations read it:
+ * files and the final outputs of runs. Its operations read it:
  *
  * - **Get Many** lists the files, newest first, with the platform's filters, one
  *   output item per file (`GET /v1/files`, paged until the limit or the end).
@@ -243,7 +243,7 @@ export const fileFields: INodeProperties[] = [
 				type: 'dateTime',
 				default: '',
 				description:
-					"Only the files created at or before this date and time. A value without a time zone is read in the workflow's time zone.",
+					"Only the files created at or before this date and time, read in the workflow's time zone when it has none. A time of 00:00 is midnight at the start of that day, so it leaves out the day itself; a date with no time, such as 2026-10-01, includes that whole day.",
 			},
 			{
 				displayName: 'Format',

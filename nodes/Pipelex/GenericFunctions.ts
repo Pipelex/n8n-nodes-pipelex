@@ -928,7 +928,7 @@ export interface BinaryInputMapping {
 export const DEFAULT_BINARY_PROPERTY = 'data';
 
 /** A string, a number or a boolean as trimmed text; anything else as empty. */
-function scalarText(value: unknown): string {
+export function scalarText(value: unknown): string {
 	if (typeof value === 'string') return value.trim();
 	if (typeof value === 'number' || typeof value === 'boolean') return String(value);
 	return '';
@@ -1339,7 +1339,7 @@ function xmlElementText(body: string, element: string): string | undefined {
 }
 
 /** A message whose own final period would double the one the sentence adds after it. */
-function withoutFinalPeriod(message: string): string {
+export function withoutFinalPeriod(message: string): string {
 	return message.replace(/\.\s*$/, '');
 }
 
