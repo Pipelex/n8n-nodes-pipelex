@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -1799,11 +1800,16 @@ describe('Pipelex node — binary inputs (an n8n file becomes a method input)', 
 		fileName: 'receipt.png',
 	};
 
+	/** The SHA-256 the node must send with a file's grant, computed here independently of the node. */
+	const sha256Of = (bytes: Buffer): string => createHash('sha256').update(bytes).digest('hex');
+
 	// A presigned URL carries its credential in the query string: it must never
 	// reach an error message.
 	const STORAGE_ORIGIN = 'https://app-bucket.s3.eu-west-3.amazonaws.com';
 	const grantFor = (n: number) => ({
+		file_id: `fl_${n}`,
 		uri: `pipelex-storage://orgs/org-1/assets/file-${n}.pdf`,
+		stored: false,
 		url: `${STORAGE_ORIGIN}/orgs/org-1/assets/file-${n}.pdf?X-Amz-Credential=AKIASECRET&X-Amz-Signature=deadbeef${n}`,
 		headers: {
 			'If-None-Match': '*',
@@ -1860,12 +1866,13 @@ describe('Pipelex node — binary inputs (an n8n file becomes a method input)', 
 		]);
 		const [grantCall, putCall, startCall] = sent as Array<Record<string, any>>;
 
-		// The grant describes the file with the name and type n8n carries; the bytes
-		// are not in it.
+		// The grant describes the file with the name and type n8n carries, its size
+		// and the SHA-256 of its bytes; the bytes themselves are not in it.
 		expect(grantCall.body).toEqual({
 			filename: 'invoice.pdf',
 			content_type: 'application/pdf',
 			size: PDF_BYTES.length,
+			sha256: sha256Of(PDF_BYTES),
 		});
 		expect(grantCall.json).toBe(true);
 		expect(grantCall.headers.Authorization).toBe('Bearer secret-token');
@@ -1942,9 +1949,9 @@ describe('Pipelex node — binary inputs (an n8n file becomes a method input)', 
 		const sent = calls(httpFn) as Array<Record<string, any>>;
 		const grants = sent.filter((call) => call.url === 'https://api.test/v1/upload/grant');
 		expect(grants.map((call) => call.body)).toEqual([
-			{ filename: 'invoice.pdf', content_type: 'application/pdf', size: PDF_BYTES.length },
+			{ filename: 'invoice.pdf', content_type: 'application/pdf', size: PDF_BYTES.length, sha256: sha256Of(PDF_BYTES) },
 			// n8n said octet-stream; the extension names the type instead.
-			{ filename: 'receipt.png', content_type: 'image/png', size: PNG_BYTES.length },
+			{ filename: 'receipt.png', content_type: 'image/png', size: PNG_BYTES.length, sha256: sha256Of(PNG_BYTES) },
 		]);
 		const startCall = sent.find((call) => call.url === 'https://api.test/v1/start');
 		expect(startCall?.body.inputs).toEqual({
@@ -2487,6 +2494,165 @@ describe('Pipelex node — binary inputs (an n8n file becomes a method input)', 
 		const error = await captureError(ctx);
 		expect(error.message).toBe('The execution was cancelled before the run was started, so no run was started.');
 		expect(calls(httpFn).some((call) => call.url === 'https://api.test/v1/start')).toBe(false);
+	});
+
+	// ── Files named by their bytes: the platform's answer to the hash ────────
+	// The platform names an upload after the SHA-256 its grant carries and the
+	// extension of its name. This plane does the same: a grant for bytes storage
+	// already holds answers `stored` with nothing to send, and storage holds what
+	// a `PUT` it accepted, or answered `412` to, named.
+
+	/** The hosted plane naming each file by its bytes; `storage` answers each `PUT` instead of a plain `200`. */
+	function hashingPlane(storage?: (options: { url: string }) => IN8nHttpFullResponse): HttpImpl {
+		const held = new Set<string>();
+		return (options) => {
+			const url = String(options.url);
+			if (url === 'https://api.test/v1/upload/grant') {
+				const { sha256, filename } = options.body as { sha256: string; filename: string };
+				const key = `org_acme/assets/${sha256}.${filename.split('.').pop()}`;
+				const record = { file_id: `fl_${sha256.slice(0, 8)}`, uri: `pipelex-storage://${key}`, max_bytes: 52428800 };
+				if (held.has(key)) {
+					return fullResponse(200, { ...record, stored: true, url: null, headers: null, expires_at: null });
+				}
+				return fullResponse(200, {
+					...record,
+					stored: false,
+					url: `${STORAGE_ORIGIN}/${key}?X-Amz-Credential=AKIASECRET&X-Amz-Signature=deadbeef`,
+					headers: {
+						'If-None-Match': '*',
+						'Content-Type': 'application/pdf',
+						'x-amz-checksum-sha256': Buffer.from(sha256, 'hex').toString('base64'),
+					},
+					expires_at: '2026-10-22T10:05:00Z',
+				});
+			}
+			if (url.startsWith(STORAGE_ORIGIN)) {
+				const response =
+					storage?.(options) ?? ({ statusCode: 200, body: '', headers: {} } as unknown as IN8nHttpFullResponse);
+				if ((response.statusCode >= 200 && response.statusCode < 300) || response.statusCode === 412) {
+					held.add(new URL(url).pathname.slice(1));
+				}
+				return response;
+			}
+			if (url === 'https://api.test/v1/start') return fullResponse(202, START_ACK);
+			return fullResponse(200, COMPLETED_RESULT);
+		};
+	}
+
+	const PDF_URI = `pipelex-storage://org_acme/assets/${sha256Of(PDF_BYTES)}.pdf`;
+	const requestLine = (call: Record<string, any>) => `${String(call.method)} ${String(call.url).split('?')[0]}`;
+
+	it('sends nothing to storage for bytes the team already holds, and runs on the reference the grant answers', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			items: [
+				{ json: {}, binary: { data: PDF } },
+				{ json: {}, binary: { data: PDF } },
+			],
+			httpImpl: hashingPlane(),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		const sent = calls(httpFn) as Array<Record<string, any>>;
+		// The second item's grant finds the bytes the first one stored: no PUT.
+		expect(sent.map(requestLine)).toEqual([
+			'POST https://api.test/v1/upload/grant',
+			`PUT ${STORAGE_ORIGIN}/org_acme/assets/${sha256Of(PDF_BYTES)}.pdf`,
+			'POST https://api.test/v1/start',
+			'POST https://api.test/v1/upload/grant',
+			'POST https://api.test/v1/start',
+		]);
+		const starts = sent.filter((call) => call.url === 'https://api.test/v1/start');
+		expect(starts.map((call) => call.body.inputs.document)).toEqual([
+			{ url: PDF_URI, filename: 'invoice.pdf', mime_type: 'application/pdf' },
+			{ url: PDF_URI, filename: 'invoice.pdf', mime_type: 'application/pdf' },
+		]);
+	});
+
+	it("reads storage's 412 as the same file stored by another upload meanwhile, and starts the run", async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hashingPlane(
+				() =>
+					({
+						statusCode: 412,
+						body: '<Error><Code>PreconditionFailed</Code><Message>At least one of the pre-conditions you specified did not hold</Message></Error>',
+						headers: {},
+					}) as unknown as IN8nHttpFullResponse,
+			),
+		});
+
+		const result = await Pipelex.prototype.execute.call(ctx);
+		expect(result[0][0].json.pipeline_run_id).toBe('run-1');
+		const startCall = calls(httpFn).find((call) => call.url === 'https://api.test/v1/start') as Record<string, any>;
+		expect(startCall.body.inputs.document.url).toBe(PDF_URI);
+	});
+
+	it("sends the same PUT again after storage's 409 conflict, then starts the run", async () => {
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		try {
+			let puts = 0;
+			const { ctx, httpFn } = makeContext({
+				operation: 'start',
+				params: ONE_DOCUMENT,
+				items: [{ json: {}, binary: { data: PDF } }],
+				httpImpl: hashingPlane(() => {
+					puts += 1;
+					return (
+						puts === 1
+							? {
+									statusCode: 409,
+									body: '<Error><Code>ConditionalRequestConflict</Code><Message>A conflicting operation occurred.</Message></Error>',
+									headers: {},
+								}
+							: { statusCode: 200, body: '', headers: {} }
+					) as unknown as IN8nHttpFullResponse;
+				}),
+			});
+
+			const execution = Pipelex.prototype.execute.call(ctx);
+			await vi.runAllTimersAsync();
+			const result = await execution;
+			expect(result[0][0].json.pipeline_run_id).toBe('run-1');
+
+			const sent = calls(httpFn) as Array<Record<string, any>>;
+			const storagePuts = sent.filter((call) => call.url.startsWith(STORAGE_ORIGIN));
+			expect(storagePuts).toHaveLength(2);
+			expect(storagePuts[1].url).toBe(storagePuts[0].url);
+			expect(storagePuts[1].headers).toEqual(storagePuts[0].headers);
+			// One grant: the conflict is retried with the grant in hand, not a new one.
+			expect(sent.filter((call) => call.url === 'https://api.test/v1/upload/grant')).toHaveLength(1);
+			expect(sent[sent.length - 1].url).toBe('https://api.test/v1/start');
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('replays the run on a retry this process no longer remembers: the same bytes answer the same reference', async () => {
+		const { ctx, httpFn } = makeContext({
+			operation: 'start',
+			params: ONE_DOCUMENT,
+			items: [{ json: {}, binary: { data: PDF } }],
+			httpImpl: hashingPlane(),
+		});
+
+		await Pipelex.prototype.execute.call(ctx);
+		const [first] = calls(httpFn).filter((call) => call.url === 'https://api.test/v1/start') as Array<
+			Record<string, any>
+		>;
+
+		// The memory of stored uploads is gone, as after an eviction.
+		storedUploads.clear();
+		httpFn.mockClear();
+		await Pipelex.prototype.execute.call(ctx);
+		const retry = calls(httpFn) as Array<Record<string, any>>;
+		expect(retry.map(requestLine)).toEqual(['POST https://api.test/v1/upload/grant', 'POST https://api.test/v1/start']);
+		const [second] = retry.filter((call) => call.url === 'https://api.test/v1/start');
+		expect(second.body).toEqual(first.body);
+		expect(second.headers['Idempotency-Key']).toBe(first.headers['Idempotency-Key']);
 	});
 
 	// ── Memory: measured from metadata, loaded one file at a time ────────────

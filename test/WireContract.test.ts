@@ -33,6 +33,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	abortableSleep,
 	buildStartBody,
+	fileSha256,
 	mapResultResponse,
 	problemMessage,
 	readUploadGrant,
@@ -137,16 +138,24 @@ describe('problem+json — the error body this node reads', () => {
 
 describe('POST /v1/upload/grant — the request this node sends and the grant it reads', () => {
 	const GRANT = {
-		uri: 'pipelex-storage://orgs/o/assets/f.pdf',
-		url: 'https://bucket.s3.amazonaws.com/orgs/o/assets/f.pdf?X-Amz-Signature=x',
-		headers: { 'If-None-Match': '*' },
-		expires_at: '2026-09-28T12:05:00Z',
+		file_id: 'fl_01a16405-12a5-757c-b44c-10c40b5a947b',
+		uri: 'pipelex-storage://org_acme/assets/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08.pdf',
+		stored: false,
+		url: 'https://bucket.s3.amazonaws.com/org_acme/assets/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08.pdf?X-Amz-Signature=x',
+		headers: {
+			'If-None-Match': '*',
+			'Content-Type': 'application/pdf',
+			'x-amz-checksum-sha256': 'n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg=',
+		},
+		expires_at: '2026-10-22T10:05:00Z',
 		max_bytes: 52428800,
 	};
+	const HELD = { ...GRANT, stored: true, url: null, headers: null, expires_at: null };
 
-	it('describes the file with exactly filename, content_type and size — never its bytes', async () => {
-		// The SDK's `UploadGrantInput`. The platform model forbids unknown fields, so
-		// an extra or misspelled key is a 422 on every binary input.
+	it('describes the file with exactly filename, content_type, size and sha256 — never its bytes', async () => {
+		// The SDK's `UploadGrantInput`, with the platform's `sha256`. The platform
+		// model forbids unknown fields, so an extra or misspelled key is a 422 on
+		// every binary input.
 		let sent: Record<string, unknown> | undefined;
 		const ctx = {
 			getNode: () => ({}),
@@ -158,27 +167,46 @@ describe('POST /v1/upload/grant — the request this node sends and the grant it
 			},
 		} as unknown as IExecuteFunctions;
 
+		const bytes = Buffer.from('test');
 		await requestUploadGrant(
 			ctx,
 			{ baseUrl: 'https://api.test', authorization: 'Bearer t' },
-			{ inputName: 'document', bytes: Buffer.from('%PDF'), filename: 'f.pdf', contentType: 'application/pdf' },
+			{ inputName: 'document', bytes, sha256: fileSha256(bytes), filename: 'f.pdf', contentType: 'application/pdf' },
 			0,
 		);
-		expect(Object.keys(sent ?? {}).sort()).toEqual(['content_type', 'filename', 'size']);
+		expect(Object.keys(sent ?? {}).sort()).toEqual(['content_type', 'filename', 'sha256', 'size']);
+		// 64 lowercase hexadecimal digits, the only form the platform accepts: the
+		// SHA-256 of "test" is the one the platform's own contract shows.
+		expect(sent?.sha256).toBe('9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08');
 	});
 
 	it('reads the grant by its pinned field names', () => {
-		// `uri` is what the run input carries, `url` + `headers` are the PUT. The
-		// rest is informational.
+		// `stored` is the field to branch on; `uri` is what the run input carries;
+		// `url` + `headers` are the PUT. The rest is informational.
 		expect(Object.keys(readUploadGrant(GRANT) ?? {}).sort()).toEqual([
 			'expires_at',
+			'file_id',
 			'headers',
 			'max_bytes',
+			'stored',
 			'uri',
 			'url',
 		]);
 		const { uri: _uri, ...withoutUri } = GRANT;
 		expect(readUploadGrant(withoutUri)).toBeUndefined();
+	});
+
+	it('branches on stored, never on whether url is present', () => {
+		// The platform's two answers are one model with nullable fields.
+		expect(readUploadGrant(HELD)).toEqual(HELD);
+		// An answer that says nothing about `stored` is no grant, even with a URL —
+		// the shape a platform predating hashes would answer.
+		const { stored: _stored, ...withoutStored } = GRANT;
+		expect(readUploadGrant(withoutStored)).toBeUndefined();
+		// `stored: false` without a target is no grant either.
+		expect(readUploadGrant({ ...GRANT, url: null })).toBeUndefined();
+		// `stored: true` is read with nothing to send, whatever else came with it.
+		expect(readUploadGrant({ ...GRANT, stored: true })).toEqual(HELD);
 	});
 
 	it('fills a binary-fed input with exactly url, filename and mime_type', () => {

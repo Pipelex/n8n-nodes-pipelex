@@ -8,21 +8,25 @@ import type { StoredFileInput } from './PipelexApiShapes';
 // same execution (`workflow-execute.ts` calls `runNode` again with the same
 // input). An item that only carries JSON replays its run for free: same body,
 // same `Idempotency-Key`, and the platform answers with the run the first attempt
-// started. An item with binary inputs did not, because every attempt stored its
-// files afresh under new `pipelex-storage://` references, which changed its body
-// and therefore its key — so a retry started a second paid run for every item
-// that had already started one.
+// started. An item with binary inputs replays too, because its body carries the
+// `pipelex-storage://` reference of each file, and the same bytes stored again
+// under the same extension get the same reference: the platform names an upload
+// after the SHA-256 of its bytes and the extension of its name, and answers a
+// grant for bytes the organization already holds with that reference and
+// nothing to send.
 //
-// So the node remembers, in this process, the reference each file was stored
-// under, and a later attempt at the same item reuses it. The key is everything
-// that makes two uploads the same upload: the execution, the node and its run
-// index, the item, the input, the SHA-256 of the bytes, the file name, the MIME
-// type and the Base URL. The run index is what keeps a node inside a loop from
-// reusing one pass's file in the next: each pass is a new run of the node, and a
-// retry is not (see `idempotencyKey`).
-// A file whose bytes changed, or that a different execution sends, is uploaded
-// again; a reference is recorded only once storage has answered the `PUT` with a
-// `2xx`, so the memory never names an object that does not exist.
+// The node still remembers, in this process, the reference each file was stored
+// under, and a later attempt at the same item reuses it without asking the
+// platform at all: it saves a grant request per file on every retry, and the
+// retry does not depend on the platform recognising the bytes. The key is
+// everything that makes two uploads the same upload: the execution, the node
+// and its run index, the item, the input, the SHA-256 of the bytes, the file
+// name, the MIME type and the Base URL. The run index is what keeps a node
+// inside a loop from reusing one pass's file in the next: each pass is a new run
+// of the node, and a retry is not (see `idempotencyKey`). A file whose bytes
+// changed, or that a different execution sends, is uploaded again; a reference
+// is recorded only once storage holds the file (the grant said so, or storage
+// accepted the `PUT`), so the memory never names an object that does not exist.
 //
 // Bounded in both directions. An entry lives at most a day, the platform's
 // idempotency window (`TTL_SECONDS` in `middleware/idempotency.py`): past it the
@@ -30,8 +34,8 @@ import type { StoredFileInput } from './PipelexApiShapes';
 // And the memory holds at most `STORED_UPLOADS_MAX_ENTRIES` entries, the oldest
 // leaving first: an entry is a few hundred bytes, so the bound holds the memory
 // to a few megabytes on an instance shared by many workflows. An entry evicted
-// before its retry only costs what every retry cost before: a fresh upload and a
-// new run, never a refused one, since the references stay folded into the key.
+// before its retry only costs a grant request, which answers the same reference
+// for the same bytes, so the run still replays.
 //
 // The memory is per process, which is where a retry runs: n8n executes the whole
 // of an execution, retries included, in one process (one worker in queue mode).
@@ -51,7 +55,8 @@ export interface StoredUploadIdentity {
 	runIndex: number;
 	itemIndex: number;
 	inputName: string;
-	bytes: Buffer;
+	/** The SHA-256 of the file's bytes, in lowercase hexadecimal: the bytes stand in the key by their digest. */
+	sha256: string;
 	filename: string;
 	contentType: string;
 	baseUrl: string;
@@ -59,13 +64,13 @@ export interface StoredUploadIdentity {
 
 /**
  * The memory key of an upload: a SHA-256 over its identity, the bytes counted by
- * their own SHA-256. Hashed so a key has a fixed size whatever the file name, and
- * holds neither the name nor the bytes. `undefined` when the execution has no id,
- * since a key without one would match the same item of another execution.
+ * their own SHA-256, the one the file's grant carries. Hashed so a key has a
+ * fixed size whatever the file name, and holds neither the name nor the bytes.
+ * `undefined` when the execution has no id, since a key without one would match
+ * the same item of another execution.
  */
 export function storedUploadKey(identity: StoredUploadIdentity): string | undefined {
 	if (typeof identity.executionId !== 'string' || identity.executionId.length === 0) return undefined;
-	const contentDigest = createHash('sha256').update(identity.bytes).digest('hex');
 	return createHash('sha256')
 		.update(
 			JSON.stringify([
@@ -74,7 +79,7 @@ export function storedUploadKey(identity: StoredUploadIdentity): string | undefi
 				identity.runIndex,
 				identity.itemIndex,
 				identity.inputName,
-				contentDigest,
+				identity.sha256,
 				identity.filename,
 				identity.contentType,
 				identity.baseUrl,

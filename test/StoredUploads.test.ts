@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { fileSha256 } from '../nodes/Pipelex/GenericFunctions';
 import {
 	STORED_UPLOADS_MAX_ENTRIES,
 	STORED_UPLOADS_TTL_MS,
@@ -15,7 +16,7 @@ const IDENTITY: StoredUploadIdentity = {
 	runIndex: 0,
 	itemIndex: 0,
 	inputName: 'document',
-	bytes: Buffer.from('%PDF-1.7 a fake invoice'),
+	sha256: fileSha256(Buffer.from('%PDF-1.7 a fake invoice')),
 	filename: 'invoice.pdf',
 	contentType: 'application/pdf',
 	baseUrl: 'https://api.pipelex.com',
@@ -31,7 +32,8 @@ describe('storedUploadKey (what makes two uploads the same upload)', () => {
 	it('is the same for the same identity, and holds neither the name nor the bytes', () => {
 		const key = storedUploadKey(IDENTITY);
 		expect(key).toMatch(/^[0-9a-f]{64}$/);
-		expect(storedUploadKey({ ...IDENTITY, bytes: Buffer.from(IDENTITY.bytes) })).toBe(key);
+		expect(storedUploadKey({ ...IDENTITY })).toBe(key);
+		expect(key).not.toContain(IDENTITY.sha256);
 	});
 
 	it('changes with every part of the identity', () => {
@@ -42,7 +44,7 @@ describe('storedUploadKey (what makes two uploads the same upload)', () => {
 			{ runIndex: 1 },
 			{ itemIndex: 1 },
 			{ inputName: 'receipt' },
-			{ bytes: Buffer.from('%PDF-1.7 the corrected invoice') },
+			{ sha256: fileSha256(Buffer.from('%PDF-1.7 the corrected invoice')) },
 			{ filename: 'invoice-2.pdf' },
 			{ contentType: 'application/octet-stream' },
 			{ baseUrl: 'https://api.dev.pipelex.com' },

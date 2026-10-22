@@ -24,6 +24,7 @@ import {
 	buildApiConnection,
 	buildStartBody,
 	describeBinaryFile,
+	fileSha256,
 	idempotencyKey,
 	mapResultResponse,
 	missingBinaryMessage,
@@ -264,8 +265,9 @@ function assertBinarySize(
  * loaded only here, measured again now that its real size is known, and reused
  * when this process already stored the same bytes for the same item of the same
  * execution — a "Retry On Fail" attempt, see `StoredUploads.ts`. Otherwise it is
- * uploaded, and remembered once storage has accepted it. The bytes are released
- * when this returns.
+ * uploaded, its SHA-256 sent with its grant, and remembered once storage holds
+ * it. The bytes are hashed once, for the memory and the grant alike, and
+ * released when this returns.
  */
 async function storeBinary(
 	ctx: IExecuteFunctions,
@@ -278,13 +280,14 @@ async function storeBinary(
 	const bytes = await ctx.helpers.getBinaryDataBuffer(itemIndex, mapping.binaryPropertyName);
 	assertBinarySize(ctx, source, bytes.length, itemIndex);
 	const { filename, contentType } = describeBinaryFile(binaryData);
+	const sha256 = fileSha256(bytes);
 	const key = storedUploadKey({
 		executionId: ctx.getExecutionId(),
 		nodeId: ctx.getNode().id,
 		runIndex,
 		itemIndex,
 		inputName: mapping.inputName,
-		bytes,
+		sha256,
 		filename,
 		contentType,
 		baseUrl: conn.baseUrl,
@@ -294,7 +297,7 @@ async function storeBinary(
 	const stored = await uploadBinaryFile(
 		ctx,
 		conn,
-		{ inputName: mapping.inputName, bytes, filename, contentType },
+		{ inputName: mapping.inputName, bytes, sha256, filename, contentType },
 		itemIndex,
 	);
 	if (key !== undefined) storedUploads.set(key, stored);
@@ -1110,7 +1113,7 @@ export class Pipelex implements INodeType {
 				},
 				default: {},
 				description:
-					'Method inputs filled with a file from the incoming item, such as a mail attachment or a downloaded Drive file. The node uploads each file to Pipelex storage and passes its reference as the input, keeping the file name and MIME type. An input set here must not also be set in Inputs.',
+					'Method inputs filled with a file from the incoming item, such as a mail attachment or a downloaded Drive file. The node stores each file in Pipelex storage, sending nothing when your organization already holds the same bytes, and passes its reference as the input, keeping the file name and MIME type. An input set here must not also be set in Inputs.',
 				displayOptions: {
 					show: {
 						operation: START_OPERATIONS,

@@ -1,7 +1,10 @@
 /**
  * REPLICATED Pipelex hosted-API wire shapes — the run-lifecycle shapes
  * hand-copied from `pipelex-sdk-js` v0.10.0, the upload shapes (the section
- * "Binary inputs: the upload grant" at the end) from `pipelex-sdk-js` v0.26.0.
+ * "Binary inputs: the upload grant" at the end) from `pipelex-sdk-js` v0.26.0,
+ * with the grant's hash and its `stored` answer taken from the platform's own
+ * contract (`platform/docs/uploads.md` in `pipelex-server`), which the node
+ * followed before the SDK carried them.
  * **This file must never import `@pipelex/sdk`, and the SDK must never
  * be a dependency of this package — not runtime, not dev.** n8n community nodes
  * ship with zero dependencies (`@n8n/scan-community-package` rejects any
@@ -62,7 +65,7 @@
  * | sustained 503 | no ceiling | bounded by `MAX_CONSECUTIVE_DEGRADED` |
  * | `/v1/version` handshake | gates the lifecycle, throws `RunLifecycleUnavailableError` | skipped; folded into `NOT_FOUND_MESSAGE` |
  * | upload route for a caller holding key and bytes | `uploadFile`: base64 JSON to `POST /v1/upload` | the grant: `POST /v1/upload/grant`, then the raw bytes `PUT` to storage |
- * | a storage failure that may have written the object | retry with the same grant (the caller's choice) | never: each attempt asks a new grant |
+ * | a storage failure that may have written the object | retry with the same grant (the caller's choice) | never, except storage's `409` conflict, which the contract retries with the same grant after a short wait; any other failure asks a new grant on the item's retry |
  * | cancelling an upload | the caller's `signal` | the n8n execution's cancel signal |
  *
  * Why the grant rather than `uploadFile`'s base64 body: the API gateway's
@@ -285,7 +288,9 @@ export function parseRetryAfter(headers: IDataObject): number | undefined {
 // ── Binary inputs: the upload grant ─────────────────────────────────────────
 // Replicated from `pipelex-sdk-js` v0.26.0 (`src/product-models.ts`,
 // `src/upload-grant.ts`, `src/upload.ts`), checked against the platform route
-// (`pipelex-server/platform/src/pipelex_platform/routers/v1/storage.py`).
+// (`pipelex-server/platform/src/pipelex_platform/routers/v1/storage.py`). The
+// file's hash and the `stored` answer follow the platform's contract,
+// `pipelex-server/platform/docs/uploads.md`, "POST /v1/upload/grant".
 
 /** The scheme of a reference to a file in Pipelex storage. */
 export const PIPELEX_STORAGE_SCHEME = 'pipelex-storage://';
@@ -294,42 +299,81 @@ export const PIPELEX_STORAGE_SCHEME = 'pipelex-storage://';
  * Body of `POST /v1/upload/grant` — the SDK's `UploadGrantInput`. The file is
  * described, never sent: its bytes go straight to storage with the grant.
  *
- * `content_type` is signed into the grant, so the `PUT` must carry exactly it;
- * the platform accepts printable ASCII only (a header has to carry it). `size`
- * is the exact byte count, and the grant accepts a body of that size and no
- * other; a size over the service's limit is a `413` and nothing is signed.
+ * `sha256` names the bytes. The platform names the stored object after it
+ * (`<org>/assets/<sha256>.<ext>`), answers that the organization already holds
+ * the file when it does, and otherwise signs it into the `PUT`, so storage
+ * refuses any other bytes. The node always sends it: a grant asked for without
+ * it is the platform's fallback for copies of the node that predate hashes.
+ *
+ * `content_type` is what n8n says the file is. The platform never stores it —
+ * it types a file by its name's extension — and only takes an extension from it
+ * for a name that has none; it accepts printable ASCII only. `size` is the exact
+ * byte count, and the grant accepts a body of that size and no other; a size
+ * over the service's limit is a `413` and nothing is signed.
+ *
+ * The platform model forbids unknown fields, so a misspelled key is a `422`.
  */
 export interface UploadGrantRequest {
 	/** The original filename with its extension; the stored object keeps the extension. */
 	filename: string;
 	content_type?: string | null;
 	size: number;
+	/** The SHA-256 of the file's bytes, as 64 lowercase hexadecimal digits. */
+	sha256: string;
+}
+
+/** What every answer of `POST /v1/upload/grant` carries, whether or not there is anything to send. */
+interface UploadGrantRecord {
+	/** The file's record on the platform, `fl_<uuid7>`. Informational: the node does not use it. */
+	file_id: string;
+	/** The `pipelex-storage://` reference: it names the file now when `stored`, once the `PUT` has succeeded otherwise. */
+	uri: string;
+	/** The largest file any grant allows, in bytes (the service's upload cap). */
+	max_bytes: number;
 }
 
 /**
- * Answer of `POST /v1/upload/grant` — the SDK's `UploadGrant`: a presigned,
- * create-only `PUT` for one new object in the caller's organization.
+ * The answer when the organization already holds the file's bytes: nothing is
+ * sent, and `uri` names the file from now on.
+ */
+export interface StoredUploadGrant extends UploadGrantRecord {
+	stored: true;
+	url: null;
+	headers: null;
+	expires_at: null;
+}
+
+/**
+ * The answer when the bytes are still to be sent: a presigned, create-only
+ * `PUT` for one object in the caller's organization.
  *
  * **A bearer capability until `expires_at`**: whoever holds it can write that
  * one object, once. The node never logs it and never lets `url` into an error
  * message or an error body.
  */
-export interface UploadGrant {
-	/** The `pipelex-storage://` reference — it names nothing until the `PUT` has succeeded. */
-	uri: string;
+export interface UploadTargetGrant extends UploadGrantRecord {
+	stored: false;
 	/** Where to `PUT` the file, as the raw request body. */
 	url: string;
 	/**
 	 * The signed headers, sent unchanged: `If-None-Match: *`, the `Content-Type`
-	 * when one was declared, and the provenance `x-amz-meta-*` values.
+	 * the file's extension implies, the file's checksum as
+	 * `x-amz-checksum-sha256`, and the provenance `x-amz-meta-*` values.
 	 * `Content-Length` is signed too but not listed — the body sets it.
 	 */
 	headers: Record<string, string>;
 	/** ISO-8601 UTC instant after which storage refuses the `PUT`. */
 	expires_at: string;
-	/** The largest file any grant allows, in bytes (the service's upload cap). */
-	max_bytes: number;
 }
+
+/**
+ * Answer of `POST /v1/upload/grant` — the SDK's `UploadGrant`. On the wire it
+ * is one model whose `url`, `headers` and `expires_at` are null when `stored`
+ * is true; the node reads it as this union, discriminated on `stored`, because
+ * the contract says a client branches on `stored` and never on whether `url`
+ * is present.
+ */
+export type UploadGrant = StoredUploadGrant | UploadTargetGrant;
 
 /**
  * The value a binary-fed input takes in the `POST /v1/start` inputs: the
@@ -408,3 +452,14 @@ export function uploadTimeoutMs(size: number): number {
 	const seconds = Math.ceil(size / (128 * 1024));
 	return Math.min(60_000 + seconds * 1_000, 2_147_483_647);
 }
+
+/**
+ * The pauses, in milliseconds, before each new `PUT` of the same grant when
+ * storage answered `409 ConditionalRequestConflict`: another write of the same
+ * object was in flight, which S3 documents as retryable. A few seconds in all,
+ * the schedule the platform and the runner keep for their own create-only
+ * writes (`CONDITIONAL_CONFLICT_RETRY_DELAYS_SECONDS` in `pipelex-server`'s
+ * `app_storage.py`). A later `412` means the other write stored the file, and a
+ * later `2xx` that it left the object for this one.
+ */
+export const CONDITIONAL_CONFLICT_RETRY_DELAYS_MS: readonly number[] = [100, 250, 500, 1_000, 2_000];

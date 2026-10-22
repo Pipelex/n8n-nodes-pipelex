@@ -1,4 +1,4 @@
-import type { IBinaryData, IDataObject } from 'n8n-workflow';
+import type { IBinaryData, IDataObject, IExecuteFunctions } from 'n8n-workflow';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -18,12 +18,14 @@ import {
 	describeBinaryFile,
 	describeNetworkFailure,
 	eitherSignal,
+	fileSha256,
 	idempotencyKey,
 	isTimeoutFailure,
 	mapResultResponse,
 	missingBinaryMessage,
 	parseStorageError,
 	problemMessage,
+	putToStorage,
 	readBinaryInputMappings,
 	readUploadGrant,
 	roleRefusalMessage,
@@ -38,12 +40,14 @@ import {
 	withRunId,
 } from '../nodes/Pipelex/GenericFunctions';
 import {
+	CONDITIONAL_CONFLICT_RETRY_DELAYS_MS,
 	DEFAULT_DEGRADED_RETRY_SECONDS,
 	MAX_UPLOAD_BYTES,
 	extensionForContentType,
 	guessContentType,
 	parseRetryAfter,
 	uploadTimeoutMs,
+	type UploadTargetGrant,
 } from '../nodes/Pipelex/PipelexApiShapes';
 
 describe('buildApiConnection (manual auth — credential has no authenticate block)', () => {
@@ -1074,26 +1078,47 @@ describe('storedFileInput (the value a binary-fed input takes)', () => {
 	});
 });
 
+describe('fileSha256 (the hash the grant carries)', () => {
+	it('is the SHA-256 of the bytes in lowercase hexadecimal, the only form the platform takes', () => {
+		expect(fileSha256(Buffer.from('test'))).toBe('9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08');
+		expect(fileSha256(Buffer.from([0xff, 0x00, 0x89]))).toMatch(/^[0-9a-f]{64}$/);
+	});
+});
+
 describe('readUploadGrant (the answer of POST /v1/upload/grant)', () => {
 	const grant = {
+		file_id: 'fl_01a16405-12a5-757c-b44c-10c40b5a947b',
 		uri: 'pipelex-storage://orgs/o/assets/f.pdf',
+		stored: false,
 		url: 'https://bucket.s3.amazonaws.com/orgs/o/assets/f.pdf?X-Amz-Signature=x',
-		headers: { 'If-None-Match': '*', 'Content-Type': 'application/pdf' },
+		headers: { 'If-None-Match': '*', 'Content-Type': 'application/pdf', 'x-amz-checksum-sha256': 'abc=' },
 		expires_at: '2026-09-28T12:05:00Z',
 		max_bytes: 52428800,
 	};
+	const held = { ...grant, stored: true, url: null, headers: null, expires_at: null };
 
-	it('reads a grant', () => {
+	it('reads a grant with a target', () => {
 		expect(readUploadGrant(grant)).toEqual(grant);
+	});
+
+	it('reads the answer that the organization already holds the bytes, with nothing to send', () => {
+		expect(readUploadGrant(held)).toEqual(held);
+	});
+
+	it('refuses an answer that does not say whether the bytes are stored', () => {
+		for (const stored of [undefined, null, 'false', 0]) {
+			expect(readUploadGrant({ ...grant, stored }), String(stored)).toBeUndefined();
+		}
 	});
 
 	it('refuses a grant whose reference is not a storage reference', () => {
 		expect(readUploadGrant({ ...grant, uri: 'https://elsewhere/f.pdf' })).toBeUndefined();
+		expect(readUploadGrant({ ...held, uri: 'https://elsewhere/f.pdf' })).toBeUndefined();
 	});
 
 	it('refuses a URL the node must not send a file to', () => {
-		for (const url of ['/relative/path', 'ftp://bucket/f', 'https://user:pass@bucket/f', 'not a url']) {
-			expect(readUploadGrant({ ...grant, url }), url).toBeUndefined();
+		for (const url of ['/relative/path', 'ftp://bucket/f', 'https://user:pass@bucket/f', 'not a url', null]) {
+			expect(readUploadGrant({ ...grant, url }), String(url)).toBeUndefined();
 		}
 	});
 
@@ -1102,6 +1127,11 @@ describe('readUploadGrant (the answer of POST /v1/upload/grant)', () => {
 		expect(readUploadGrant({ ...grant, headers: null })).toBeUndefined();
 		expect(readUploadGrant('grant')).toBeUndefined();
 		expect(readUploadGrant(null)).toBeUndefined();
+	});
+
+	it('reads the informational fields leniently', () => {
+		const { file_id: _fileId, max_bytes: _maxBytes, expires_at: _expiresAt, ...bare } = grant;
+		expect(readUploadGrant(bare)).toEqual({ ...bare, file_id: '', max_bytes: 0, expires_at: '' });
 	});
 });
 
@@ -1150,9 +1180,6 @@ describe('parseStorageError + storageRefusalMessage (after the SDK uploadWithGra
 	it('classifies each refusal the SDK names', () => {
 		const message = (status: number, body: string) =>
 			storageRefusalMessage(status, parseStorageError(body), file);
-		expect(message(412, s3('PreconditionFailed', 'At least one of the pre-conditions failed'))).toContain(
-			'the upload grant was already used',
-		);
 		expect(message(403, s3('SignatureDoesNotMatch', 'no match'))).toContain(
 			'differs from what the upload grant signed',
 		);
@@ -1163,8 +1190,11 @@ describe('parseStorageError + storageRefusalMessage (after the SDK uploadWithGra
 		expect(message(400, s3('RequestTimeout', 'Your socket connection timed out'))).toContain(
 			'stopped waiting for the bytes',
 		);
-		expect(message(409, s3('ConditionalRequestConflict', 'conflict'))).toContain(
-			'whether the file was stored is unknown',
+		expect(message(409, s3('ConditionalRequestConflict', 'conflict'))).toBe(
+			'Storage was still busy with another upload of the same file when the node last sent "scan.pdf" for input "document" (409 ConditionalRequestConflict), so whether it was stored is unknown. Retry the item: it asks Pipelex again, which answers that the file is stored if the other upload finished.',
+		);
+		expect(message(400, s3('BadDigest', 'The SHA256 you specified did not match the calculated checksum.'))).toContain(
+			'(400 BadDigest): the bytes it received do not match the SHA-256 the node computed for the file.',
 		);
 		expect(message(307, '')).toContain('the redirect was refused');
 		expect(message(400, s3('EntityTooLarge', 'Your proposed upload exceeds the maximum allowed size.'))).toBe(
@@ -1173,6 +1203,144 @@ describe('parseStorageError + storageRefusalMessage (after the SDK uploadWithGra
 		expect(message(500, s3('InternalError', 'We encountered an internal error.'))).toBe(
 			'Storage failed to store "scan.pdf" for input "document" (500 InternalError): We encountered an internal error. Whether the file was stored is unknown; retry the item.',
 		);
+	});
+});
+
+describe("putToStorage (storage's answer, read as the upload contract says)", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+	});
+
+	const bytes = Buffer.from('%PDF-1.7 a fake invoice');
+	const file = {
+		inputName: 'document',
+		bytes,
+		sha256: fileSha256(bytes),
+		filename: 'invoice.pdf',
+		contentType: 'application/pdf',
+	};
+	const target: UploadTargetGrant = {
+		file_id: 'fl_01a16405-12a5-757c-b44c-10c40b5a947b',
+		uri: `pipelex-storage://org_acme/assets/${fileSha256(bytes)}.pdf`,
+		stored: false,
+		url: `https://bucket.s3.amazonaws.com/org_acme/assets/${fileSha256(bytes)}.pdf?X-Amz-Signature=secret`,
+		headers: { 'If-None-Match': '*', 'Content-Type': 'application/pdf', 'x-amz-checksum-sha256': 'abc=' },
+		expires_at: '2026-10-22T10:05:00Z',
+		max_bytes: 52428800,
+	};
+	const s3 = (code: string, message: string) =>
+		`<?xml version="1.0"?><Error><Code>${code}</Code><Message>${message}</Message></Error>`;
+	const CONFLICT = { statusCode: 409, body: s3('ConditionalRequestConflict', 'A conflicting operation occurred.') };
+
+	/** Storage answering each `PUT` with the next answer, the last one repeated. */
+	function storage(answers: Array<{ statusCode: number; body?: string }>, cancelSignal?: AbortSignal) {
+		const queue = [...answers];
+		const httpRequest = vi.fn(async () => {
+			const answer = queue.length > 1 ? queue.shift()! : queue[0];
+			return { statusCode: answer.statusCode, body: answer.body ?? '', headers: {} };
+		});
+		const ctx = {
+			getNode: () => ({ id: 'node-1', name: 'Pipelex', type: 'pipelex', typeVersion: 1 }),
+			getExecutionCancelSignal: () => cancelSignal,
+			helpers: { httpRequest },
+		} as unknown as IExecuteFunctions;
+		return { ctx, httpRequest };
+	}
+
+	/** The `PUT`s sent, as what identifies each: its URL, its headers and its body. */
+	const sentPuts = (httpRequest: ReturnType<typeof vi.fn>) =>
+		httpRequest.mock.calls.map(([options]) => {
+			const { method, url, headers, body } = options as Record<string, unknown>;
+			return { method, url, headers, body };
+		});
+
+	it("reads a 2xx as stored, having sent the grant's headers unchanged and the bytes it hashed", async () => {
+		const { ctx, httpRequest } = storage([{ statusCode: 200 }]);
+		await putToStorage(ctx, target, file, 0);
+		expect(sentPuts(httpRequest)).toEqual([{ method: 'PUT', url: target.url, headers: target.headers, body: bytes }]);
+	});
+
+	it('reads a 412 as stored: an object at a hash-named address holds exactly these bytes', async () => {
+		const { ctx, httpRequest } = storage([
+			{ statusCode: 412, body: s3('PreconditionFailed', 'At least one of the pre-conditions you specified did not hold') },
+		]);
+		await expect(putToStorage(ctx, target, file, 0)).resolves.toBeUndefined();
+		expect(httpRequest).toHaveBeenCalledTimes(1);
+	});
+
+	it('sends the same PUT again after each pause of the schedule while storage answers a conflict', async () => {
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		const { ctx, httpRequest } = storage([CONFLICT, CONFLICT, { statusCode: 200 }]);
+		const done = putToStorage(ctx, target, file, 0);
+		const [first, second] = CONDITIONAL_CONFLICT_RETRY_DELAYS_MS;
+
+		await vi.advanceTimersByTimeAsync(first - 1);
+		expect(httpRequest).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(httpRequest).toHaveBeenCalledTimes(2);
+		await vi.advanceTimersByTimeAsync(second - 1);
+		expect(httpRequest).toHaveBeenCalledTimes(2);
+		await vi.advanceTimersByTimeAsync(1);
+		await expect(done).resolves.toBeUndefined();
+
+		const puts = sentPuts(httpRequest);
+		expect(puts).toHaveLength(3);
+		for (const put of puts) expect(put).toEqual(puts[0]);
+	});
+
+	it('reads a 412 after a conflict as the other upload having stored the file', async () => {
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		const { ctx, httpRequest } = storage([CONFLICT, { statusCode: 412 }]);
+		const done = putToStorage(ctx, target, file, 0);
+		await vi.runAllTimersAsync();
+		await expect(done).resolves.toBeUndefined();
+		expect(httpRequest).toHaveBeenCalledTimes(2);
+	});
+
+	it('fails the item as unknown once the pauses are spent, never naming the grant URL', async () => {
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		const { ctx, httpRequest } = storage([CONFLICT]);
+		const outcome = putToStorage(ctx, target, file, 0).then(
+			() => undefined,
+			(error: unknown) => error as Record<string, any>,
+		);
+		await vi.runAllTimersAsync();
+		const error = await outcome;
+		expect(httpRequest).toHaveBeenCalledTimes(1 + CONDITIONAL_CONFLICT_RETRY_DELAYS_MS.length);
+		expect(error?.message).toContain(
+			'Storage was still busy with another upload of the same file when the node last sent "invoice.pdf" for input "document" (409 ConditionalRequestConflict)',
+		);
+		expect(error?.httpCode).toBe('409');
+		expect(JSON.stringify({ ...error, message: error?.message })).not.toMatch(/X-Amz-Signature|secret/);
+	});
+
+	it('ends the upload when the execution is cancelled during a pause', async () => {
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		const cancel = new AbortController();
+		const { ctx, httpRequest } = storage([CONFLICT, { statusCode: 200 }], cancel.signal);
+		const outcome = putToStorage(ctx, target, file, 0).then(
+			() => undefined,
+			(error: unknown) => error as Error,
+		);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(httpRequest).toHaveBeenCalledTimes(1);
+		cancel.abort();
+		expect((await outcome)?.message).toBe('The upload of "invoice.pdf" for input "document" was cancelled with the execution.');
+		await vi.runAllTimersAsync();
+		expect(httpRequest).toHaveBeenCalledTimes(1);
+	});
+
+	it('retries no other refusal', async () => {
+		for (const answer of [
+			{ statusCode: 409, body: s3('OperationAborted', 'A conflicting conditional operation is in progress.') },
+			{ statusCode: 400, body: s3('BadDigest', 'The SHA256 you specified did not match the calculated checksum.') },
+			{ statusCode: 403, body: s3('SignatureDoesNotMatch', 'no match') },
+		]) {
+			const { ctx, httpRequest } = storage([answer]);
+			await expect(putToStorage(ctx, target, file, 0), answer.body).rejects.toThrow(/Storage refused the upload/);
+			expect(httpRequest).toHaveBeenCalledTimes(1);
+		}
 	});
 });
 

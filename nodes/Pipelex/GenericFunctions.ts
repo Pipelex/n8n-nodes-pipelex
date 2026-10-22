@@ -14,6 +14,7 @@ import {
 } from 'n8n-workflow';
 
 import {
+	CONDITIONAL_CONFLICT_RETRY_DELAYS_MS,
 	DEFAULT_CONTENT_TYPE,
 	DEFAULT_DEGRADED_RETRY_SECONDS,
 	MAX_UPLOAD_BYTES,
@@ -27,6 +28,7 @@ import {
 	type StoredFileInput,
 	type UploadGrant,
 	type UploadGrantRequest,
+	type UploadTargetGrant,
 } from './PipelexApiShapes';
 import { USER_AGENT } from './UserAgent';
 
@@ -389,9 +391,10 @@ export function runSourceError(body: HostedStartBody): string | null {
  * key also covers their references (`storedFiles`, one `input=reference` entry
  * each). A retry in the same execution reuses the references the first attempt
  * stored (`StoredUploads.ts`), so its key is the same and the platform replays
- * the first run. When a retry has to upload afresh instead — the file changed,
- * or this process no longer remembers the first upload — its references, and so
- * its body, differ, and the platform refuses a reused key whose body differs
+ * the first run. A retry this process no longer remembers asks the platform
+ * again, which names a file by its bytes and so answers the same references:
+ * it replays too. When the file changed between attempts, its reference, and
+ * so its body, differ, and the platform refuses a reused key whose body differs
  * with a `409` ("already used with a different request body",
  * `middleware/idempotency.py`). Folding the references into the key turns that
  * case into a new run rather than a failed item.
@@ -912,11 +915,13 @@ export async function requestResult(
 // `pipelex-storage://` reference into the start body's inputs.
 //
 // The upload is the SDK's upload grant (`requestUploadGrant` + `uploadWithGrant`
-// in `pipelex-sdk-js`), replicated: `POST /v1/upload/grant` describes the file,
-// then the raw bytes go to storage in one `PUT` with the grant's signed headers.
-// Why the grant rather than the SDK's base64 `uploadFile` is in the header of
-// `PipelexApiShapes.ts`. Everything here runs before `POST /v1/start`, so a
-// failed upload fails the item with no run created.
+// in `pipelex-sdk-js`), replicated: `POST /v1/upload/grant` describes the file
+// by its name, its size and the SHA-256 of its bytes, then the raw bytes go to
+// storage in one `PUT` with the grant's signed headers. A file is named by its
+// bytes, so when the organization already holds them the grant says so and
+// nothing is sent. Why the grant rather than the SDK's base64 `uploadFile` is in
+// the header of `PipelexApiShapes.ts`. Everything here runs before
+// `POST /v1/start`, so a failed upload fails the item with no run created.
 
 /** One row of the `Binary Inputs` collection: a method input and the n8n binary field that fills it. */
 export interface BinaryInputMapping {
@@ -1147,8 +1152,19 @@ export function storedFileReferences(stored: Record<string, StoredFileInput>): s
 export interface BinaryFile {
 	inputName: string;
 	bytes: Buffer;
+	/** The SHA-256 of `bytes` ({@link fileSha256}), computed once per file and sent with its grant. */
+	sha256: string;
 	filename: string;
 	contentType: string;
+}
+
+/**
+ * The SHA-256 of a file's bytes in lowercase hexadecimal, the form the upload
+ * grant takes: the platform names the stored object after it, and storage
+ * checks the bytes it receives against it.
+ */
+export function fileSha256(bytes: Buffer): string {
+	return createHash('sha256').update(bytes).digest('hex');
 }
 
 /** How a file is named in upload messages: its name, and the input it fills. */
@@ -1161,17 +1177,34 @@ export const UPLOAD_UNAVAILABLE_MESSAGE =
 
 /**
  * Read the answer of `POST /v1/upload/grant` into an {@link UploadGrant}, or
- * `undefined` when it is not one. The `url` must be an absolute `http(s)` URL
- * with no user info — the SDK's `storageTarget` rule: a relative URL would be
- * resolved against something else, and user info would ride into an error.
+ * `undefined` when it is not one. It branches on `stored`, as the contract
+ * says, never on whether `url` is present: an answer without a boolean `stored`
+ * is no grant, one with `stored: true` is read with nothing to send whatever
+ * else it carries, and one with `stored: false` must carry a target. That
+ * target's `url` must be an absolute `http(s)` URL with no user info — the SDK's
+ * `storageTarget` rule: a relative URL would be resolved against something
+ * else, and user info would ride into an error. `file_id`, `expires_at` and
+ * `max_bytes` are informational and read leniently.
  */
 export function readUploadGrant(body: unknown): UploadGrant | undefined {
 	if (body === null || typeof body !== 'object' || Array.isArray(body)) return undefined;
-	const { uri, url, headers, expires_at: expiresAt, max_bytes: maxBytes } = body as Record<
-		string,
-		unknown
-	>;
+	const {
+		file_id: fileId,
+		uri,
+		stored,
+		url,
+		headers,
+		expires_at: expiresAt,
+		max_bytes: maxBytes,
+	} = body as Record<string, unknown>;
 	if (typeof uri !== 'string' || !uri.startsWith(PIPELEX_STORAGE_SCHEME)) return undefined;
+	if (typeof stored !== 'boolean') return undefined;
+	const record = {
+		file_id: typeof fileId === 'string' ? fileId : '',
+		uri,
+		max_bytes: typeof maxBytes === 'number' ? maxBytes : 0,
+	};
+	if (stored) return { ...record, stored: true, url: null, headers: null, expires_at: null };
 	if (typeof url !== 'string' || storageOrigin(url) === undefined) return undefined;
 	if (headers === null || typeof headers !== 'object' || Array.isArray(headers)) return undefined;
 	const signed: Record<string, string> = {};
@@ -1180,11 +1213,11 @@ export function readUploadGrant(body: unknown): UploadGrant | undefined {
 		signed[name] = value;
 	}
 	return {
-		uri,
+		...record,
+		stored: false,
 		url,
 		headers: signed,
 		expires_at: typeof expiresAt === 'string' ? expiresAt : '',
-		max_bytes: typeof maxBytes === 'number' ? maxBytes : 0,
 	};
 }
 
@@ -1252,10 +1285,12 @@ export function uploadGrantRefusalMessage(
 }
 
 /**
- * `POST /v1/upload/grant` — ask for a presigned `PUT` for one file. Sent with
- * the API headers and **without** an `Idempotency-Key`: the route never replays
- * a grant (a repeated key is a `409` "already executed"), and asking again is
- * free, so a retry simply asks for a new one.
+ * `POST /v1/upload/grant` — describe one file by its name, type, size and
+ * SHA-256, and get either the answer that the organization already holds it or
+ * a presigned `PUT` to send it with. Sent with the API headers and **without**
+ * an `Idempotency-Key`: the route never replays a grant (a repeated key is a
+ * `409` "already executed"), and asking again is free, so a retry simply asks
+ * for a new one; with the hash, a second ask answers the same file.
  *
  * A refusal surfaces as a `NodeApiError` carrying the platform's problem body.
  * A `2xx` that is not a usable grant surfaces WITHOUT its body, which may hold
@@ -1271,6 +1306,7 @@ export async function requestUploadGrant(
 		filename: file.filename,
 		content_type: file.contentType,
 		size: file.bytes.length,
+		sha256: file.sha256,
 	};
 	const response = (await ctx.helpers.httpRequest({
 		method: 'POST' as IHttpRequestMethods,
@@ -1344,13 +1380,26 @@ function withoutFinalPeriod(message: string): string {
 }
 
 /**
- * The message for storage's answer to the `PUT` when it is not a `2xx` — the
+ * Whether storage's answer to the `PUT` says another write of the same object
+ * is in flight: a `409 ConditionalRequestConflict`, or a `409` whose body names
+ * no code, as the platform reads its own writes. It is retried with the same
+ * grant after a short wait ({@link putToStorage}).
+ */
+function isConditionalConflict(statusCode: number, refusal: StorageRefusal): boolean {
+	return statusCode === 409 && (refusal.code === undefined || refusal.code === 'ConditionalRequestConflict');
+}
+
+/**
+ * The message for storage's answer to the `PUT` when the file was not stored —
+ * neither a `2xx` nor the `412` of the same bytes already there — after the
  * SDK's `uploadWithGrant` classification, with its advice rewritten for a
- * workflow: the SDK offers a retry with the same grant, while the node never
- * keeps one, so the advice is always "retry the item", which asks for a new
- * grant. A signature mismatch or an unsigned header cannot come from the
- * author's file — the node sends the grant's headers unchanged — so those say
- * where to look instead.
+ * workflow: the SDK offers a retry with the same grant, while the node keeps
+ * one only through a conflict's short retries, so the advice is "retry the
+ * item", which asks for a new grant. A conflict reaches here once those retries
+ * are spent. A signature mismatch, an unsigned header or a body that does not
+ * match its checksum cannot come from the author's file — the node sends the
+ * grant's headers unchanged and the bytes it hashed — so those say where to
+ * look instead.
  */
 export function storageRefusalMessage(
 	statusCode: number,
@@ -1365,13 +1414,13 @@ export function storageRefusalMessage(
 	if (statusCode === 400 && refusal.code === 'RequestTimeout') {
 		return `Storage stopped waiting for the bytes of ${subject} (${status}) and stored nothing. Retry the item.`;
 	}
-	if (statusCode === 409 && refusal.code === 'ConditionalRequestConflict') {
-		return `Storage met another upload with the same grant for ${subject} (${status}), so whether the file was stored is unknown. Retry the item: it asks for a new grant.`;
+	if (isConditionalConflict(statusCode, refusal)) {
+		return `Storage was still busy with another upload of the same file when the node last sent ${subject} (${status}), so whether it was stored is unknown. Retry the item: it asks Pipelex again, which answers that the file is stored if the other upload finished.`;
 	}
 	if (statusCode >= 400 && statusCode < 500) {
 		const lead = `Storage refused the upload of ${subject} (${status})`;
-		if (statusCode === 412) {
-			return `${lead}: the upload grant was already used. Retry the item: every attempt asks for a new grant.`;
+		if (refusal.code === 'BadDigest') {
+			return `${lead}: the bytes it received do not match the SHA-256 the node computed for the file. Something between n8n and storage changed them (a proxy rewriting the body), or this is a bug in the node — please report it.`;
 		}
 		if (refusal.code === 'SignatureDoesNotMatch') {
 			return `${lead}: the request differs from what the upload grant signed. Something between n8n and storage changed it (a proxy rewriting headers), or this is a bug in the node — please report it.`;
@@ -1458,13 +1507,27 @@ export function eitherSignal(
 	return { signal: controller.signal, unlink: () => unlinks.forEach((unlink) => unlink()) };
 }
 
+/** The error for an upload the cancelled execution ended, during a `PUT` or a pause between two. */
+function uploadCancelledError(
+	ctx: IExecuteFunctions,
+	file: { inputName: string; filename: string },
+	itemIndex: number,
+): NodeOperationError {
+	return new NodeOperationError(
+		ctx.getNode(),
+		`The upload of ${fileSubject(file)} was cancelled with the execution.`,
+		{ itemIndex },
+	);
+}
+
 /**
- * `PUT` the file to storage with the grant: the raw bytes as the body, the
+ * Send the file to storage once with the grant: the raw bytes as the body, the
  * grant's signed headers unchanged, and nothing else of the node's own — no
  * `Authorization` (the signature in the URL is the credential, and a second one
  * makes S3 refuse the request) and no `User-Agent` (the client-identification
  * spec leaves the user agent of a request to a presigned object-store URL
- * alone, so n8n's default applies).
+ * alone, so n8n's default applies). Answers storage's response, whatever its
+ * status; throws when there is none.
  *
  * Redirects are refused (a presigned URL is valid only where it was signed), and
  * cancelling the n8n execution cancels the upload. The SDK's default time limit
@@ -1475,16 +1538,16 @@ export function eitherSignal(
  * connect ran unbounded and a response that keeps trickling never trips it. The
  * signal bounds the whole exchange on every axios. Which signal fired decides the
  * message — cancelled, out of time, or never reached. Every failure is described
- * without the grant's URL, storage's error body or the runtime error that could
- * carry either — which is why a failed request is caught here and classified
- * OUTSIDE the `catch` rather than wrapped.
+ * without the grant's URL or the runtime error that could carry it — which is
+ * why a failed request is caught here and classified OUTSIDE the `catch` rather
+ * than wrapped.
  */
-export async function putToStorage(
+async function sendToStorage(
 	ctx: IExecuteFunctions,
-	grant: UploadGrant,
+	grant: UploadTargetGrant,
 	file: BinaryFile,
 	itemIndex: number,
-): Promise<void> {
+): Promise<IN8nHttpFullResponse> {
 	const origin = storageOrigin(grant.url) ?? 'storage';
 	const cancelSignal = ctx.getExecutionCancelSignal();
 	const limitMs = uploadTimeoutMs(file.bytes.length);
@@ -1510,45 +1573,76 @@ export async function putToStorage(
 	} finally {
 		linked?.unlink();
 	}
+	if (response !== undefined) return response;
 
+	if (cancelSignal?.aborted) throw uploadCancelledError(ctx, file, itemIndex);
+	// The failure's names and codes go in the description, never the message:
+	// n8n replaces any message containing a Node error code (`ENOTFOUND`,
+	// `ETIMEDOUT`, …) with a generic sentence that names neither the file nor
+	// the storage host (`setDescriptiveErrorMessage` in n8n-workflow).
 	const subject = fileSubject(file);
-	if (response === undefined) {
-		if (cancelSignal?.aborted) {
-			throw new NodeOperationError(
-				ctx.getNode(),
-				`The upload of ${subject} was cancelled with the execution.`,
-				{ itemIndex },
-			);
-		}
-		// The failure's names and codes go in the description, never the message:
-		// n8n replaces any message containing a Node error code (`ENOTFOUND`,
-		// `ETIMEDOUT`, …) with a generic sentence that names neither the file nor
-		// the storage host (`setDescriptiveErrorMessage` in n8n-workflow).
-		const description = `Network failure: ${describeNetworkFailure(failure)}.`;
-		const message = deadline.aborted || isTimeoutFailure(failure)
-			? `The upload of ${subject} to storage did not finish within ${Math.round(limitMs / 1000)} s, so whether storage stored it is unknown. Retry the item: it uploads the file again under a new reference.`
-			: `The upload of ${subject} could not reach storage at ${origin}. A binary input goes to storage directly, not through the Pipelex API, so this n8n instance must be able to reach ${origin}.`;
-		throw new NodeOperationError(ctx.getNode(), message, { itemIndex, description });
-	}
-
-	const statusCode = response.statusCode;
-	if (statusCode >= 200 && statusCode < 300) return;
-	const refusal = parseStorageError(response.body);
-	throw new NodeApiError(
-		ctx.getNode(),
-		{ storage_status: statusCode, storage_error: refusal.code ?? null } as JsonObject,
-		{
-			message: storageRefusalMessage(statusCode, refusal, file),
-			httpCode: String(statusCode),
-			itemIndex,
-		},
-	);
+	const description = `Network failure: ${describeNetworkFailure(failure)}.`;
+	const message = deadline.aborted || isTimeoutFailure(failure)
+		? `The upload of ${subject} to storage did not finish within ${Math.round(limitMs / 1000)} s, so whether storage stored it is unknown. Retry the item: it asks Pipelex again, which answers that the file is stored if this upload did store it.`
+		: `The upload of ${subject} could not reach storage at ${origin}. A binary input goes to storage directly, not through the Pipelex API, so this n8n instance must be able to reach ${origin}.`;
+	throw new NodeOperationError(ctx.getNode(), message, { itemIndex, description });
 }
 
 /**
- * Store one binary and return the input value that names it: ask for a grant,
- * `PUT` the bytes, and only then use the grant's reference — it names nothing
- * until storage has answered the `PUT` with a `2xx`.
+ * `PUT` the file to storage with the grant's target ({@link sendToStorage}) and
+ * read storage's answer as the upload contract says:
+ *
+ * - A `2xx` stored the file.
+ * - A `412` did too. The object is named after the file's SHA-256 and every
+ *   write of it is create-only and checksummed, so an object already at that
+ *   address holds exactly these bytes, stored by another upload meanwhile.
+ * - A `409 ConditionalRequestConflict` means another write of the same object
+ *   is in flight. The same `PUT` is sent again after each pause of
+ *   {@link CONDITIONAL_CONFLICT_RETRY_DELAYS_MS}, a few seconds in all and well
+ *   within the grant's lifespan, until storage answers otherwise; once the
+ *   pauses are spent, the conflict fails the item as unknown. Cancelling the
+ *   execution during a pause ends the upload as it ends a `PUT` in flight.
+ * - Anything else fails the item ({@link storageRefusalMessage}), with storage's
+ *   code but never its body, which can echo the signed request.
+ */
+export async function putToStorage(
+	ctx: IExecuteFunctions,
+	grant: UploadTargetGrant,
+	file: BinaryFile,
+	itemIndex: number,
+): Promise<void> {
+	for (let retries = 0; ; retries += 1) {
+		const response = await sendToStorage(ctx, grant, file, itemIndex);
+		const statusCode = response.statusCode;
+		if ((statusCode >= 200 && statusCode < 300) || statusCode === 412) return;
+		const refusal = parseStorageError(response.body);
+		const pauseMs = CONDITIONAL_CONFLICT_RETRY_DELAYS_MS[retries];
+		if (isConditionalConflict(statusCode, refusal) && pauseMs !== undefined) {
+			try {
+				await abortableSleep(pauseMs, ctx.getExecutionCancelSignal());
+			} catch {
+				throw uploadCancelledError(ctx, file, itemIndex);
+			}
+			continue;
+		}
+		throw new NodeApiError(
+			ctx.getNode(),
+			{ storage_status: statusCode, storage_error: refusal.code ?? null } as JsonObject,
+			{
+				message: storageRefusalMessage(statusCode, refusal, file),
+				httpCode: String(statusCode),
+				itemIndex,
+			},
+		);
+	}
+}
+
+/**
+ * Store one binary and return the input value that names it: ask for a grant
+ * with the file's SHA-256, and when the organization already holds those bytes,
+ * use the reference the grant answers at once — nothing is sent. Otherwise
+ * `PUT` the bytes, and only then use the grant's reference: it names nothing
+ * until storage has accepted the file.
  */
 export async function uploadBinaryFile(
 	ctx: IExecuteFunctions,
@@ -1557,6 +1651,6 @@ export async function uploadBinaryFile(
 	itemIndex: number,
 ): Promise<StoredFileInput> {
 	const grant = await requestUploadGrant(ctx, conn, file, itemIndex);
-	await putToStorage(ctx, grant, file, itemIndex);
+	if (!grant.stored) await putToStorage(ctx, grant, file, itemIndex);
 	return storedFileInput(grant.uri, file.filename, file.contentType);
 }
