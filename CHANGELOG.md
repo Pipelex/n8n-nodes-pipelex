@@ -6,6 +6,10 @@
 
 - **Refusals by role**: when the Pipelex API refuses a request because of the caller's role in the organization (`403` with the problem code `role_not_permitted`), as it refuses a role that runs only published versions a `@draft` Method ID or an inline method, the node's error says *"Your role in this organization does not allow this."* followed by the API's own sentence naming the role held and what the request needs, instead of telling the user to ask Pipelex to enable API access.
 
+### Changed
+
+- **Binary Inputs send a file only when the organization lacks it**: the node sends the SHA-256 of each file with its upload grant, so a file your organization already holds in Pipelex storage is not sent again, and a *Retry On Fail* the node no longer remembers still replays its run, since the same bytes answer the same reference. When storage answers that another upload stored the same file first, the node counts it as stored, and when another upload of it is still in progress, the node waits briefly and sends the file again. A backend of your own must accept `sha256` on `POST /v1/upload/grant`.
+
 ## [v0.3.1] - 2026-10-08
 
 ### Added
