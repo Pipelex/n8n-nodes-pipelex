@@ -8,7 +8,7 @@
 
 ### Changed
 
-- **Binary Inputs send a file only when the organization lacks it**: the node sends the SHA-256 of each file with its upload grant, so a file your organization already holds in Pipelex storage is not sent again, and a *Retry On Fail* the node no longer remembers still replays its run, since the same bytes answer the same reference. When storage answers that another upload stored the same file first, the node counts it as stored, and when another upload of it is still in progress, the node waits briefly and sends the file again. A backend of your own must accept `sha256` on `POST /v1/upload/grant`.
+- **Binary Inputs send a file only when the organization lacks it**: the node sends the SHA-256 of each file with its upload grant, so a file your organization already holds in Pipelex storage is not sent again, and a *Retry On Fail* the node no longer remembers still replays its run, since the same bytes answer the same reference. When storage answers that another upload stored the same file first, the node counts it as stored, and when another upload of it is still in progress, the node waits briefly and sends the file again. A backend of your own must accept `sha256` on `POST /v1/upload/grant` and answer it with `stored` and `file_id`, as the hosted API's upload contract defines.
 
 ## [v0.3.1] - 2026-10-08
 
