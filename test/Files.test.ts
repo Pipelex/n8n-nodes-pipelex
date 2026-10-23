@@ -447,6 +447,18 @@ describe('toInstant — a date filter as an instant with an offset', () => {
 		expect(toInstant('2026-12-31', 'UTC', 'Created To', { endOfDay: true }).instant).toBe(
 			'2026-12-31T23:59:59.999Z',
 		);
+		// West of UTC, daylight saving can skip the next midnight: Santiago jumps
+		// from 00:00 to 01:00 on 2026-09-06 (04:00 UTC), Havana on 2026-03-08 (05:00
+		// UTC). The day before still ends at its last millisecond, 23:59:59.999.
+		expect(toInstant('2026-09-05', 'America/Santiago', 'Created To', { endOfDay: true }).instant).toBe(
+			'2026-09-06T03:59:59.999Z',
+		);
+		expect(toInstant('2026-03-07', 'America/Havana', 'Created To', { endOfDay: true }).instant).toBe(
+			'2026-03-08T04:59:59.999Z',
+		);
+		// And the day whose midnight is skipped starts where the clock jumps.
+		expect(toInstant('2026-09-06', 'America/Santiago', 'Created From').instant).toBe('2026-09-06T04:00:00.000Z');
+		expect(toInstant('2026-03-08', 'America/Havana', 'Created From').instant).toBe('2026-03-08T05:00:00.000Z');
 		// A time, even midnight, is the instant it says.
 		expect(toInstant('2026-10-01T00:00:00', 'UTC', 'Created To', { endOfDay: true }).instant).toBe(
 			'2026-10-01T00:00:00.000Z',

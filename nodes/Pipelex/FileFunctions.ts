@@ -99,13 +99,17 @@ function zoneOffsetMs(utcMs: number, timeZone: string): number {
 /**
  * The UTC instant of a wall-clock time in `timeZone`. The offset is looked up
  * twice, the second time at the instant the first guess gives, so a time near a
- * daylight-saving change lands on the offset in force then.
+ * daylight-saving change lands on the offset in force then. A time the clock
+ * skips (in a daylight-saving gap, such as a midnight Santiago jumps over) reads
+ * back as another time; it is taken as the later candidate, the instant the
+ * clock jumps, whichever side of UTC the zone lies.
  */
 function zonedWallTimeToUtc(wallAsUtcMs: number, timeZone: string): number {
 	try {
 		const first = wallAsUtcMs - zoneOffsetMs(wallAsUtcMs, timeZone);
 		const second = wallAsUtcMs - zoneOffsetMs(first, timeZone);
-		return second;
+		const inGap = second + zoneOffsetMs(second, timeZone) !== wallAsUtcMs;
+		return inGap ? Math.max(first, second) : second;
 	} catch {
 		return wallAsUtcMs;
 	}
@@ -176,8 +180,8 @@ export function toInstant(
 			return refusal;
 		}
 		if (time === undefined && options.endOfDay) {
-			// The next day's midnight, less a millisecond: a day that skips its
-			// midnight for daylight saving still ends where the next one starts.
+			// The next day's midnight, less a millisecond: when daylight saving
+			// skips that midnight, the next day starts where the clock jumps.
 			const nextMidnight = Date.UTC(Number(year), Number(month) - 1, Number(day) + 1);
 			return { instant: new Date(zonedWallTimeToUtc(nextMidnight, timeZone) - 1).toISOString() };
 		}
@@ -481,12 +485,17 @@ export function fileSearchText(name: string): string {
 }
 
 /**
- * The searches that together list every file {@link sameFileName} accepts: the
- * name as typed, its composed form (NFC) and its decomposed form (NFD), each
- * once. The platform matches `q` against the stored name lowercased but not
- * normalised, so a name uploaded from macOS, often decomposed, is missed by the
- * composed name a person types, and the reverse; a name holding no accent is
- * the same in every form and needs one search.
+ * The searches for a name: as typed, in its composed form (NFC) and in its
+ * decomposed form (NFD), each once. The platform matches `q` against the stored
+ * name lowercased but not normalised, so a name uploaded from macOS, often
+ * decomposed, is missed by the composed name a person types, and the reverse;
+ * a name holding no accent is the same in every form and needs one search.
+ *
+ * Together they find a stored name that is entirely composed, entirely
+ * decomposed, or exactly as typed. A name stored with its accents partly one
+ * way and partly the other, which {@link sameFileName} would accept, is listed
+ * by none of them; it is found once the platform's search folds names itself
+ * (L-261022-a9b93b), and until then only by its ID.
  */
 export function fileNameSearches(name: string): string[] {
 	const typed = name.trim();
