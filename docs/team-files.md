@@ -81,7 +81,9 @@ The node asks the platform for a fresh link to the file (`POST /v1/files/links`)
 - **The n8n instance must reach Pipelex storage** as well as the API, which matters on a self-hosted n8n behind an egress allowlist. The storage host is the one **Binary Inputs** uploads to.
 - **The link is a bearer capability**, valid for fifteen minutes to anyone who holds it, so the node never puts it in an item, an error message or an error's details. It asks for a new link on every download, retries included.
 
-The download has a deadline of a minute plus a second for every 128 KiB of the file's recorded size, as an upload does, and it stops when the execution is cancelled.
+The bytes are streamed: the node hands them to n8n as they arrive from storage instead of first gathering the whole file in memory. Whether n8n then holds them in memory depends on its binary data mode (`N8N_DEFAULT_BINARY_DATA_MODE`). In `filesystem` mode n8n writes them to disk as they arrive, so even a file of hundreds of megabytes never sits whole in the worker's memory. The `default` mode keeps every binary in memory by design, and some n8n versions' `s3` mode collects a file in memory before sending it to the bucket, so for large files on a self-hosted n8n, `filesystem` mode is the one that keeps memory flat.
+
+The download has a deadline of a minute plus a second for every 128 KiB of the file's recorded size, as an upload does, and it stops when the execution is cancelled. The deadline covers the whole transfer, from the request to the last byte stored, and when it passes or the execution is cancelled the node closes the connection to storage, whatever has arrived by then. When storage refuses the download, the node reads only the start of storage's answer, where its error code and message are, to say why, and closes the connection there.
 
 ### When a download fails
 
@@ -95,6 +97,8 @@ The download has a deadline of a minute plus a second for every 128 KiB of the f
 | *…the download link expired before the download started* | The link outlived its fifteen minutes before storage answered. Retry the item, which asks for a new link. |
 | *…could not reach storage at …* | The n8n instance cannot reach Pipelex storage. Allow its host, which the message names. |
 | *…did not finish within … s* | The download ran out of time. Retry the item. |
+| *…broke off before the whole file arrived* | The connection to storage failed partway through the file. Retry the item. |
+| *n8n could not store "…" as binary data…* | Storage sent the file, but n8n's binary data store refused it, for instance because its disk is full. Check where n8n keeps binary data, then retry the item. |
 | *The credential's Base URL offers no files routes…* | The Base URL is not the hosted API, or is a backend that does not serve the files routes. |
 
 A refusal by your role starts with *"Your role in this organization does not allow this"*, as for a run (see [When your role in the organization refuses the run](usage.md#when-your-role-in-the-organization-refuses-the-run)). With **Continue On Fail** on, a failed item becomes an item holding the error, as for the run operations.
