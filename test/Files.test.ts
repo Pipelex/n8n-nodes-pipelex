@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { Readable } from 'node:stream';
 
 import type {
 	IBinaryData,
@@ -31,10 +32,12 @@ import {
 	fileSearchText,
 	fileSummaryOf,
 	filesRefusalMessage,
+	isBodyStream,
 	namesMissingResource,
 	readFileLink,
 	readFileListFilters,
 	readFilePage,
+	readStreamPrefix,
 	sameFileName,
 	storageDownloadRefusalMessage,
 	toInstant,
@@ -66,15 +69,35 @@ interface ContextOptions {
 }
 
 /**
- * n8n's `prepareBinaryData`, faked the way n8n-core behaves: the name is read as
- * a path (its directory split off, cut at a `?`), and the bytes kept as base64.
+ * A stream read to its end the way n8n-core's in-memory binary mode reads one
+ * (`streamToBuffer`): on `data` and `end`, failing on `error`. Like n8n's, it
+ * never settles for a stream destroyed without an error.
+ */
+async function readLikeN8n(stream: Readable): Promise<Buffer> {
+	return await new Promise<Buffer>((resolvePromise, reject) => {
+		const chunks: Buffer[] = [];
+		stream.on('data', (chunk: Buffer) => chunks.push(chunk));
+		stream.on('end', () => resolvePromise(Buffer.concat(chunks)));
+		stream.once('error', reject);
+	});
+}
+
+/**
+ * n8n's `prepareBinaryData`, faked the way n8n-core behaves: a stream is read to
+ * its end, the name is read as a path (its directory split off, cut at a `?`),
+ * the bytes kept as base64 and measured.
  */
 async function fakePrepareBinaryData(
-	bytes: Buffer,
+	body: Buffer | Readable,
 	filePath?: string,
 	mimeType?: string,
 ): Promise<IBinaryData> {
-	const binary: IBinaryData = { data: bytes.toString('base64'), mimeType: mimeType ?? 'text/plain' };
+	const bytes = Buffer.isBuffer(body) ? body : await readLikeN8n(body);
+	const binary: IBinaryData = {
+		data: bytes.toString('base64'),
+		mimeType: mimeType ?? 'text/plain',
+		bytes: bytes.length,
+	};
 	if (filePath) {
 		const path = filePath.split('?')[0];
 		const slash = path.lastIndexOf('/');
@@ -158,6 +181,11 @@ const linkFor = (file: FileSummary) => ({
 
 const PDF_BYTES = Buffer.from('%PDF-1.7 a team file');
 
+/** A response body as n8n hands it back for a `stream` request: a readable stream of these chunks. */
+function streamOf(...chunks: Buffer[]): Readable {
+	return Readable.from(chunks, { objectMode: false });
+}
+
 /**
  * The hosted plane, faked: list pages in order, file records by id, links, and
  * storage. With `searchable`, the list instead searches those rows as the
@@ -212,7 +240,7 @@ function hostedPlane(config: {
 		}
 		if (url.startsWith(STORAGE_ORIGIN)) {
 			if (config.storage) return config.storage(options);
-			return fullResponse(200, PDF_BYTES);
+			return fullResponse(200, streamOf(PDF_BYTES));
 		}
 		throw new Error(`unexpected request ${options.method ?? 'GET'} ${url}`);
 	};
@@ -660,6 +688,36 @@ describe('reading the files routes', () => {
 		expect(bodyBytes('abc').toString()).toBe('abc');
 		expect(bodyBytes(undefined)).toHaveLength(0);
 	});
+
+	it('tells a streamed body from bytes', () => {
+		expect(isBodyStream(streamOf(Buffer.from('abc')))).toBe(true);
+		for (const notAStream of [Buffer.from('abc'), 'abc', undefined, null, {}, { on: () => {} }]) {
+			expect(isBodyStream(notAStream), String(notAStream)).toBe(false);
+		}
+	});
+
+	it('reads the first bytes of a stream and destroys it there, or gives what arrived before it failed', async () => {
+		const long = streamOf(Buffer.from('abcd'), Buffer.from('efgh'), Buffer.from('ijkl'));
+		expect((await readStreamPrefix(long, 6)).toString()).toBe('abcdef');
+		expect(long.destroyed).toBe(true);
+
+		const short = streamOf(Buffer.from('ab'));
+		expect((await readStreamPrefix(short, 6)).toString()).toBe('ab');
+
+		let sent = false;
+		const failing = new Readable({
+			read() {
+				if (!sent) {
+					sent = true;
+					this.push(Buffer.from('<Error>'));
+				} else {
+					this.destroy(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }));
+				}
+			},
+		});
+		expect((await readStreamPrefix(failing, 1024)).toString()).toBe('<Error>');
+		expect(failing.destroyed).toBe(true);
+	});
 });
 
 // ── Get Many ────────────────────────────────────────────────────────────────
@@ -843,7 +901,7 @@ describe('File resource — Download by name', () => {
 		expect(Buffer.from(binary.data, 'base64').equals(PDF_BYTES)).toBe(true);
 		expect(binary.fileName).toBe('March invoice.pdf');
 		expect(binary.mimeType).toBe('application/pdf');
-		expect(prepareFn).toHaveBeenCalledWith(PDF_BYTES, 'March invoice.pdf', 'application/pdf');
+		expect(prepareFn).toHaveBeenCalledWith(expect.any(Readable), 'March invoice.pdf', 'application/pdf');
 
 		const calls = httpFn.mock.calls.map((call) => call[0] as HttpOptions);
 		expect(new URL(calls[0].url).searchParams.get('q')).toBe('March invoice.pdf');
@@ -852,7 +910,7 @@ describe('File resource — Download by name', () => {
 		expect(listQueries(httpFn)).toHaveLength(1);
 	});
 
-	it('reads storage with the link alone: no credential, no User-Agent, no redirect, the bytes as a buffer', async () => {
+	it('reads storage with the link alone: no credential, no User-Agent, no redirect, the body as a stream', async () => {
 		const file = fileRow(1, { name: 'a.pdf' });
 		const { ctx, httpFn } = makeContext({
 			operation: 'download',
@@ -868,7 +926,7 @@ describe('File resource — Download by name', () => {
 		expect(storageCall?.method).toBe('GET');
 		expect(storageCall?.url).toBe(linkFor(file).url);
 		expect(storageCall?.headers).toBeUndefined();
-		expect(storageCall?.encoding).toBe('arraybuffer');
+		expect(storageCall?.encoding).toBe('stream');
 		expect(storageCall?.disableFollowRedirect).toBe(true);
 		expect(storageCall?.abortSignal).toBeInstanceOf(AbortSignal);
 	});
@@ -1038,7 +1096,7 @@ describe('File resource — Download by name', () => {
 		expect(binary.fileName).not.toMatch(/[\\/]/);
 		expect(binary.directory).toBeUndefined();
 		expect(binary.fileExtension).toBe('pdf');
-		expect(prepareFn).toHaveBeenCalledWith(PDF_BYTES, '..-..-.ssh-authorized_keys.pdf', 'application/pdf');
+		expect(prepareFn).toHaveBeenCalledWith(expect.any(Readable), '..-..-.ssh-authorized_keys.pdf', 'application/pdf');
 		expect(items[0].json.name).toBe(traversal);
 	});
 
@@ -1210,8 +1268,10 @@ describe('File resource — Download failures', () => {
 			storage: () =>
 				fullResponse(
 					403,
-					Buffer.from(
-						`<?xml version="1.0"?><Error><Code>AccessDenied</Code><Message>Request has expired</Message><X-Amz-Expires>900</X-Amz-Expires><RequestId>1</RequestId><Signature>${SIGNATURE}</Signature></Error>`,
+					streamOf(
+						Buffer.from(
+							`<?xml version="1.0"?><Error><Code>AccessDenied</Code><Message>Request has expired</Message><X-Amz-Expires>900</X-Amz-Expires><RequestId>1</RequestId><Signature>${SIGNATURE}</Signature></Error>`,
+						),
 					),
 				),
 		});
@@ -1243,5 +1303,250 @@ describe('File resource — Download failures', () => {
 		expect(message).toBe(
 			`Pipelex refused to prepare the download of the file "a.pdf". ${ROLE_NOT_PERMITTED_MESSAGE} Your role, runner, cannot do this.`,
 		);
+	});
+});
+
+// ── Download: the streamed transfer ─────────────────────────────────────────
+
+describe('File resource — Download streams the file', () => {
+	const file = fileRow(1, { name: 'a.pdf' });
+	const onePage = { pages: [{ items: [file], next_cursor: null }] };
+
+	/**
+	 * A body that sends its first chunk, then waits for more that never comes, as
+	 * a stalled transfer does; `onStall` runs once the reader has the first chunk
+	 * and asks for the rest. It ignores every signal: only the node can end it.
+	 */
+	function stallingStream(first: Buffer, onStall: () => void): Readable {
+		let sent = false;
+		return new Readable({
+			read() {
+				if (sent) {
+					setImmediate(onStall);
+					return;
+				}
+				sent = true;
+				this.push(first);
+			},
+		});
+	}
+
+	/** Run a download that fails, and return its message, its description and the error's whole serialised form. */
+	async function failure(ctx: IExecuteFunctions): Promise<{ message: string; description: string; dump: string }> {
+		try {
+			await Pipelex.prototype.execute.call(ctx);
+		} catch (error) {
+			const { message, description } = error as Error & { description?: string };
+			const dump = JSON.stringify(error, Object.getOwnPropertyNames(error as object));
+			return { message, description: description ?? '', dump };
+		}
+		throw new Error('the download did not fail');
+	}
+
+	it('hands n8n the stream storage sends, not bytes gathered first, and keeps the binary metadata', async () => {
+		const chunks = [Buffer.from('%PDF-1.7 '), Buffer.from('a large '), Buffer.from('team file')];
+		const body = streamOf(...chunks);
+		const { ctx, prepareFn } = makeContext({
+			operation: 'download',
+			params: { fileName: 'a.pdf' },
+			httpImpl: hostedPlane({ ...onePage, storage: () => fullResponse(200, body, { 'content-type': 'application/pdf' }) }),
+		});
+
+		const [items] = await Pipelex.prototype.execute.call(ctx);
+
+		expect(prepareFn).toHaveBeenCalledTimes(1);
+		expect(prepareFn.mock.calls[0][0]).toBe(body);
+		const binary = items[0].binary?.data as IBinaryData;
+		const whole = Buffer.concat(chunks);
+		expect(Buffer.from(binary.data, 'base64').equals(whole)).toBe(true);
+		expect(binary).toMatchObject({
+			fileName: 'a.pdf',
+			fileExtension: 'pdf',
+			mimeType: 'application/pdf',
+			bytes: whole.length,
+		});
+		expect(binary.directory).toBeUndefined();
+		expect(items[0].json).toEqual(file);
+		// Read to its end, the stream holds no connection to storage any more.
+		expect(body.destroyed).toBe(true);
+	});
+
+	it('hands on a body n8n gave as bytes rather than as a stream', async () => {
+		const { ctx, prepareFn } = makeContext({
+			operation: 'download',
+			params: { fileName: 'a.pdf' },
+			httpImpl: hostedPlane({ ...onePage, storage: () => fullResponse(200, PDF_BYTES) }),
+		});
+
+		const [items] = await Pipelex.prototype.execute.call(ctx);
+
+		expect(prepareFn).toHaveBeenCalledWith(PDF_BYTES, 'a.pdf', 'application/pdf');
+		expect(Buffer.from((items[0].binary?.data as IBinaryData).data, 'base64').equals(PDF_BYTES)).toBe(true);
+	});
+
+	it('reads a refusal from the start of its body alone, stops reading there, and never shows the link', async () => {
+		// An endless refusal body: its error document first, then filler forever.
+		let pulled = 0;
+		const body = new Readable({
+			read() {
+				pulled += 1;
+				this.push(
+					pulled === 1
+						? Buffer.from(
+								`<?xml version="1.0"?><Error><Code>NoSuchKey</Code><Message>The specified key does not exist.</Message><Signature>${SIGNATURE}</Signature></Error>`,
+							)
+						: Buffer.alloc(16 * 1024, 0x20),
+				);
+			},
+		});
+		const { ctx, prepareFn } = makeContext({
+			operation: 'download',
+			params: { fileName: 'a.pdf' },
+			httpImpl: hostedPlane({ ...onePage, storage: () => fullResponse(404, body) }),
+		});
+
+		const { message, dump } = await failure(ctx);
+
+		expect(message).toBe(
+			`Storage refused the download of "a.pdf" (404 NoSuchKey): storage no longer holds the file's bytes, though Pipelex still lists the file. Retry the item; if it fails again, report it to Pipelex support.`,
+		);
+		expect(dump).not.toContain(SIGNATURE);
+		expect(dump).not.toContain(STORAGE_ORIGIN);
+		expect(body.destroyed).toBe(true);
+		expect(pulled).toBeLessThan(16);
+		expect(prepareFn).not.toHaveBeenCalled();
+	});
+
+	it('ends a transfer whose deadline passes mid-stream, destroying the stream itself', async () => {
+		// A stand-in for AbortSignal.timeout that the test fires itself.
+		const deadline = new AbortController();
+		const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => deadline.signal);
+		const cancel = new AbortController();
+		const body = stallingStream(Buffer.from('%PDF-1.7 the first part'), () => deadline.abort());
+		const { ctx, prepareFn } = makeContext({
+			operation: 'download',
+			params: { fileName: 'a.pdf' },
+			cancelSignal: cancel.signal,
+			httpImpl: hostedPlane({ ...onePage, storage: () => fullResponse(200, body) }),
+		});
+
+		const { message, description, dump } = await failure(ctx);
+
+		expect(timeoutSpy).toHaveBeenCalledWith(61_000);
+		expect(message).toBe('The download of "a.pdf" from storage did not finish within 61 s. Retry the item.');
+		expect(description).toBe('Network failure: AbortError ABORT_ERR.');
+		expect(body.destroyed).toBe(true);
+		// Destroyed with an error, so n8n's reader fails rather than waiting forever.
+		await expect(prepareFn.mock.results[0].value).rejects.toThrow('The download from storage was stopped.');
+		// The deadline, not the user, ended it.
+		expect(cancel.signal.aborted).toBe(false);
+		expect(dump).not.toContain(SIGNATURE);
+	});
+
+	it('stops waiting at the deadline even when what reads the stream never notices it was destroyed', async () => {
+		const deadline = new AbortController();
+		vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => deadline.signal);
+		const body = streamOf(PDF_BYTES);
+		const { ctx, prepareFn } = makeContext({
+			operation: 'download',
+			params: { fileName: 'a.pdf' },
+			httpImpl: hostedPlane({ ...onePage, storage: () => fullResponse(200, body) }),
+		});
+		prepareFn.mockImplementation(() => {
+			setImmediate(() => deadline.abort());
+			return new Promise<never>(() => {});
+		});
+
+		const { message } = await failure(ctx);
+
+		expect(message).toBe('The download of "a.pdf" from storage did not finish within 61 s. Retry the item.');
+		expect(body.destroyed).toBe(true);
+	});
+
+	it('stops the stream when the execution is cancelled mid-transfer, saying so without the link', async () => {
+		const cancel = new AbortController();
+		const bodies: Readable[] = [];
+		const { ctx } = makeContext({
+			operation: 'download',
+			params: { fileName: 'a.pdf' },
+			cancelSignal: cancel.signal,
+			httpImpl: hostedPlane({
+				...onePage,
+				storage: (options) => {
+					const body = stallingStream(Buffer.from('%PDF-1.7 the first part'), () => cancel.abort());
+					// As axios does on abort: the response stream errors with the
+					// request, link included, then is destroyed.
+					const signal = options.abortSignal as AbortSignal;
+					signal.addEventListener(
+						'abort',
+						() => {
+							if (body.destroyed) return;
+							const canceled = Object.assign(new Error(`canceled ${String(options.url)}`), {
+								name: 'CanceledError',
+								code: 'ERR_CANCELED',
+								config: { url: options.url },
+							});
+							body.emit('error', canceled);
+							body.destroy();
+						},
+						{ once: true },
+					);
+					bodies.push(body);
+					return fullResponse(200, body);
+				},
+			}),
+		});
+
+		const { message, dump } = await failure(ctx);
+
+		expect(message).toBe('The download of "a.pdf" was cancelled with the execution.');
+		expect(dump).not.toContain(SIGNATURE);
+		expect(bodies).toHaveLength(1);
+		expect(bodies[0].destroyed).toBe(true);
+	});
+
+	it('says a transfer that broke off midway should be retried, naming the failure by its code alone', async () => {
+		let sent = false;
+		const body = new Readable({
+			read() {
+				if (!sent) {
+					sent = true;
+					this.push(Buffer.from('%PDF-1.7 the first part'));
+					return;
+				}
+				this.destroy(
+					Object.assign(new Error(`aborted while reading ${linkFor(file).url}`), { code: 'ECONNRESET' }),
+				);
+			},
+		});
+		const { ctx } = makeContext({
+			operation: 'download',
+			params: { fileName: 'a.pdf' },
+			httpImpl: hostedPlane({ ...onePage, storage: () => fullResponse(200, body) }),
+		});
+
+		const { message, description, dump } = await failure(ctx);
+
+		expect(message).toBe('The download of "a.pdf" from storage broke off before the whole file arrived. Retry the item.');
+		expect(description).toBe('Network failure: Error ECONNRESET.');
+		expect(dump).not.toContain(SIGNATURE);
+	});
+
+	it("says when n8n's binary data store refuses the file, and releases the stream", async () => {
+		const body = streamOf(PDF_BYTES);
+		const { ctx, prepareFn } = makeContext({
+			operation: 'download',
+			params: { fileName: 'a.pdf' },
+			httpImpl: hostedPlane({ ...onePage, storage: () => fullResponse(200, body) }),
+		});
+		prepareFn.mockRejectedValue(
+			Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' }),
+		);
+
+		const { message, description } = await failure(ctx);
+
+		expect(message).toMatch(/^n8n could not store "a\.pdf" as binary data while downloading it\./);
+		expect(description).toBe('Failure: Error ENOSPC.');
+		expect(body.destroyed).toBe(true);
 	});
 });

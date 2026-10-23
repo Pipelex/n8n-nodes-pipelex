@@ -737,13 +737,64 @@ export async function requestFileLink(
 /** How much of storage's error body is read — where S3 writes its `<Code>` and `<Message>`. */
 const STORAGE_ERROR_BODY_MAX_BYTES = 16 * 1024;
 
-/** A response body as bytes: what n8n hands back for an `arraybuffer` request, whichever form it takes. */
+/** A response body or one of its chunks as bytes, whichever form n8n hands it in. */
 export function bodyBytes(body: unknown): Buffer {
 	if (Buffer.isBuffer(body)) return body;
 	if (body instanceof ArrayBuffer) return Buffer.from(new Uint8Array(body));
 	if (ArrayBuffer.isView(body)) return Buffer.from(body.buffer, body.byteOffset, body.byteLength);
 	if (typeof body === 'string') return Buffer.from(body, 'utf8');
 	return Buffer.alloc(0);
+}
+
+/**
+ * A response body n8n hands back as a stream, for a request sent with
+ * `encoding: 'stream'`: the form `prepareBinaryData` takes besides a `Buffer`.
+ * It is named through n8n's own signature because a community node may not
+ * import Node's `stream` module, not even for a type.
+ */
+export type BodyStream = Exclude<Parameters<IExecuteFunctions['helpers']['prepareBinaryData']>[0], Buffer>;
+
+/** Whether a response body is a readable stream rather than bytes. */
+export function isBodyStream(body: unknown): body is BodyStream {
+	if (body === null || typeof body !== 'object') return false;
+	const candidate = body as { pipe?: unknown; on?: unknown; destroy?: unknown };
+	return (
+		typeof candidate.pipe === 'function' &&
+		typeof candidate.on === 'function' &&
+		typeof candidate.destroy === 'function'
+	);
+}
+
+/**
+ * The first `maxBytes` of a stream, after which the stream is destroyed rather
+ * than read to its end: storage's error document opens its body, so nothing past
+ * it is ever held, however long the body. A stream that fails or is destroyed
+ * partway gives what it gave by then.
+ */
+export async function readStreamPrefix(stream: BodyStream, maxBytes: number): Promise<Buffer> {
+	const chunks: Buffer[] = [];
+	let length = 0;
+	try {
+		for await (const chunk of stream) {
+			const bytes = bodyBytes(chunk);
+			chunks.push(bytes);
+			length += bytes.length;
+			if (length >= maxBytes) break;
+		}
+	} catch {
+		// What arrived before the failure is all there is to read the refusal from.
+	} finally {
+		if (!stream.destroyed) stream.destroy();
+	}
+	return Buffer.concat(chunks).subarray(0, maxBytes);
+}
+
+/** The error a download's stream is destroyed with when its deadline passes or the execution is cancelled. */
+function stoppedDownloadError(): Error {
+	return Object.assign(new Error('The download from storage was stopped.'), {
+		name: 'AbortError',
+		code: 'ABORT_ERR',
+	});
 }
 
 /**
@@ -783,83 +834,160 @@ export function storageDownloadRefusalMessage(
 }
 
 /**
- * `GET` the file's bytes from storage with its link: no `Authorization` (the
- * signature in the URL is the credential, and a second one makes S3 refuse the
- * request) and no `User-Agent` (the client-identification spec leaves a request
- * to a presigned object-store URL alone). Redirects are refused, since a
- * presigned URL is valid only where it was signed.
+ * `GET` the file's bytes from storage with its link and hand them to `store` as
+ * the stream they arrive as, so the node never holds the whole file: no
+ * `Authorization` (the signature in the URL is the credential, and a second one
+ * makes S3 refuse the request) and no `User-Agent` (the client-identification
+ * spec leaves a request to a presigned object-store URL alone). Redirects are
+ * refused, since a presigned URL is valid only where it was signed. A body n8n
+ * hands back as bytes rather than a stream is handed on as bytes.
  *
  * The deadline is the upload's, a minute plus a second per started 128 KiB of
  * the file's recorded size, owned by the node as an `AbortSignal.timeout` linked
  * with the execution's cancel signal, for the reason `putToStorage` gives: it
- * bounds the whole exchange on every axios. Every failure is described without
- * the link, which is why a failed request is caught here and classified outside
- * the `catch`.
+ * bounds the whole exchange on every axios. With a stream the exchange outlasts
+ * the request: axios answers once storage's headers arrive, and its own
+ * `timeout` stops counting then, so the signal stays linked until `store` has
+ * read the body, and when it fires the node destroys the stream itself, whoever
+ * is reading it. A refusal (any status but a `2xx`) is read from the first
+ * {@link STORAGE_ERROR_BODY_MAX_BYTES} of its body alone.
+ *
+ * Every failure is described without the link, which is why a failed request or
+ * transfer is caught here and classified outside the `catch`: by the signal that
+ * fired, then by whether the stream itself failed. The stream's `error` is always
+ * listened to, since an unheard one is thrown, and axios logs it with its
+ * request, the link included.
  */
-export async function downloadFromLink(
+export async function downloadFromLink<T>(
 	ctx: IExecuteFunctions,
 	link: UsableFileLink,
 	file: FileSummary,
 	itemIndex: number,
-): Promise<Buffer> {
+	store: (body: Buffer | BodyStream) => Promise<T>,
+): Promise<T> {
 	const origin = storageOrigin(link.url) ?? 'storage';
 	const fileName = link.name ?? file.name;
+	const subject = `"${fileName}"`;
 	const cancelSignal = ctx.getExecutionCancelSignal();
 	const size = typeof file.size === 'number' && Number.isFinite(file.size) && file.size > 0 ? file.size : 0;
 	const limitMs = uploadTimeoutMs(size);
 	const deadline = AbortSignal.timeout(limitMs);
 	const linked = cancelSignal ? eitherSignal(cancelSignal, deadline) : undefined;
+	const signal = linked?.signal ?? deadline;
 
-	let response: IN8nHttpFullResponse | undefined;
-	let failure: unknown;
+	const cancelled = (): NodeOperationError =>
+		new NodeOperationError(ctx.getNode(), `The download of ${subject} was cancelled with the execution.`, {
+			itemIndex,
+		});
+	// The failure's names and codes go in the description, never the message:
+	// n8n replaces a message holding a Node error code with a generic sentence.
+	const outOfTime = (description: string): NodeOperationError =>
+		new NodeOperationError(
+			ctx.getNode(),
+			`The download of ${subject} from storage did not finish within ${Math.round(limitMs / 1000)} s. Retry the item.`,
+			{ itemIndex, description },
+		);
+
 	try {
-		response = (await ctx.helpers.httpRequest({
-			method: 'GET' as IHttpRequestMethods,
-			url: link.url,
-			encoding: 'arraybuffer',
-			returnFullResponse: true,
-			ignoreHttpStatusErrors: true,
-			disableFollowRedirect: true,
-			abortSignal: linked?.signal ?? deadline,
-		})) as IN8nHttpFullResponse;
-	} catch (error) {
-		failure = error;
+		let response: IN8nHttpFullResponse | undefined;
+		let failure: unknown;
+		try {
+			response = (await ctx.helpers.httpRequest({
+				method: 'GET' as IHttpRequestMethods,
+				url: link.url,
+				encoding: 'stream',
+				returnFullResponse: true,
+				ignoreHttpStatusErrors: true,
+				disableFollowRedirect: true,
+				abortSignal: signal,
+			})) as IN8nHttpFullResponse;
+		} catch (error) {
+			failure = error;
+		}
+
+		if (response === undefined) {
+			if (cancelSignal?.aborted) throw cancelled();
+			const description = `Network failure: ${describeNetworkFailure(failure)}.`;
+			if (deadline.aborted || isTimeoutFailure(failure)) throw outOfTime(description);
+			throw new NodeOperationError(
+				ctx.getNode(),
+				`The download of ${subject} could not reach storage at ${origin}. A file comes from storage directly, not through the Pipelex API, so this n8n instance must be able to reach ${origin}.`,
+				{ itemIndex, description },
+			);
+		}
+
+		const statusCode = response.statusCode;
+		const body: unknown = response.body;
+		const stream = isBodyStream(body) ? body : undefined;
+		let streamFailure: unknown;
+		const onStreamError = (error: unknown): void => {
+			if (streamFailure === undefined) streamFailure = error ?? stoppedDownloadError();
+		};
+		// Settles only when the signal fires, so the node stops waiting on `store`
+		// then even if what reads the stream never notices it was destroyed.
+		let rejectStopped: (error: Error) => void = () => {};
+		const stopped = new Promise<never>((_resolve, reject) => {
+			rejectStopped = reject;
+		});
+		// A refusal's read is not raced, so `stopped` may reject with no one waiting.
+		stopped.catch(() => {});
+		const stop = (): void => {
+			if (stream && !stream.destroyed) stream.destroy(stoppedDownloadError());
+			rejectStopped(stoppedDownloadError());
+		};
+		stream?.on('error', onStreamError);
+		signal.addEventListener('abort', stop, { once: true });
+		if (signal.aborted) stop();
+		try {
+			if (statusCode < 200 || statusCode >= 300) {
+				const prefix = stream
+					? await readStreamPrefix(stream, STORAGE_ERROR_BODY_MAX_BYTES)
+					: bodyBytes(body).subarray(0, STORAGE_ERROR_BODY_MAX_BYTES);
+				if (cancelSignal?.aborted) throw cancelled();
+				// A refusal cut short by the deadline or the network is still read
+				// from its status and whatever of its error document arrived.
+				const refusal = parseStorageError(prefix.toString('utf8'));
+				throw new NodeApiError(
+					ctx.getNode(),
+					{ storage_status: statusCode, storage_error: refusal.code ?? null } as JsonObject,
+					{
+						message: storageDownloadRefusalMessage(statusCode, refusal, fileName),
+						httpCode: String(statusCode),
+						itemIndex,
+					},
+				);
+			}
+
+			try {
+				return await Promise.race([store(stream ?? bodyBytes(body)), stopped]);
+			} catch (error) {
+				if (cancelSignal?.aborted) throw cancelled();
+				if (deadline.aborted) {
+					throw outOfTime(`Network failure: ${describeNetworkFailure(streamFailure ?? error)}.`);
+				}
+				if (streamFailure !== undefined) {
+					throw new NodeOperationError(
+						ctx.getNode(),
+						`The download of ${subject} from storage broke off before the whole file arrived. Retry the item.`,
+						{ itemIndex, description: `Network failure: ${describeNetworkFailure(streamFailure)}.` },
+					);
+				}
+				// The stream did not fail, so n8n could not keep what it read: its
+				// binary data store refused the file.
+				throw new NodeOperationError(
+					ctx.getNode(),
+					`n8n could not store ${subject} as binary data while downloading it. Check the storage n8n keeps binary data in (its binary data mode, and the space left there), then retry the item.`,
+					{ itemIndex, description: `Failure: ${describeNetworkFailure(error)}.` },
+				);
+			}
+		} finally {
+			signal.removeEventListener('abort', stop);
+			// A body not read to its end still holds its connection to storage.
+			if (stream && !stream.destroyed) stream.destroy();
+		}
 	} finally {
 		linked?.unlink();
 	}
-
-	const subject = `"${fileName}"`;
-	if (response === undefined) {
-		if (cancelSignal?.aborted) {
-			throw new NodeOperationError(
-				ctx.getNode(),
-				`The download of ${subject} was cancelled with the execution.`,
-				{ itemIndex },
-			);
-		}
-		// The failure's names and codes go in the description, never the message:
-		// n8n replaces a message holding a Node error code with a generic sentence.
-		const description = `Network failure: ${describeNetworkFailure(failure)}.`;
-		const message =
-			deadline.aborted || isTimeoutFailure(failure)
-				? `The download of ${subject} from storage did not finish within ${Math.round(limitMs / 1000)} s. Retry the item.`
-				: `The download of ${subject} could not reach storage at ${origin}. A file comes from storage directly, not through the Pipelex API, so this n8n instance must be able to reach ${origin}.`;
-		throw new NodeOperationError(ctx.getNode(), message, { itemIndex, description });
-	}
-
-	const statusCode = response.statusCode;
-	const bytes = bodyBytes(response.body);
-	if (statusCode >= 200 && statusCode < 300) return bytes;
-	const refusal = parseStorageError(bytes.subarray(0, STORAGE_ERROR_BODY_MAX_BYTES).toString('utf8'));
-	throw new NodeApiError(
-		ctx.getNode(),
-		{ storage_status: statusCode, storage_error: refusal.code ?? null } as JsonObject,
-		{
-			message: storageDownloadRefusalMessage(statusCode, refusal, fileName),
-			httpCode: String(statusCode),
-			itemIndex,
-		},
-	);
 }
 
 /** The extension of a file name, the text after its last dot, or undefined when it has none. */
@@ -907,9 +1035,10 @@ export function binaryFileNameOf(name: string): string {
 /**
  * Download: one of the organization's files as n8n binary data, its list row as
  * the item's JSON. The file is found by its name ({@link findFileByName}) or by
- * its ID ({@link requestFileSummary}), linked, read from storage, and stored in
- * the output binary field under the name the link was signed for, made safe as
- * a file name ({@link binaryFileNameOf}); the item's JSON keeps the whole name.
+ * its ID ({@link requestFileSummary}), linked, streamed from storage into n8n's
+ * binary data ({@link downloadFromLink}), and put in the output binary field
+ * under the name the link was signed for, made safe as a file name
+ * ({@link binaryFileNameOf}); the item's JSON keeps the whole name.
  */
 export async function downloadFile(
 	ctx: IExecuteFunctions,
@@ -969,10 +1098,20 @@ export async function downloadFile(
 	}
 
 	const link = await requestFileLink(ctx, conn, file, itemIndex);
-	const bytes = await downloadFromLink(ctx, link, file, itemIndex);
 	const fileName = binaryFileNameOf(link.name ?? file.name);
 	const mediaType = link.mediaType ?? (file.media_type || undefined);
-	const binary = await ctx.helpers.prepareBinaryData(bytes, fileName, mediaType);
+	// n8n writes the stream into its binary data store as it arrives, and measures
+	// the file there. The name is always given, and never empty: n8n names a
+	// response stream given no name after the URL it was read from, which here is
+	// the link. The MIME type Pipelex recorded is given too; without one, n8n
+	// would read it from the name, then from storage's `Content-Type`.
+	const binary = await downloadFromLink(
+		ctx,
+		link,
+		file,
+		itemIndex,
+		async (body) => await ctx.helpers.prepareBinaryData(body, fileName, mediaType),
+	);
 	// n8n reads the name it is given as a path, keeping what follows its last
 	// slash and cutting it at a `?`. The safe name holds neither, so n8n keeps it
 	// whole; it is set again, with no directory and its own extension, so the
