@@ -34,6 +34,7 @@ Here is some n8n documentation about [installing community nodes](https://docs.n
    - Provide a `Pipe Code`, inline `MTHDS Bundles`, or a stored `Method ID`
    - Set `Inputs` as a JSON object matching your pipeline's expected inputs
    - Feed a file from an earlier node (a Gmail attachment, a Drive download) into a `Document` or `Image` input with `Binary Inputs` — see [Files from earlier nodes](./usage.md#files-from-earlier-nodes-binary-inputs)
+   - To read your organization's files instead of running a method, set **Resource** to **File**: `Get Many` lists them and `Download` fetches one by its name or ID — see [Team Files](./team-files.md)
 
 4. **Copy paste an example from the [Examples](./examples.md) page**
 

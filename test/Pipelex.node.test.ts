@@ -996,12 +996,15 @@ describe('Pipelex node — legacy `execute` operation value (published 0.0.x)', 
 	});
 
 	it('is hidden from the Operation dropdown (not offered to new workflows)', () => {
-		const operationProperty = new Pipelex().description.properties.find(
+		// Every resource has its own Operation selector; none of them offers it.
+		const operationProperties = new Pipelex().description.properties.filter(
 			(property) => property.name === 'operation',
 		);
-		const values = (operationProperty?.options ?? []).map(
-			(option) => (option as { value: string }).value,
+		expect(operationProperties.length).toBeGreaterThan(0);
+		const values = operationProperties.flatMap((property) =>
+			(property.options ?? []).map((option) => (option as { value: string }).value),
 		);
+		expect(values).toContain('startAndPoll');
 		expect(values).not.toContain('execute');
 	});
 });
@@ -1558,8 +1561,12 @@ describe('Pipelex node — operation surface (description sanity)', () => {
 		expect(methodId?.placeholder).toMatch(/@draft/);
 	});
 
-	it('offers the four operations in usage order, defaulting to Start & Wait for Result', () => {
-		const operationProperty = properties.find((p: INodeProperties) => p.name === 'operation');
+	it('offers the run operations in usage order under the Run resource, defaulting to Start & Wait for Result', () => {
+		const operationProperty = properties.find(
+			(p: INodeProperties) =>
+				p.name === 'operation' && (p.displayOptions?.show?.resource ?? []).includes('run'),
+		);
+		expect(operationProperty?.displayOptions?.show?.resource).toEqual(['run']);
 		expect(operationProperty?.default).toBe('startAndPoll');
 		const options = (operationProperty?.options ?? []) as Array<{ name: string; value: string }>;
 		expect(options.map((o) => o.value)).toEqual(['startAndPoll', 'start', 'poll', 'getResult']);

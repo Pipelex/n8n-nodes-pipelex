@@ -438,7 +438,7 @@ export type ResultOutcome =
  * consumer (it names internal feature flags), so it reads as a supporting fact
  * rather than the headline.
  */
-function withServerDetail(message: string, body: IDataObject): string {
+export function withServerDetail(message: string, body: IDataObject): string {
 	const detail = problemMessage(body);
 	return detail ? `${message} (Server: ${detail})` : message;
 }
@@ -928,7 +928,7 @@ export interface BinaryInputMapping {
 export const DEFAULT_BINARY_PROPERTY = 'data';
 
 /** A string, a number or a boolean as trimmed text; anything else as empty. */
-function scalarText(value: unknown): string {
+export function scalarText(value: unknown): string {
 	if (typeof value === 'string') return value.trim();
 	if (typeof value === 'number' || typeof value === 'boolean') return String(value);
 	return '';
@@ -1189,7 +1189,7 @@ export function readUploadGrant(body: unknown): UploadGrant | undefined {
 }
 
 /** The origin of a grant URL, or `undefined` when it is not one the node will send a file to. */
-function storageOrigin(url: string): string | undefined {
+export function storageOrigin(url: string): string | undefined {
 	let target: URL;
 	try {
 		target = new URL(url);
@@ -1339,7 +1339,7 @@ function xmlElementText(body: string, element: string): string | undefined {
 }
 
 /** A message whose own final period would double the one the sentence adds after it. */
-function withoutFinalPeriod(message: string): string {
+export function withoutFinalPeriod(message: string): string {
 	return message.replace(/\.\s*$/, '');
 }
 

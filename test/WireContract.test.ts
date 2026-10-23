@@ -24,7 +24,7 @@
  * the change, update the pin, note it in the changelog), or you made a typo.
  */
 
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import type { IExecuteFunctions } from 'n8n-workflow';
@@ -325,7 +325,19 @@ describe('n8n-workflow runtime surface', () => {
 		'sleep',
 	];
 
-	it.each(['nodes/Pipelex/Pipelex.node.ts', 'nodes/Pipelex/GenericFunctions.ts'])(
+	// Every module of the node, so a new one is held to the list without being named here.
+	const NODE_MODULES = readdirSync(resolve('nodes/Pipelex'))
+		.filter((name) => name.endsWith('.ts'))
+		.sort()
+		.map((name) => `nodes/Pipelex/${name}`);
+
+	it('reads every module of the node', () => {
+		expect(NODE_MODULES).toContain('nodes/Pipelex/Pipelex.node.ts');
+		expect(NODE_MODULES).toContain('nodes/Pipelex/GenericFunctions.ts');
+		expect(NODE_MODULES).toContain('nodes/Pipelex/FileFunctions.ts');
+	});
+
+	it.each(NODE_MODULES)(
 		'%s imports only allowlisted values from n8n-workflow',
 		(relativePath) => {
 			const source = readFileSync(resolve(relativePath), 'utf8');

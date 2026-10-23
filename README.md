@@ -52,7 +52,7 @@ This node runs your pipelines through the **hosted Pipelex API's durable run lif
 
 > 🔑 **On the hosted API (`api.pipelex.com`), run access is gated for now.** It is granted per **account**, not per key — there is no key scope to set. The credential **Test** only checks that your token is valid, so a key on an account without run access tests green and then returns a clear `403` when you actually run a pipeline. Join the [waitlist](https://go.pipelex.com/waitlist) to be notified when self-serve run access opens up.
 
-> ℹ️ **Hosted-only:** the run-lifecycle polling routes (`/v1/runs/*`), the upload route behind **Binary Inputs** (`/v1/upload/grant`) and the `Method ID` field are hosted-API extensions, not part of the bare MTHDS Protocol — a bare runner does not implement them. To use your own backend, point the Base URL at a server exposing the same hosted surface (`/v1/start`, `/v1/runs/{pipeline_run_id}/results`, `/v1/auth/verify`, and `/v1/upload/grant` for binary inputs).
+> ℹ️ **Hosted-only:** the run-lifecycle polling routes (`/v1/runs/*`), the upload route behind **Binary Inputs** (`/v1/upload/grant`), the files routes behind the **File** resource (`/v1/files`) and the `Method ID` field are hosted-API extensions, not part of the bare MTHDS Protocol — a bare runner does not implement them. To use your own backend, point the Base URL at a server exposing the same hosted surface (`/v1/start`, `/v1/runs/{pipeline_run_id}/results`, `/v1/auth/verify`, `/v1/upload/grant` for binary inputs, and `/v1/files` with `/v1/files/{file_id}` and `/v1/files/links` for the File resource).
 
 > ℹ️ **Client identification:** every request to the API, the credential test included, carries `User-Agent: n8n-nodes-pipelex/<package version>`, following the Pipelex client-identification spec, `conformance/specs/client-identification.md` in the `conformance` repository, which holds the cross-repo interface specs. See the [usage guide](docs/usage.md#client-identification-user-agent).
 
@@ -83,7 +83,7 @@ This node requires a **Pipelex API credential** to authenticate with your Pipele
 
 ## Node Configuration
 
-The Pipelex node has one **Operation** selector with four operations, mirroring the mthds-js client surface (`start` / `waitForResult` / `getRunResult` — SDK conveniences over the MTHDS Protocol routes):
+The Pipelex node has a **Resource** selector: **Run** (the default) runs your methods, and **File** reads your organization's files ([below](#file-resource-your-organizations-files)). The Run resource's **Operation** selector mirrors the mthds-js client surface (`start` / `waitForResult` / `getRunResult` — SDK conveniences over the MTHDS Protocol routes):
 
 | Operation | What it does | Endpoint | Returns |
 |---|---|---|---|
@@ -121,7 +121,18 @@ The Pipelex node has one **Operation** selector with four operations, mirroring 
 
 **Note:** name the method exactly one way — a `Method ID`, **or** an inline method (`Define Method Inline` + `MTHDS Bundles`). Setting both is an error. Learn more about the Pipelex API [here](https://docs.pipelex.com/pages/api/).
 
-**No "Custom API Call" entry:** n8n injects that raw-HTTP operation into nodes whose credential declares a generic `authenticate` block. This node's credential doesn't (the node builds its `Authorization` header itself), so the dropdown contains only the four curated operations above.
+**No "Custom API Call" entry:** n8n injects that raw-HTTP operation into nodes whose credential declares a generic `authenticate` block. This node's credential doesn't (the node builds its `Authorization` header itself), so the dropdown contains only the curated operations above and below.
+
+### File resource: your organization's files
+
+Set **Resource** to **File** to read the files your organization holds in Pipelex — members' uploads, the build assistant's test files and the final outputs of runs, the list the app's Files page shows:
+
+| Operation | What it does | Endpoints | Returns |
+|---|---|---|---|
+| **Download** (default) | Fetches one file's bytes into a binary field (`data` by default), found by its **Name** (compared ignoring case; **If Several Files Have This Name** picks the newest or fails the item) or by its **ID**. The bytes come from Pipelex storage through a fresh fifteen-minute link the node never outputs, so the n8n instance must reach storage. | `GET /v1/files` or `GET /v1/files/{file_id}`, then `POST /v1/files/links` | The file's row as JSON, its bytes as binary |
+| **Get Many** | Lists the files newest first, one item per file, with **Return All** or a **Limit** (default 50) and the platform's filters: search, kind, format, media type, creator, method, run and creation dates. | `GET /v1/files` (paged) | `{ file_id, uri, name, media_type, format, size, kind, origin, created_at, created_by }` per file |
+
+See [Team Files](docs/team-files.md) for the filters, the name matching and the errors.
 
 ---
 

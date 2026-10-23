@@ -2,7 +2,7 @@
 
 ## Operations
 
-The Pipelex node has one **Operation** selector with four operations, mirroring the mthds-js client surface (`start` / `waitForResult` / `getRunResult`):
+The Pipelex node has a **Resource** selector. **Run**, the default, runs your methods with the operations below, which mirror the mthds-js client surface (`start` / `waitForResult` / `getRunResult`). **File** lists your organization's files and downloads one by its name or ID, and has a page of its own: [Team Files](team-files.md).
 
 | Operation | What it does | Endpoint |
 |---|---|---|
@@ -21,7 +21,7 @@ Both start operations carry an `Idempotency-Key` derived from the n8n execution,
 
 > ℹ️ **Upgrading from 0.0.x?** The old `execute` operation value ("Execute Pipeline") still executes as a hidden alias of **Start & Wait for Result** — saved workflows keep running without edits. And there is no more injected **Custom API Call** entry in the dropdown: the credential no longer declares a generic `authenticate` block (the node sends its own `Authorization` header), which is the trigger n8n uses to inject that raw-HTTP escape hatch.
 
-> ℹ️ **Hosted-only:** the run-lifecycle polling routes (`/v1/runs/*`), the upload route behind **Binary Inputs** (`/v1/upload/grant`) and the `Method ID` field, with its version suffixes, are hosted-API extensions, not part of the bare MTHDS Protocol — a bare runner does not implement them.
+> ℹ️ **Hosted-only:** the run-lifecycle polling routes (`/v1/runs/*`), the upload route behind **Binary Inputs** (`/v1/upload/grant`), the files routes behind the **File** resource (`/v1/files`) and the `Method ID` field, with its version suffixes, are hosted-API extensions, not part of the bare MTHDS Protocol — a bare runner does not implement them.
 
 ## Credential: Base URL
 
@@ -38,7 +38,7 @@ The credential test hits `GET <Base URL>/v1/auth/verify` to verify both reachabi
 
 ## Client identification (`User-Agent`)
 
-Every request the node sends to the Pipelex API — the upload grant for a binary input, the start, the result polls, the failed-run status read and the credential test — carries `User-Agent: n8n-nodes-pipelex/<package version>` (for example `n8n-nodes-pipelex/0.2.1`), so the platform can tell traffic from n8n apart from the web app, the SDKs or a hand-written call. The value is a single product token because a community node cannot read the n8n version it runs in. It is self-declared and used only for analytics and diagnostics, never for authorization or rate limits. The one request that does not go to the Pipelex API, a binary input's upload to storage, keeps n8n's own `User-Agent`, as the spec asks for a presigned object-store URL. The convention every first-party Pipelex client follows is the client-identification spec, `conformance/specs/client-identification.md` in the `conformance` repository, which holds the cross-repo interface specs.
+Every request the node sends to the Pipelex API — the upload grant for a binary input, the start, the result polls, the failed-run status read, the File resource's list, file and link reads, and the credential test — carries `User-Agent: n8n-nodes-pipelex/<package version>` (for example `n8n-nodes-pipelex/0.2.1`), so the platform can tell traffic from n8n apart from the web app, the SDKs or a hand-written call. The value is a single product token because a community node cannot read the n8n version it runs in. It is self-declared and used only for analytics and diagnostics, never for authorization or rate limits. The requests that do not go to the Pipelex API, a binary input's upload to storage and a downloaded file's read from storage, keep n8n's own `User-Agent`, as the spec asks for a presigned object-store URL. The convention every first-party Pipelex client follows is the client-identification spec, `conformance/specs/client-identification.md` in the `conformance` repository, which holds the cross-repo interface specs.
 
 ---
 
