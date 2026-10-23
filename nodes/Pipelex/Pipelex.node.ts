@@ -18,18 +18,25 @@ import {
 	RESULT_MID_WRITE_MESSAGE,
 	SERVICE_UNAVAILABLE_MESSAGE,
 	abortableSleep,
-	assembleRunSources,
+	base64FileEntry,
+	base64Length,
 	binaryByteSize,
 	binaryFieldNames,
 	binaryInputConflictError,
 	binarySizeError,
 	buildApiConnection,
 	buildStartBody,
+	defineFileEntry,
 	describeBinaryFile,
 	idempotencyKey,
+	inlineBudgetError,
 	mapResultResponse,
 	missingBinaryMessage,
+	missingMethodBinaryMessage,
+	planMethodFiles,
 	readBinaryInputMappings,
+	readMethodBinaryFileRows,
+	readMethodTextFileRows,
 	requestResult,
 	requestRunStatus,
 	requestStart,
@@ -38,13 +45,16 @@ import {
 	runFailureMessage,
 	runSourceError,
 	storedFileReferences,
+	textEntryBytes,
 	uploadBinaryFile,
 	withRunId,
 	type ApiConnection,
 	type BinaryInputMapping,
+	type MethodBinaryFile,
+	type MethodTextFile,
 	type ResultOutcome,
 } from './GenericFunctions';
-import type { HostedStartBody, StartAck, StoredFileInput } from './PipelexApiShapes';
+import type { HostedStartBody, MethodFiles, StartAck, StoredFileInput } from './PipelexApiShapes';
 import { storedUploadKey, storedUploads } from './StoredUploads';
 
 // Polling defaults. Max Wait caps how long a polling operation blocks the n8n
@@ -102,7 +112,8 @@ function rethrowOpError(ctx: IExecuteFunctions, error: unknown, itemIndex: numbe
 }
 
 /**
- * Read the `MTHDS Bundles` collection into the `mthds_contents` array.
+ * Read the `MTHDS Bundles` collection into the pasted bundles' texts, which
+ * travel as text entries of the method's `files` (see `planMethodFiles`).
  *
  * Accepts BOTH shapes on purpose. The field is a `fixedCollection` (so it matches
  * `Python Files` visually), which stores `{ bundle: [{ content }] }` — but a
@@ -134,55 +145,28 @@ function readMthdsContents(raw: unknown): string[] {
 }
 
 /**
- * Read a file fixedCollection into the `{ relativePath: text }` map the `files`
- * run source takes. Entries with a blank path are dropped (the UI
- * persists a row as soon as the add button is clicked); a blank CONTENT is kept —
- * an empty `requirements.txt` or `__init__.py` is a legitimate bundle member.
- *
- * Contents are coerced to text rather than forwarded verbatim: `getNodeParameter`
- * is `unknown` because an expression can resolve to anything, and a non-string
- * would leave the node and come back as an opaque server 422 instead of a local,
- * item-scoped error.
+ * Read the `Method Files` rows (internal name `pythonFiles`, kept so a saved
+ * workflow keeps its rows); see `readMethodTextFileRows`.
  */
-function readFileCollection(
-	ctx: IExecuteFunctions,
-	paramName: string,
-	itemIndex: number,
-): Record<string, string> {
-	const collection = ctx.getNodeParameter(paramName, itemIndex, {}) as {
-		file?: Array<{ path?: unknown; content?: unknown }>;
-	};
-	const files: Record<string, string> = {};
-	for (const entry of collection.file ?? []) {
-		const path = typeof entry.path === 'string' ? entry.path.trim() : '';
-		if (!path) continue;
-		// Checked BEFORE assigning: `files[path] = …` is last-write-wins, so a
-		// repeated path silently dropped a file and shipped a bundle the author
-		// never configured — the method would then reference a file that is not
-		// there, failing far from the cause.
-		if (Object.prototype.hasOwnProperty.call(files, path)) {
-			throw new NodeOperationError(
-				ctx.getNode(),
-				`Bundle path "${path}" is listed more than once — each path may appear only once. Rename one of the entries or remove the duplicate.`,
-				{ itemIndex },
-			);
-		}
-		const content = entry.content;
-		if (content === undefined || content === null) {
-			files[path] = '';
-		} else if (typeof content === 'string') {
-			files[path] = content;
-		} else if (typeof content === 'number' || typeof content === 'boolean') {
-			files[path] = String(content);
-		} else {
-			throw new NodeOperationError(
-				ctx.getNode(),
-				`The content of bundle file "${path}" must be text, but the expression resolved to ${Array.isArray(content) ? 'an array' : typeof content}. Convert it to a string first.`,
-				{ itemIndex },
-			);
-		}
+function readTextFileRows(ctx: IExecuteFunctions, itemIndex: number): MethodTextFile[] {
+	const { files, error } = readMethodTextFileRows(
+		ctx.getNodeParameter('pythonFiles', itemIndex, {}),
+	);
+	if (error) {
+		throw new NodeOperationError(ctx.getNode(), error, { itemIndex });
 	}
 	return files;
+}
+
+/** Read the `Method Binary Files` rows; see `readMethodBinaryFileRows`. */
+function readBinaryFileRows(ctx: IExecuteFunctions, itemIndex: number): MethodBinaryFile[] {
+	const { rows, error } = readMethodBinaryFileRows(
+		ctx.getNodeParameter('methodBinaryFiles', itemIndex, {}),
+	);
+	if (error) {
+		throw new NodeOperationError(ctx.getNode(), error, { itemIndex });
+	}
+	return rows;
 }
 
 /** A `Binary Inputs` row resolved on the item: the row, and n8n's description of its file. */
@@ -212,6 +196,29 @@ function resolveBinary(
 }
 
 /**
+ * n8n's description of a binary field a row reads, or an item-scoped error
+ * when the item has no such field: `missingMessage` words it for the row, given
+ * the binary fields the item does carry. Shared by `Binary Inputs` and
+ * `Method Binary Files`.
+ */
+function requireBinary(
+	ctx: IExecuteFunctions,
+	itemIndex: number,
+	binaryPropertyName: string,
+	missingMessage: (available: string[]) => string,
+): IBinaryData {
+	const binaryData = resolveBinary(ctx, itemIndex, binaryPropertyName);
+	if (!binaryData) {
+		throw new NodeOperationError(
+			ctx.getNode(),
+			missingMessage(binaryFieldNames(ctx.getInputData()[itemIndex])),
+			{ itemIndex },
+		);
+	}
+	return binaryData;
+}
+
+/**
  * Read + validate the `Binary Inputs` rows for one item: every row names a
  * distinct input, none of them is also set in the JSON `Inputs`, and the item
  * carries every binary field a row reads. Synchronous and network-free, so a
@@ -233,19 +240,91 @@ function readBinaryInputs(
 		throw new NodeOperationError(ctx.getNode(), conflict, { itemIndex });
 	}
 
-	const sources: BinarySource[] = [];
-	for (const mapping of mappings) {
-		const binaryData = resolveBinary(ctx, itemIndex, mapping.binaryPropertyName);
-		if (!binaryData) {
-			throw new NodeOperationError(
-				ctx.getNode(),
-				missingBinaryMessage(mapping, binaryFieldNames(ctx.getInputData()[itemIndex])),
-				{ itemIndex },
-			);
+	return mappings.map((mapping) => ({
+		mapping,
+		binaryData: requireBinary(ctx, itemIndex, mapping.binaryPropertyName, (available) =>
+			missingBinaryMessage(mapping, available),
+		),
+	}));
+}
+
+/** A `Method Binary Files` row resolved on the item: the row, and n8n's description of its file. */
+interface MethodBinarySource {
+	file: MethodBinaryFile;
+	binaryData: IBinaryData;
+}
+
+/**
+ * Resolve every `Method Binary Files` row on the item, so a missing field fails
+ * the item before any file is loaded or anything is sent.
+ */
+function resolveMethodBinaryFiles(
+	ctx: IExecuteFunctions,
+	itemIndex: number,
+	files: MethodBinaryFile[],
+): MethodBinarySource[] {
+	return files.map((file) => ({
+		file,
+		binaryData: requireBinary(ctx, itemIndex, file.binaryPropertyName, (available) =>
+			missingMethodBinaryMessage(file, available),
+		),
+	}));
+}
+
+/** n8n's reader of a binary's metadata, when this n8n has one (see `binaryByteSize`). */
+function binaryMetadataReader(
+	ctx: IExecuteFunctions,
+): ((binaryDataId: string) => Promise<{ fileSize: number }>) | undefined {
+	return typeof ctx.helpers.getBinaryMetadata === 'function'
+		? (binaryDataId: string) => ctx.helpers.getBinaryMetadata(binaryDataId)
+		: undefined;
+}
+
+/**
+ * The method's whole `files` map: the text entries the plan holds, then each
+ * binary file loaded through n8n's helper (which reads a file kept outside
+ * memory too) and added as its `{ base64 }` entry, at its path.
+ *
+ * The files are held to the node's inline budget (`inlineBudgetError`) twice.
+ * First from n8n's metadata, before any file is loaded, so a file that alone
+ * passes it, or files that together pass it, fail the item with nothing read.
+ * Then from each file's real length, once it is loaded and before it is
+ * encoded, which also catches a file whose size the metadata did not give. The
+ * files are loaded one at a time, so the loop stops at the first that passes the
+ * budget, and the item never holds more than the budget allows.
+ */
+async function loadMethodFiles(
+	ctx: IExecuteFunctions,
+	itemIndex: number,
+	textEntries: MethodFiles,
+	sources: MethodBinarySource[],
+): Promise<MethodFiles> {
+	const textBytes = textEntryBytes(textEntries);
+	const assertWithinBudget = (file: MethodBinaryFile, size: number, total: number): void => {
+		const budgetError = inlineBudgetError(file, size, total);
+		if (budgetError) {
+			throw new NodeOperationError(ctx.getNode(), budgetError, { itemIndex });
 		}
-		sources.push({ mapping, binaryData });
+	};
+
+	const getMetadata = binaryMetadataReader(ctx);
+	let measured = textBytes;
+	for (const { file, binaryData } of sources) {
+		const size = await binaryByteSize(binaryData, getMetadata);
+		if (size === undefined) continue;
+		measured += base64Length(size);
+		assertWithinBudget(file, size, measured);
 	}
-	return sources;
+
+	const files: MethodFiles = { ...textEntries };
+	let loaded = textBytes;
+	for (const { file } of sources) {
+		const bytes = await ctx.helpers.getBinaryDataBuffer(itemIndex, file.binaryPropertyName);
+		loaded += base64Length(bytes.length);
+		assertWithinBudget(file, bytes.length, loaded);
+		defineFileEntry(files, file.path, base64FileEntry(bytes));
+	}
+	return files;
 }
 
 /** Refuse a file whose size the node does not send — see `binarySizeError`. */
@@ -321,10 +400,7 @@ async function storeBinaryInputs(
 	runIndex: number,
 	itemIndex: number,
 ): Promise<Record<string, StoredFileInput>> {
-	const getMetadata =
-		typeof ctx.helpers.getBinaryMetadata === 'function'
-			? (binaryDataId: string) => ctx.helpers.getBinaryMetadata(binaryDataId)
-			: undefined;
+	const getMetadata = binaryMetadataReader(ctx);
 	for (const source of sources) {
 		const size = await binaryByteSize(source.binaryData, getMetadata);
 		if (size !== undefined) assertBinarySize(ctx, source, size, itemIndex);
@@ -362,8 +438,17 @@ interface RunDefinition {
  * and map them to the snake_case `POST /v1/start` body. Run-source rules are
  * checked client-side so the errors are immediate and item-scoped rather than an
  * opaque server 422.
+ *
+ * A method defined inline becomes the `files` map: every field is read and
+ * checked first, the run source included, then the binary method files are
+ * measured against the node's budget and loaded into it, one at a time. Loading
+ * reads the item's own data and sends nothing, so a refused row never leaves a
+ * file stored anywhere.
  */
-function readRunDefinition(ctx: IExecuteFunctions, itemIndex: number): RunDefinition {
+async function readRunDefinition(
+	ctx: IExecuteFunctions,
+	itemIndex: number,
+): Promise<RunDefinition> {
 	// Trimmed so whitespace-only values fail the local required-source check
 	// instead of turning into a server-side 422 (and so stray whitespace in
 	// Method ID never reaches the server as a phantom run source).
@@ -411,15 +496,16 @@ function readRunDefinition(ctx: IExecuteFunctions, itemIndex: number): RunDefini
 		}
 	}
 
-	const mthdsContents: string[] = inlineMethod ? readMthdsContents(mthdsContentsRaw) : [];
-	const pythonFiles = inlineMethod ? readFileCollection(ctx, 'pythonFiles', itemIndex) : {};
+	const bundles: string[] = inlineMethod ? readMthdsContents(mthdsContentsRaw) : [];
+	const textFiles = inlineMethod ? readTextFileRows(ctx, itemIndex) : [];
+	const binaryFiles = inlineMethod ? readBinaryFileRows(ctx, itemIndex) : [];
 
 	// Either/or, enforced before anything else so the message is about the choice
 	// the user made rather than about wire fields. NOTE: the hosted API would
 	// ACCEPT both (it runs the inline method and records method_id as run-history
 	// linkage) — the node refuses it on purpose, so there is exactly one answer to
 	// "what is this node running?".
-	if (methodId && (mthdsContents.length > 0 || Object.keys(pythonFiles).length > 0)) {
+	if (methodId && (bundles.length > 0 || textFiles.length > 0 || binaryFiles.length > 0)) {
 		throw new NodeOperationError(
 			ctx.getNode(),
 			'Choose one: a stored method or an inline one. Either clear "Method ID", or turn off "Define Method Inline" (which also clears what it holds from the request).',
@@ -449,34 +535,38 @@ function readRunDefinition(ctx: IExecuteFunctions, itemIndex: number): RunDefini
 	}
 	const inputs = parsedInputs as Record<string, unknown>;
 
-	// With Python attached, the pasted method and its Python become one bundle —
-	// so "paste the method, attach the Python" works.
-	const assembled = assembleRunSources({
-		mthdsContents,
-		pythonFiles,
-	});
-	if (assembled.error) {
-		throw new NodeOperationError(ctx.getNode(), assembled.error, { itemIndex });
+	// The pasted bundles, the text files and the binary files become one tree, so
+	// "paste the method, attach its Python and its template" works.
+	const plan = planMethodFiles({ bundles, textFiles, binaryFiles });
+	if (plan.error) {
+		throw new NodeOperationError(ctx.getNode(), plan.error, { itemIndex });
 	}
 
 	const body = buildStartBody({
 		pipeCode,
 		methodId,
-		mthdsContents: assembled.mthdsContents,
 		inputs,
 		outputName,
 		outputMultiplicity,
 		dynamicOutputConceptRef,
-		files: assembled.files,
+		files: plan.textEntries,
 	});
 
-	// Validate the BUILT body: `buildStartBody` has already dropped empty
-	// encodings, so exclusivity is judged on what would actually be sent.
-	const sourceError = runSourceError(body);
+	// Validate the BUILT body, before any file is loaded: `buildStartBody` has
+	// already dropped an empty map, and the binary method files still to load
+	// count as files of the method. Judged before the Binary Inputs rows, so a
+	// node with nothing to run says so first.
+	const sourceError = runSourceError(body, plan.binaryFiles.length);
 	if (sourceError) {
 		throw new NodeOperationError(ctx.getNode(), sourceError, { itemIndex });
 	}
-	return { body, binaryInputs: readBinaryInputs(ctx, itemIndex, inputs) };
+	const methodBinaryFiles = resolveMethodBinaryFiles(ctx, itemIndex, plan.binaryFiles);
+	const binaryInputs = readBinaryInputs(ctx, itemIndex, inputs);
+
+	if (methodBinaryFiles.length > 0) {
+		body.files = await loadMethodFiles(ctx, itemIndex, plan.textEntries, methodBinaryFiles);
+	}
+	return { body, binaryInputs };
 }
 
 /** Read + require the `runId` field (Poll & Get Result / Get Run Result). */
@@ -724,7 +814,7 @@ async function startRun(
 	conn: ApiConnection,
 	itemIndex: number,
 ): Promise<StartAck> {
-	const { body, binaryInputs } = readRunDefinition(ctx, itemIndex);
+	const { body, binaryInputs } = await readRunDefinition(ctx, itemIndex);
 	const runIndex = runIndexOf(ctx, itemIndex);
 	let storedFiles: string[] = [];
 	if (binaryInputs.length > 0) {
@@ -738,6 +828,7 @@ async function startRun(
 		runIndex,
 		itemIndex,
 		storedFiles,
+		body.files,
 	);
 	const startAck = await requestStart(ctx, conn, body, idempotency, itemIndex);
 	if (!startAck.pipeline_run_id) {
@@ -974,18 +1065,17 @@ export class Pipelex implements INodeType {
 			},
 
 			// ── Pipeline definition (Start & Wait for Result / Start Pipeline) ────
-			// Field order: Method ID → the inline toggle → its pair (MTHDS Bundles,
-			// Python Files) → Inputs → Binary Inputs → Pipe Code → optional
-			// overrides. Run source rule (enforced at runtime, mirroring the
-			// server): at least one of Pipe Code / MTHDS Bundles / Method ID. There
-			// are exactly two ways to say what to run, and they are alternatives: a
-			// stored Method ID, or the method pasted inline (MTHDS Bundles + Python
-			// Files). The hosted API would accept a method_id beside an inline
-			// source as run-history linkage, but the node refuses the pair (see
-			// `readRunDefinition`). The API also accepts a base64-zip bundle and
-			// arbitrary bundle files; both are deliberately NOT exposed — they were
-			// a third and fourth run source in the editor for no user-visible gain.
-			// See `assembleRunSources` for how the inline pair is sent as one bundle.
+			// Field order: Method ID → the inline toggle → what it holds (MTHDS
+			// Bundles, Method Files, Method Binary Files) → Inputs → Binary Inputs →
+			// Pipe Code → optional overrides. Run source rule (enforced at runtime,
+			// mirroring the server): at least one of Pipe Code / an inline method /
+			// Method ID. There are exactly two ways to say what to run, and they are
+			// alternatives: a stored Method ID, or the method defined inline. The
+			// hosted API would accept a method_id beside an inline source as
+			// run-history linkage, but the node refuses the pair (see
+			// `readRunDefinition`). An inline method travels as its tree, the MTHDS
+			// standard's `files` map: see `planMethodFiles` for how the three fields
+			// become one map, text entries and `{ base64 }` entries.
 			//
 			// The Method ID is a selector, sent as typed (only trimmed): a bare id
 			// runs the latest published version, `@<n>` a pinned version, `@draft`
@@ -998,17 +1088,17 @@ export class Pipelex implements INodeType {
 				default: '',
 				placeholder: 'e.g., mt_abc123 or mt_abc123@draft',
 				description:
-					'ID of a stored method to run (sent as method_id; hosted API only). The bare ID runs its latest published version, mt_abc123@3 runs version 3, and mt_abc123@draft runs its current draft. Leave it empty to define the method inline instead: the two are alternatives, not combinable.',
+					'ID of a stored method to run (sent as method_id; hosted API only), which carries its own files. The bare ID runs its latest published version, mt_abc123@3 runs version 3, and mt_abc123@draft runs its current draft. Leave it empty to define the method inline instead: the two are alternatives, not combinable.',
 				displayOptions: {
 					show: {
 						operation: START_OPERATIONS,
 					},
 				},
 			},
-			// The toggle that reveals the inline pair. Two ways to say what to run,
+			// The toggle that reveals the inline method. Two ways to say what to run,
 			// and they are mutually exclusive: a stored Method ID (default), or the
-			// method pasted inline together with its Python. Gating the pair behind a
-			// boolean keeps the closed state to a single field instead of three, and
+			// method defined inline together with its files. Gating its fields behind
+			// a boolean keeps the closed state to a single field instead of four, and
 			// makes the either/or visible in the UI rather than only in an error.
 			{
 				displayName: 'Define Method Inline',
@@ -1016,7 +1106,7 @@ export class Pipelex implements INodeType {
 				type: 'boolean',
 				default: false,
 				description:
-					'Whether to paste the method here instead of running a stored one. Turn on to supply the MTHDS bundle and any custom PipeFunc Python; leave off to run the method named by Method ID.',
+					'Whether to define the method here instead of running a stored one. Turn on to supply the MTHDS bundle and the files it carries, such as custom PipeFunc Python or a template; leave off to run the method named by Method ID.',
 				displayOptions: {
 					show: {
 						operation: START_OPERATIONS,
@@ -1027,8 +1117,8 @@ export class Pipelex implements INodeType {
 				displayName: 'MTHDS Bundles',
 				name: 'mthdsContents',
 				type: 'fixedCollection',
-				// A fixedCollection, matching Python Files — not a multi-value `string`.
-				// Both hold the halves of one inline method, so they must look like one
+				// A fixedCollection, matching Method Files — not a multi-value `string`.
+				// They hold the parts of one inline method, so they must look like one
 				// control: a multi-value string renders a wide full-width add-button
 				// while a fixedCollection renders the compact `+ Add …` row, and the two
 				// side by side read as unrelated widgets.
@@ -1038,7 +1128,7 @@ export class Pipelex implements INodeType {
 				},
 				default: {},
 				description:
-					'Your method, pasted inline (sent as mthds_contents) — one entry per bundle file. If the method uses custom PipeFunc Python, add it under Python Files and the two are shipped together.',
+					"Your method, pasted inline — one entry per bundle file, sent in the method's files as main.mthds, then bundle-2.mthds, and so on, at the method's root. Add the other files it carries under Method Files and Method Binary Files, and they are all sent together.",
 				displayOptions: {
 					show: {
 						operation: START_OPERATIONS,
@@ -1065,23 +1155,25 @@ export class Pipelex implements INodeType {
 					},
 				],
 			},
+			// The method's other files, as text. Named `pythonFiles` because it began as
+			// the PipeFunc Python field: the name is what a saved workflow stores, so it
+			// stays, while the label says what it holds now, any text file of the tree.
 			{
-				displayName: 'Python Files',
+				displayName: 'Method Files',
 				name: 'pythonFiles',
 				type: 'fixedCollection',
 				// `placeholder` is what labels a fixedCollection's add-button — NOT
 				// `typeOptions.multipleValueButtonText`, which only applies to simple
-				// multi-value types (the `MTHDS Bundles` string field above). Without
-				// it the button renders unlabelled and an empty collection is
-				// effectively invisible in the editor, which is exactly how this field
-				// went missing the first time.
-				placeholder: 'Add Python File',
+				// multi-value types. Without it the button renders unlabelled and an
+				// empty collection is effectively invisible in the editor, which is
+				// exactly how this field went missing the first time.
+				placeholder: 'Add Method File',
 				typeOptions: {
 					multipleValues: true,
 				},
 				default: {},
 				description:
-					'Custom PipeFunc Python for the method pasted above — the funcs/*.py and structures/*.py it needs, plus an optional requirements.txt. The node ships the method and its Python together as one bundle. Leave empty unless your method uses PipeFunc. Requires a sandbox-hosted runner (the hosted Pipelex API is; a bare self-hosted pipelex-api refuses custom Python).',
+					'The text files the method pasted above carries, each at its path from the method\'s root: the custom PipeFunc Python it imports (funcs/score.py), a requirements.txt, an HTML template, a README. Sent with the method as text. Custom Python requires a sandbox-hosted runner (the hosted Pipelex API is; a bare self-hosted pipelex-api refuses it).',
 				displayOptions: {
 					show: {
 						operation: START_OPERATIONS,
@@ -1100,7 +1192,7 @@ export class Pipelex implements INodeType {
 								default: '',
 								placeholder: 'e.g., funcs/score.py',
 								description:
-									'Path relative to the bundle root, using forward slashes. Must match what your method references.',
+									"Path from the method's root, using forward slashes, as the method names it: a PipeFunc's function_name funcs.score.compute is the file funcs/score.py",
 							},
 							{
 								displayName: 'Content',
@@ -1111,7 +1203,54 @@ export class Pipelex implements INodeType {
 								},
 								default: '',
 								placeholder: 'def score(text: str) -> float:\n    ...',
-								description: 'The Python source',
+								description: "The file's text",
+							},
+						],
+					},
+				],
+			},
+			// The method's files that arrive as n8n binary data — a Word template or a
+			// logo downloaded from Drive — each placed at a path of the tree and sent
+			// as a `{ base64 }` entry. The row mirrors Binary Inputs (a name, then the
+			// binary field, defaulting to `data`), which fills a method INPUT instead.
+			{
+				displayName: 'Method Binary Files',
+				name: 'methodBinaryFiles',
+				type: 'fixedCollection',
+				placeholder: 'Add Method Binary File',
+				typeOptions: {
+					multipleValues: true,
+				},
+				default: {},
+				description:
+					"Files of the method taken from the incoming item, such as a Word template or a logo downloaded from Google Drive, each placed at its path from the method's root and sent with the method in Base64. They belong to the method, as a step's template_file does; a file the method takes as an input goes under Binary Inputs instead. Up to 7 MiB in all: save a larger method to Pipelex and run it by Method ID.",
+				displayOptions: {
+					show: {
+						operation: START_OPERATIONS,
+						inlineMethod: [true],
+					},
+				},
+				options: [
+					{
+						displayName: 'File',
+						name: 'file',
+						values: [
+							{
+								displayName: 'Path',
+								name: 'path',
+								type: 'string',
+								default: '',
+								placeholder: 'e.g., templates/letterhead.docx',
+								description:
+									"Path from the method's root, using forward slashes, as the method names it: a template_file is read from the folder of the bundle that names it",
+							},
+							{
+								displayName: 'Input Binary Field',
+								name: 'binaryPropertyName',
+								type: 'string',
+								default: 'data',
+								description:
+									'The name of the input binary field containing the file. A Google Drive download puts it in data.',
 							},
 						],
 					},
@@ -1184,7 +1323,7 @@ export class Pipelex implements INodeType {
 				default: '',
 				placeholder: 'e.g., my-pipeline-code',
 				description:
-					'The code of the pipe to execute (registered on the server, or defined in the MTHDS Bundles)',
+					'The code of the pipe to execute (registered on the server, or defined in the inline method)',
 				displayOptions: {
 					show: {
 						operation: START_OPERATIONS,

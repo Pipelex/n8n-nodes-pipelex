@@ -104,10 +104,11 @@ The Pipelex node has a **Resource** selector: **Run** (the default) runs your me
 
 | Parameter | API Field | Description |
 |---|---|---|
-| **Method ID** | `method_id` | ID of a stored method to run (hosted API only), sent exactly as typed. `mt_abc123` runs its latest published version, `mt_abc123@3` runs version 3, and `mt_abc123@draft` runs its current draft; see [which version a Method ID runs](docs/usage.md#which-version-a-method-id-runs). It already carries its own Python. |
-| **Define Method Inline** | — | Toggle. Turn on to paste the method here instead of running a stored one; it reveals the two fields below. **Mutually exclusive with Method ID.** |
-| **MTHDS Bundles** | `mthds_contents` | Your method, pasted inline — one entry per bundle file. |
-| **Python Files** | `files` | Custom PipeFunc Python for the pasted method (`funcs/*.py`, `structures/*.py`, `requirements.txt`). Shipped together with the bundle as one method bundle; requires a sandbox-hosted runner. |
+| **Method ID** | `method_id` | ID of a stored method to run (hosted API only), sent exactly as typed. `mt_abc123` runs its latest published version, `mt_abc123@3` runs version 3, and `mt_abc123@draft` runs its current draft; see [which version a Method ID runs](docs/usage.md#which-version-a-method-id-runs). It already carries its own files, its Python and templates included. |
+| **Define Method Inline** | — | Toggle. Turn on to define the method here instead of running a stored one; it reveals the three fields below, which the node sends together as the method's tree. **Mutually exclusive with Method ID.** |
+| **MTHDS Bundles** | `files` | Your method, pasted inline — one entry per bundle file, sent as `main.mthds`, then `bundle-2.mthds`, … at the method's root. |
+| **Method Files** | `files` | Rows of **Path** + **Content**: the text files the method carries, each at its path from the method's root, such as custom PipeFunc Python (`funcs/score.py`), `requirements.txt` or an HTML template. Custom Python requires a sandbox-hosted runner. |
+| **Method Binary Files** | `files` | Rows of **Path** + **Input Binary Field** (default `data`): each places a file from the incoming item, such as a Word template downloaded from Drive, in the method at that path, sent in Base64. See [the files of an inline method](docs/usage.md#the-files-of-an-inline-method). |
 | **Inputs** | `inputs` | JSON object whose keys match your pipeline's expected inputs. Defaults to `{}`. |
 | **Binary Inputs** | `inputs` | Rows of **Input Name** + **Input Binary Field** (default `data`): each fills a `Document` or `Image` input with a file from the incoming item, such as a Gmail attachment (`attachment_0`) or a Drive download. The node uploads the file to Pipelex storage and passes its `pipelex-storage://` reference, with the file name and MIME type. An input set here must not also be set in Inputs. See the [usage guide](docs/usage.md#files-from-earlier-nodes-binary-inputs). |
 | **Pipe Code** | `pipe_code` | Which pipe to run. Empty = the method's `main_pipe`. |

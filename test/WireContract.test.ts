@@ -32,8 +32,10 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	abortableSleep,
+	base64FileEntry,
 	buildStartBody,
 	mapResultResponse,
+	planMethodFiles,
 	problemMessage,
 	readUploadGrant,
 	requestUploadGrant,
@@ -50,7 +52,6 @@ describe('POST /v1/start — the exact body this node sends', () => {
 		const body = buildStartBody({
 			pipeCode: 'p',
 			methodId: 'm',
-			mthdsContents: ['bundle'],
 			inputs: { a: 1 },
 			outputName: 'out',
 			outputMultiplicity: '3',
@@ -63,11 +64,38 @@ describe('POST /v1/start — the exact body this node sends', () => {
 			'files',
 			'inputs',
 			'method_id',
-			'mthds_contents',
 			'output_multiplicity',
 			'output_name',
 			'pipe_code',
 		]);
+	});
+
+	it('sends a method only as files — never mthds_contents, bundle_b64 or resources', () => {
+		// The MTHDS Protocol's `files` replaced `mthds_contents`, and the hosted API
+		// retires it with `bundle_b64` and `resources`: a method travels as its tree
+		// alone. Pinned at the type, so none of them can come back as a field.
+		type Retired = 'mthds_contents' | 'bundle_b64' | 'resources';
+		type HasRetired = Extract<Retired, keyof HostedStartBody> extends never ? true : never;
+		const _absent: HasRetired = true;
+		expect(_absent).toBe(true);
+	});
+
+	it("carries each method file in one of the standard's inline forms: its text, or { base64 }", () => {
+		// The file entry of the MTHDS standard. The node sends no hash entry, since
+		// it never uploads a method file to a blob store first.
+		const plan = planMethodFiles({
+			bundles: ['domain = "d"'],
+			textFiles: [{ path: 'funcs/score.py', content: 'def score(): ...' }],
+			binaryFiles: [],
+		});
+		const files = { ...plan.textEntries, 'templates/letter.docx': base64FileEntry(Buffer.from('PK')) };
+		const body = buildStartBody({ files });
+		expect(body.files).toEqual({
+			'main.mthds': 'domain = "d"',
+			'funcs/score.py': 'def score(): ...',
+			'templates/letter.docx': { base64: 'UEs=' },
+		});
+		expect(Object.keys(base64FileEntry(Buffer.from('x')))).toEqual(['base64']);
 	});
 
 	it('spells the dynamic output override `_ref`, not `_code`', () => {
@@ -79,17 +107,9 @@ describe('POST /v1/start — the exact body this node sends', () => {
 		expect(body).not.toHaveProperty('dynamic_output_concept_code');
 	});
 
-	it('carries the assembled bundle under its wire name', () => {
+	it('carries the method under its wire name', () => {
 		const body = buildStartBody({ files: { 'main.mthds': 'x' } });
 		expect(Object.keys(body)).toEqual(['files']);
-	});
-
-	it('never sends bundle_b64 — the node exposes one way to supply a method', () => {
-		// The API accepts a base64-zip bundle; the node deliberately does not offer
-		// it. Pinned so it is not reintroduced as a third run source by accident.
-		type HasZip = 'bundle_b64' extends keyof HostedStartBody ? never : true;
-		const _absent: HasZip = true;
-		expect(_absent).toBe(true);
 	});
 
 	it('never sends pipeline_run_id — the hosted API 422s a client-supplied run id', () => {
@@ -98,7 +118,6 @@ describe('POST /v1/start — the exact body this node sends', () => {
 		const body = buildStartBody({
 			pipeCode: 'p',
 			methodId: 'm',
-			mthdsContents: ['b'],
 			inputs: {},
 			outputName: 'o',
 			outputMultiplicity: '1',
@@ -271,25 +290,25 @@ describe('GET /v1/runs/{id}/results — the response contract this node reads', 
 
 describe('run-source rules — replicated from the MTHDS Protocol', () => {
 	it('pins which source combinations are legal', () => {
-		// Replicated from `assertExclusiveRunSources` + `hasBundlePayload`. The node
-		// must reject exactly what the server rejects; a divergence here means a
-		// user gets an opaque 422 instead of an immediate, item-scoped message.
+		// The protocol's `RunRequest` needs a `pipe_code` or `files`, and the hosted
+		// API adds `method_id`. The node must reject at least what the server
+		// rejects; a divergence here means a user gets an opaque 422 instead of an
+		// immediate, item-scoped message.
 		const legal: HostedStartBody[] = [
 			{ pipe_code: 'p' },
-			{ mthds_contents: ['b'] },
 			{ method_id: 'm' },
 			{ files: { 'a.mthds': 'x' } },
+			{ files: { 'a.mthds': 'x', 'logo.png': { base64: 'iVBORw==' } } },
 			{ method_id: 'm', pipe_code: 'p' },
 			{ pipe_code: 'p', files: { 'a.mthds': 'x' } },
 		];
 		const illegal: HostedStartBody[] = [
 			{},
-			{ mthds_contents: [] },
-			{ files: { 'a.mthds': 'x' }, mthds_contents: ['b'] },
+			// A tree holds at least one file: an empty map is no method.
+			{ files: {} },
 			// A stored method AND an inline one — the API would accept this and treat
 			// method_id as run-history linkage; the node refuses it so there is one
 			// unambiguous answer to what it runs.
-			{ method_id: 'm', mthds_contents: ['b'] },
 			{ method_id: 'm', files: { 'a.mthds': 'x' } },
 		];
 
