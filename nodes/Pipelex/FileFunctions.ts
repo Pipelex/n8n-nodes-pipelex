@@ -32,7 +32,6 @@ import {
 import {
 	apiHeaders,
 	describeNetworkFailure,
-	eitherSignal,
 	isTimeoutFailure,
 	parseStorageError,
 	roleRefusalMessage,
@@ -44,6 +43,14 @@ import {
 	type StorageRefusal,
 } from './GenericFunctions';
 import { uploadTimeoutMs } from './PipelexApiShapes';
+import {
+	bodyBytes,
+	guardBody,
+	readRefusalPrefix,
+	stoppedReadError,
+	storageReadDeadline,
+	type BodyStream,
+} from './StorageReads';
 
 // ── The File resource: the organization's files ─────────────────────────────
 //
@@ -734,68 +741,8 @@ export async function requestFileLink(
 	return answer.link;
 }
 
-/** How much of storage's error body is read — where S3 writes its `<Code>` and `<Message>`. */
-const STORAGE_ERROR_BODY_MAX_BYTES = 16 * 1024;
-
-/** A response body or one of its chunks as bytes, whichever form n8n hands it in. */
-export function bodyBytes(body: unknown): Buffer {
-	if (Buffer.isBuffer(body)) return body;
-	if (body instanceof ArrayBuffer) return Buffer.from(new Uint8Array(body));
-	if (ArrayBuffer.isView(body)) return Buffer.from(body.buffer, body.byteOffset, body.byteLength);
-	if (typeof body === 'string') return Buffer.from(body, 'utf8');
-	return Buffer.alloc(0);
-}
-
-/**
- * A response body n8n hands back as a stream, for a request sent with
- * `encoding: 'stream'`: the form `prepareBinaryData` takes besides a `Buffer`.
- * It is named through n8n's own signature because a community node may not
- * import Node's `stream` module, not even for a type.
- */
-export type BodyStream = Exclude<Parameters<IExecuteFunctions['helpers']['prepareBinaryData']>[0], Buffer>;
-
-/** Whether a response body is a readable stream rather than bytes. */
-export function isBodyStream(body: unknown): body is BodyStream {
-	if (body === null || typeof body !== 'object') return false;
-	const candidate = body as { pipe?: unknown; on?: unknown; destroy?: unknown };
-	return (
-		typeof candidate.pipe === 'function' &&
-		typeof candidate.on === 'function' &&
-		typeof candidate.destroy === 'function'
-	);
-}
-
-/**
- * The first `maxBytes` of a stream, after which the stream is destroyed rather
- * than read to its end: storage's error document opens its body, so nothing past
- * it is ever held, however long the body. A stream that fails or is destroyed
- * partway gives what it gave by then.
- */
-export async function readStreamPrefix(stream: BodyStream, maxBytes: number): Promise<Buffer> {
-	const chunks: Buffer[] = [];
-	let length = 0;
-	try {
-		for await (const chunk of stream) {
-			const bytes = bodyBytes(chunk);
-			chunks.push(bytes);
-			length += bytes.length;
-			if (length >= maxBytes) break;
-		}
-	} catch {
-		// What arrived before the failure is all there is to read the refusal from.
-	} finally {
-		if (!stream.destroyed) stream.destroy();
-	}
-	return Buffer.concat(chunks).subarray(0, maxBytes);
-}
-
-/** The error a download's stream is destroyed with when its deadline passes or the execution is cancelled. */
-function stoppedDownloadError(): Error {
-	return Object.assign(new Error('The download from storage was stopped.'), {
-		name: 'AbortError',
-		code: 'ABORT_ERR',
-	});
-}
+/** The message a download's stream is destroyed with when its deadline passes or the execution is cancelled. */
+const DOWNLOAD_STOPPED_MESSAGE = 'The download from storage was stopped.';
 
 /**
  * The message for storage's answer to the download when it is not a `2xx`,
@@ -844,19 +791,16 @@ export function storageDownloadRefusalMessage(
  *
  * The deadline is the upload's, a minute plus a second per started 128 KiB of
  * the file's recorded size, owned by the node as an `AbortSignal.timeout` linked
- * with the execution's cancel signal, for the reason `putToStorage` gives: it
- * bounds the whole exchange on every axios. With a stream the exchange outlasts
- * the request: axios answers once storage's headers arrive, and its own
- * `timeout` stops counting then, so the signal stays linked until `store` has
- * read the body, and when it fires the node destroys the stream itself, whoever
- * is reading it. A refusal (any status but a `2xx`) is read from the first
- * {@link STORAGE_ERROR_BODY_MAX_BYTES} of its body alone.
+ * with the execution's cancel signal ({@link storageReadDeadline}), for the
+ * reason `putToStorage` gives: it bounds the whole exchange on every axios. The
+ * signal stays linked until `store` has read the body, and when it fires the node
+ * destroys the stream itself, whoever is reading it ({@link guardBody}). A
+ * refusal (any status but a `2xx`) is read from the first bytes of its body alone
+ * ({@link readRefusalPrefix}).
  *
  * Every failure is described without the link, which is why a failed request or
  * transfer is caught here and classified outside the `catch`: by the signal that
- * fired, then by whether the stream itself failed. The stream's `error` is always
- * listened to, since an unheard one is thrown, and axios logs it with its
- * request, the link included.
+ * fired, then by whether the stream itself failed.
  */
 export async function downloadFromLink<T>(
 	ctx: IExecuteFunctions,
@@ -871,9 +815,7 @@ export async function downloadFromLink<T>(
 	const cancelSignal = ctx.getExecutionCancelSignal();
 	const size = typeof file.size === 'number' && Number.isFinite(file.size) && file.size > 0 ? file.size : 0;
 	const limitMs = uploadTimeoutMs(size);
-	const deadline = AbortSignal.timeout(limitMs);
-	const linked = cancelSignal ? eitherSignal(cancelSignal, deadline) : undefined;
-	const signal = linked?.signal ?? deadline;
+	const { deadline, signal, release } = storageReadDeadline(limitMs, cancelSignal);
 
 	const cancelled = (): NodeOperationError =>
 		new NodeOperationError(ctx.getNode(), `The download of ${subject} was cancelled with the execution.`, {
@@ -918,11 +860,7 @@ export async function downloadFromLink<T>(
 
 		const statusCode = response.statusCode;
 		const body: unknown = response.body;
-		const stream = isBodyStream(body) ? body : undefined;
 		let streamFailure: unknown;
-		const onStreamError = (error: unknown): void => {
-			if (streamFailure === undefined) streamFailure = error ?? stoppedDownloadError();
-		};
 		// Settles only when the signal fires, so the node stops waiting on `store`
 		// then even if what reads the stream never notices it was destroyed.
 		let rejectStopped: (error: Error) => void = () => {};
@@ -931,18 +869,17 @@ export async function downloadFromLink<T>(
 		});
 		// A refusal's read is not raced, so `stopped` may reject with no one waiting.
 		stopped.catch(() => {});
-		const stop = (): void => {
-			if (stream && !stream.destroyed) stream.destroy(stoppedDownloadError());
-			rejectStopped(stoppedDownloadError());
-		};
-		stream?.on('error', onStreamError);
-		signal.addEventListener('abort', stop, { once: true });
-		if (signal.aborted) stop();
+		const guarded = guardBody(body, signal, {
+			stoppedMessage: DOWNLOAD_STOPPED_MESSAGE,
+			onError: (error) => {
+				if (streamFailure === undefined) streamFailure = error ?? stoppedReadError(DOWNLOAD_STOPPED_MESSAGE);
+			},
+			onStop: () => rejectStopped(stoppedReadError(DOWNLOAD_STOPPED_MESSAGE)),
+		});
+		const stream = guarded.stream;
 		try {
 			if (statusCode < 200 || statusCode >= 300) {
-				const prefix = stream
-					? await readStreamPrefix(stream, STORAGE_ERROR_BODY_MAX_BYTES)
-					: bodyBytes(body).subarray(0, STORAGE_ERROR_BODY_MAX_BYTES);
+				const prefix = await readRefusalPrefix(body);
 				if (cancelSignal?.aborted) throw cancelled();
 				// A refusal cut short by the deadline or the network is still read
 				// from its status and whatever of its error document arrived.
@@ -981,12 +918,10 @@ export async function downloadFromLink<T>(
 				);
 			}
 		} finally {
-			signal.removeEventListener('abort', stop);
-			// A body not read to its end still holds its connection to storage.
-			if (stream && !stream.destroyed) stream.destroy();
+			guarded.release();
 		}
 	} finally {
-		linked?.unlink();
+		release();
 	}
 }
 

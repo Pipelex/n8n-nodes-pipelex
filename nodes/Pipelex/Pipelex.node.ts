@@ -44,8 +44,9 @@ import {
 	type BinaryInputMapping,
 	type ResultOutcome,
 } from './GenericFunctions';
-import type { HostedStartBody, StartAck, StoredFileInput } from './PipelexApiShapes';
+import { DEFAULT_DEGRADED_RETRY_SECONDS, type HostedStartBody, type StartAck, type StoredFileInput } from './PipelexApiShapes';
 import { storedUploadKey, storedUploads } from './StoredUploads';
+import { lacksStoredTextConcepts, loadStoredTexts } from './StoredTexts';
 
 // Polling defaults. Max Wait caps how long a polling operation blocks the n8n
 // execution — 300s covers the overwhelming majority of runs while staying
@@ -614,15 +615,26 @@ async function pollForResultLoop(
 
 	for (;;) {
 		const response = await requestResult(ctx, conn, runId);
-		const outcome = mapResultResponse(
+		const mapped = mapResultResponse(
 			response.statusCode,
 			(response.body ?? {}) as IDataObject,
 			response.headers ?? {},
 		);
 
-		if (outcome.kind === 'completed') {
-			return { ...outcome.body, status: 'COMPLETED' };
+		// The runtime writes `output_form` after `main_stuff`, so a completed result
+		// may not yet say which of its values are long texts. That is the mid-write
+		// window too: it is waited for, bounded like a missing main_stuff, and past
+		// the bound loadStoredTexts fails the item rather than hand on a reference.
+		if (
+			mapped.kind === 'completed' &&
+			(!lacksStoredTextConcepts(mapped.body) || consecutiveMidWrite >= MAX_CONSECUTIVE_MID_WRITE)
+		) {
+			return { ...(await loadStoredTexts(ctx, conn, mapped.body, itemIndex)), status: 'COMPLETED' };
 		}
+		const outcome: Exclude<ResultOutcome, { kind: 'completed' }> =
+			mapped.kind === 'completed'
+				? { kind: 'missingMainStuff', retryAfterSeconds: DEFAULT_DEGRADED_RETRY_SECONDS, body: mapped.body }
+				: mapped;
 
 		// Three non-terminal readings keep the loop going: a normal in-flight 202, a
 		// transient 503, and a 200 whose result is still mid-write. Anything else is
@@ -855,7 +867,7 @@ async function getRunResult(
 		response.headers ?? {},
 	);
 	if (outcome.kind === 'completed') {
-		return { ...outcome.body, status: 'COMPLETED' };
+		return { ...(await loadStoredTexts(ctx, conn, outcome.body, itemIndex)), status: 'COMPLETED' };
 	}
 	if (outcome.kind === 'running') {
 		return {

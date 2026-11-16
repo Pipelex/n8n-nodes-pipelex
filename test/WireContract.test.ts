@@ -42,6 +42,7 @@ import {
 	storedFileInput,
 } from '../nodes/Pipelex/GenericFunctions';
 import type { HostedStartBody } from '../nodes/Pipelex/PipelexApiShapes';
+import { loadStoredTexts } from '../nodes/Pipelex/StoredTexts';
 
 describe('POST /v1/start — the exact body this node sends', () => {
 	it('emits exactly the pinned snake_case field names, and no others', () => {
@@ -266,6 +267,56 @@ describe('GET /v1/runs/{id}/results — the response contract this node reads', 
 		// is load-bearing rather than cosmetic.
 		expect(mapResultResponse(202, {}, {})).toMatchObject({ degraded: false });
 		expect(mapResultResponse(503, {}, {})).toMatchObject({ degraded: true });
+	});
+});
+
+describe('POST /v1/resolve-storage-url/bulk — the request this node sends and the verdicts it reads', () => {
+	// Replicated from `@pipelex/sdk` v0.69.0 (`BulkResolveStorageUrlsInput` /
+	// `ResolvedArtifact`), checked against the platform's `docs/routes.md`: the request is
+	// `{ uris }`, at most 100, and the answer one `{ uri, url, expires_at, content_type, error }`
+	// per reference, in order, a client branching on each item's `error`.
+	const URI = 'pipelex-storage://org/m/run-w/generated/abc/value.txt';
+
+	function contextAnswering(items: unknown[]): { ctx: IExecuteFunctions; sent: Array<Record<string, unknown>> } {
+		const sent: Array<Record<string, unknown>> = [];
+		const ctx = {
+			getNode: () => ({ id: 'n', name: 'Pipelex', type: 'pipelex', typeVersion: 1 }),
+			getExecutionCancelSignal: () => undefined,
+			helpers: {
+				httpRequest: async (options: Record<string, unknown>) => {
+					sent.push(options);
+					if (String(options.url).endsWith('/v1/resolve-storage-url/bulk')) {
+						return { statusCode: 200, headers: {}, body: { items } };
+					}
+					return { statusCode: 200, headers: {}, body: Buffer.from('loaded', 'utf8') };
+				},
+			},
+		} as unknown as IExecuteFunctions;
+		return { ctx, sent };
+	}
+
+	const result = {
+		pipeline_run_id: 'run-w',
+		main_stuff: { url: URI, size: 6, mime_type: 'text/plain', preview: 'loa' },
+		working_memory: { root: { out: { concept: 'native.Text', content: null } }, aliases: { main_stuff: 'out' } },
+	};
+
+	it('sends exactly { uris } and reads the item\'s url', async () => {
+		const { ctx, sent } = contextAnswering([
+			{ uri: URI, url: 'https://store.test/o?sig=1', expires_at: '2026-11-16T00:15:00Z', content_type: 'text/plain', error: null },
+		]);
+		const loaded = await loadStoredTexts(ctx, { baseUrl: 'https://api.test', authorization: 'Bearer t' }, result, 0);
+		expect(sent[0].method).toBe('POST');
+		expect(Object.keys(sent[0].body as object)).toEqual(['uris']);
+		expect(loaded.main_stuff).toEqual({ text: 'loaded' });
+	});
+
+	it('reads a refused reference from the item\'s error.code and error.detail', async () => {
+		const { ctx } = contextAnswering([
+			{ uri: URI, url: null, expires_at: null, content_type: null, error: { code: 'pipelex.storage.uri_invalid', detail: 'Malformed reference' } },
+		]);
+		const conn = { baseUrl: 'https://api.test', authorization: 'Bearer t' };
+		await expect(loadStoredTexts(ctx, conn, result, 0)).rejects.toThrow(/Malformed reference/);
 	});
 });
 

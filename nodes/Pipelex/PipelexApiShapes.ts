@@ -40,6 +40,10 @@
  *    - `pipelex-sdk-js/src/upload.ts` → `guessContentType` (the extension table)
  *      and the grant route's own refusals, adapted in
  *      `GenericFunctions.requestUploadGrant`
+ *    - `pipelex-sdk-js/src/stored-texts.ts` and `loadStoredTexts` in
+ *      `pipelex-sdk-js/src/artifacts.ts` (v0.69.0) → which values of
+ *      `main_stuff` are stored texts and how they are loaded through
+ *      `POST /v1/resolve-storage-url/bulk`, replicated in `StoredTexts.ts`
  * 3. Port the changes, **bump the version stamped in the first paragraph**, and
  *    update the pins in `test/WireContract.test.ts` (they fail on purpose when a
  *    wire field name or status mapping changes, so the edit is never silent).
@@ -218,9 +222,11 @@ export interface RunResults {
 	 * The resolved main output content — **always present for a completed run**
 	 * (the pipelex >= 0.37 main-stuff invariant, enforced in
 	 * `GenericFunctions.mapResultResponse`; the SDK raises `MissingMainStuffError`
-	 * for the same case). Typed `unknown` because the content is polymorphic (a
-	 * list output renders to a top-level array, a structured output to an object)
-	 * and may be a valid falsy value (`[]`, `0`) — it is never absent.
+	 * for the same case). Typed `unknown` because the content is polymorphic: a
+	 * list output renders to the `{ "items": [...] }` envelope (pipelex's
+	 * `ListContent` JSON, which the platform relays as stored), a structured
+	 * output to an object of its fields. The stored-text walk also accepts a list
+	 * as a bare array. It is never absent.
 	 */
 	main_stuff: unknown;
 	/** Method graph spec (`graphspec.json`); null if missing mid-write. NOT

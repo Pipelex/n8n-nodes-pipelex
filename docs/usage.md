@@ -30,7 +30,7 @@ The Pipelex API base URL is configured on the credential, not on the node. Open 
 **Examples:**
 
 - Hosted API (default): `https://api.pipelex.com` — run access is gated for now; join the [waitlist](https://go.pipelex.com/waitlist).
-- Your own server exposing the same hosted surface (`/v1/start`, `/v1/runs/{pipeline_run_id}/results`, `/v1/auth/verify`): `https://your-pipelex-host.example.com` (a self-hosting guide is in the works).
+- Your own server exposing the same hosted surface (`/v1/start`, `/v1/runs/{pipeline_run_id}/results`, `/v1/auth/verify`, and `/v1/resolve-storage-url/bulk` for a run whose output holds a long text): `https://your-pipelex-host.example.com` (a self-hosting guide is in the works).
 
 > ⚠️ **Running on n8n Cloud or any deployed n8n instance?** `localhost`/`127.0.0.1` URLs won't be reachable from n8n. Use a Base URL that n8n can reach over the network.
 
@@ -233,7 +233,7 @@ A completed run produces one item:
 | --- | --- |
 | `status` | always `COMPLETED` on a finished run, or `RUNNING` on a still-running output. This is the **single** completion signal — branch on it, never on anything else |
 | `pipeline_run_id` | the run's id — keep it if you may need to re-fetch |
-| `main_stuff` | your method's output. Polymorphic: a list output arrives as a top-level array, a structured output as an object |
+| `main_stuff` | your method's output, shaped by its concept: a list output arrives as an object whose `items` holds the list (`main_stuff.items[0]` is its first item), a structured output as an object of its fields, a text as `{ "text": … }`. Every text in it arrives as its value, however long (see [Long texts arrive loaded](#long-texts-arrive-loaded)) |
 | `working_memory` | every named value the run produced, not just the main output |
 | `tokens_usages` | one record per inference call — see below |
 | `usage_assembly_error` | non-null only when usage accounting itself failed |
@@ -248,6 +248,19 @@ A completed run **always** delivers a `main_stuff` — but not always the instan
 - **Get Run Result** cannot wait, so it returns `status: "RUNNING"` with a "result is still being written" message — fetch again with the same `pipeline_run_id`.
 
 Either way you never receive an empty `COMPLETED` item that breaks a later node instead.
+
+### Long texts arrive loaded
+
+Pipelex keeps a long text out of a run's result: a `Text`, `Markdown`, `Html` or `JSON` value past a size threshold, such as the pages of a long document, is stored apart and travels as a reference, `{ "url": "pipelex-storage://…", "size": …, "mime_type": "text/markdown", "preview": "…" }`, in place of its value. **The node loads every such text of `main_stuff` before it emits the item**, on **Start & Wait for Result**, **Poll & Get Result** and **Get Run Result**, so the next node reads `main_stuff.text` (or `inner_html` for an `Html`, its `css_class` kept, or `json_obj` for a `JSON`) exactly as it would for a short text, and never a reference. A stored text is a value of the output, not a file, so it never becomes binary data on the item.
+
+How it is loaded:
+
+- **Which values are texts is decided by the method's concepts**, read from the run's `working_memory` and `output_form`, never by the URL or the MIME type: a `Document` output that happens to be `text/plain` stays a file reference. Pipelex writes `output_form` just after `main_stuff`, so a result fetched in between, or one whose `output_form` was never written, cannot say which values of an output of the method's own concept are texts: **Poll & Get Result** and **Start & Wait for Result** wait for it as they wait for a result still being written, and past that wait, or on **Get Run Result**, the item fails asking you to fetch it again rather than handing on a reference. An output with nothing shaped like a stored text's reference is handed on as it is.
+- **Only Pipelex's own references are read.** A `pipelex-storage://` reference is resolved through the Pipelex API (`POST /v1/resolve-storage-url/bulk`) to a short-lived signed link, which the node reads from storage and never outputs, so the n8n instance must reach storage, as it must for **Binary Inputs**. A `data:` URL is decoded where it is. A text under any other URL, which a method's own code could put there, fails the item without anything being fetched.
+- **The bounds**: one text holds at most 100 MiB, and the texts of one item together at most 256 MiB, counted as their bytes arrive, so a long list of long texts fails the item rather than the n8n worker. The request locating them has a minute, and each text is read under the deadline the node gives an upload of its size (a minute, plus a second per 128 KiB); a signed link about to expire before its read starts, because earlier texts took long, is fetched afresh. These reads come after **Max Wait**, which bounds only the wait for the run to finish.
+- **Only `main_stuff` is loaded.** `working_memory` is handed on as the run wrote it, so a long intermediate text there is still its reference.
+
+A text that cannot be loaded fails the item (or, with **Continue On Fail**, lands in `error`), naming where it sits in `main_stuff` (`$.items[2].text_and_images.text`), its reference and why: storage no longer holds it, it belongs to another organization, it is over a limit, its `data:` URL does not decode, its bytes are not UTF-8, or its JSON is not an object. A `data:` URL is named by its media type and length alone, never its content. Each text is decoded as soon as it is read, and the first text that fails, whether reading or decoding it, stops the item's other reads still under way rather than letting them run on. The run itself completed, so the message gives its `pipeline_run_id`: fetch it again with **Get Run Result**.
 
 ### When a run fails
 
