@@ -52,7 +52,7 @@ This node runs your pipelines through the **hosted Pipelex API's durable run lif
 
 > 🔑 **On the hosted API (`api.pipelex.com`), run access is gated for now.** It is granted per **account**, not per key — there is no key scope to set. The credential **Test** only checks that your token is valid, so a key on an account without run access tests green and then returns a clear `403` when you actually run a pipeline. Join the [waitlist](https://go.pipelex.com/waitlist) to be notified when self-serve run access opens up.
 
-> ℹ️ **Hosted-only:** the run-lifecycle polling routes (`/v1/runs/*`), the upload route behind **Binary Inputs** (`/v1/upload/grant`), the files routes behind the **File** resource (`/v1/files`) and the `Method ID` field are hosted-API extensions, not part of the bare MTHDS Protocol — a bare runner does not implement them. To use your own backend, point the Base URL at a server exposing the same hosted surface (`/v1/start`, `/v1/runs/{pipeline_run_id}/results`, `/v1/auth/verify`, `/v1/upload/grant` for binary inputs, and `/v1/files` with `/v1/files/{file_id}` and `/v1/files/links` for the File resource).
+> ℹ️ **Hosted-only:** the run-lifecycle polling routes (`/v1/runs/*`), the upload route behind **Binary Inputs** (`/v1/upload/grant`), the files routes behind the **File** resource (`/v1/files`) and the `Method ID` field are hosted-API extensions, not part of the bare MTHDS Protocol — a bare runner does not implement them. To use your own backend, point the Base URL at a server exposing the same hosted surface (`/v1/start`, `/v1/runs/{pipeline_run_id}/results`, `/v1/auth/verify`, `/v1/upload/grant` for binary inputs, `/v1/resolve-storage-url/bulk` for the long texts a result holds by reference, and `/v1/files` with `/v1/files/{file_id}` and `/v1/files/links` for the File resource).
 
 > ℹ️ **Client identification:** every request to the API, the credential test included, carries `User-Agent: n8n-nodes-pipelex/<package version>`, following the Pipelex client-identification spec, `conformance/specs/client-identification.md` in the `conformance` repository, which holds the cross-repo interface specs. See the [usage guide](docs/usage.md#client-identification-user-agent).
 
@@ -91,6 +91,8 @@ The Pipelex node has a **Resource** selector: **Run** (the default) runs your me
 | **Start Pipeline** | Starts a durable run and returns **immediately** — no waiting. The output's `pipeline_run_id` is the point: feed it to Poll & Get Result or Get Run Result later, even from another workflow branch or a separate scheduled workflow. | `POST /v1/start` | `{ pipeline_run_id, state, created_at }` (the StartAck) |
 | **Poll & Get Result** | Waits for an **already-started** run by `pipeline_run_id`: polls until it finishes or Max Wait is exceeded (then the same "still running" output, not an error). | `GET /v1/runs/{pipeline_run_id}/results` (polled) | `{ status, pipeline_run_id, main_stuff }` |
 | **Get Run Result** | Fetches a run's result **once** by `pipeline_run_id` — no polling. Returns `status: "RUNNING"` while still in flight, the result when `COMPLETED`. | `GET /v1/runs/{pipeline_run_id}/results` | `{ status, pipeline_run_id, main_stuff }` |
+
+A long text in `main_stuff`, which Pipelex stores apart from the result, arrives loaded as its value (`text`, `inner_html` or `json_obj`), never as a reference: the node resolves it through `POST /v1/resolve-storage-url/bulk` and reads it from storage before emitting the item ([usage](docs/usage.md#long-texts-arrive-loaded)).
 
 **Which one to use?**
 

@@ -46,6 +46,7 @@ import {
 } from './GenericFunctions';
 import type { HostedStartBody, StartAck, StoredFileInput } from './PipelexApiShapes';
 import { storedUploadKey, storedUploads } from './StoredUploads';
+import { loadStoredTexts } from './StoredTexts';
 
 // Polling defaults. Max Wait caps how long a polling operation blocks the n8n
 // execution — 300s covers the overwhelming majority of runs while staying
@@ -621,7 +622,7 @@ async function pollForResultLoop(
 		);
 
 		if (outcome.kind === 'completed') {
-			return { ...outcome.body, status: 'COMPLETED' };
+			return { ...(await loadStoredTexts(ctx, conn, outcome.body, itemIndex)), status: 'COMPLETED' };
 		}
 
 		// Three non-terminal readings keep the loop going: a normal in-flight 202, a
@@ -855,7 +856,7 @@ async function getRunResult(
 		response.headers ?? {},
 	);
 	if (outcome.kind === 'completed') {
-		return { ...outcome.body, status: 'COMPLETED' };
+		return { ...(await loadStoredTexts(ctx, conn, outcome.body, itemIndex)), status: 'COMPLETED' };
 	}
 	if (outcome.kind === 'running') {
 		return {

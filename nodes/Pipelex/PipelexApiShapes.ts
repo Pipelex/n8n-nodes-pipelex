@@ -40,6 +40,10 @@
  *    - `pipelex-sdk-js/src/upload.ts` → `guessContentType` (the extension table)
  *      and the grant route's own refusals, adapted in
  *      `GenericFunctions.requestUploadGrant`
+ *    - `pipelex-sdk-js/src/stored-texts.ts` and `loadStoredTexts` in
+ *      `pipelex-sdk-js/src/artifacts.ts` (v0.69.0) → which values of
+ *      `main_stuff` are stored texts and how they are loaded through
+ *      `POST /v1/resolve-storage-url/bulk`, replicated in `StoredTexts.ts`
  * 3. Port the changes, **bump the version stamped in the first paragraph**, and
  *    update the pins in `test/WireContract.test.ts` (they fail on purpose when a
  *    wire field name or status mapping changes, so the edit is never silent).
