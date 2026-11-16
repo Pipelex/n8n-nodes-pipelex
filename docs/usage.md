@@ -233,7 +233,7 @@ A completed run produces one item:
 | --- | --- |
 | `status` | always `COMPLETED` on a finished run, or `RUNNING` on a still-running output. This is the **single** completion signal — branch on it, never on anything else |
 | `pipeline_run_id` | the run's id — keep it if you may need to re-fetch |
-| `main_stuff` | your method's output. Polymorphic: a list output arrives as a top-level array, a structured output as an object. Every text in it arrives as its value, however long (see [Long texts arrive loaded](#long-texts-arrive-loaded)) |
+| `main_stuff` | your method's output, shaped by its concept: a list output arrives as an object whose `items` holds the list (`main_stuff.items[0]` is its first item), a structured output as an object of its fields, a text as `{ "text": … }`. Every text in it arrives as its value, however long (see [Long texts arrive loaded](#long-texts-arrive-loaded)) |
 | `working_memory` | every named value the run produced, not just the main output |
 | `tokens_usages` | one record per inference call — see below |
 | `usage_assembly_error` | non-null only when usage accounting itself failed |
@@ -260,7 +260,7 @@ How it is loaded:
 - **The bounds**: one text holds at most 100 MiB, and each is read under the deadline the node gives an upload of its size (a minute, plus a second per 128 KiB). These reads come after **Max Wait**, which bounds only the wait for the run to finish.
 - **Only `main_stuff` is loaded.** `working_memory` is handed on as the run wrote it, so a long intermediate text there is still its reference.
 
-A text that cannot be loaded fails the item (or, with **Continue On Fail**, lands in `error`), naming where it sits in `main_stuff` (`$.items[2].text_and_images.text`), its reference and why: storage no longer holds it, it belongs to another organization, it is over the limit, its bytes are not UTF-8, or its JSON is not an object. The run itself completed, so the message gives its `pipeline_run_id`: fetch it again with **Get Run Result**.
+A text that cannot be loaded fails the item (or, with **Continue On Fail**, lands in `error`), naming where it sits in `main_stuff` (`$.items[2].text_and_images.text`), its reference and why: storage no longer holds it, it belongs to another organization, it is over the limit, its bytes are not UTF-8, or its JSON is not an object. The first text that fails stops the item's other reads still under way rather than letting them run on. The run itself completed, so the message gives its `pipeline_run_id`: fetch it again with **Get Run Result**.
 
 ### When a run fails
 

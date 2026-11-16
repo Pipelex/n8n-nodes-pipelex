@@ -84,6 +84,8 @@ interface Boundary {
 	fetched: RequestOptions[];
 	/** Every request's URL, in order. */
 	urls: string[];
+	/** The body of each read whose body never arrives, in order. */
+	hungBodies: Readable[];
 }
 
 /**
@@ -99,8 +101,12 @@ function mockBoundary(options: {
 	storeStatus?: Record<string, { statusCode: number; body: string }>;
 	storeHeaders?: Record<string, Record<string, unknown>>;
 	asBuffer?: boolean;
+	/** References whose read never ends on its own: the request never answers, or its body never arrives. */
+	hang?: Record<string, 'request' | 'body'>;
+	/** Called once a hanging read has started. */
+	onHang?: () => void;
 }): { boundary: Boundary; http: (o: RequestOptions) => Promise<IN8nHttpFullResponse> } {
-	const boundary: Boundary = { resolved: [], fetched: [], urls: [] };
+	const boundary: Boundary = { resolved: [], fetched: [], urls: [], hungBodies: [] };
 	const http = async (o: RequestOptions): Promise<IN8nHttpFullResponse> => {
 		boundary.urls.push(o.url);
 		if (o.url === `${BASE_URL}/v1/start`) {
@@ -128,6 +134,23 @@ function mockBoundary(options: {
 		if (o.url.startsWith(STORE)) {
 			boundary.fetched.push(o);
 			const uri = decodeURIComponent(new URL(o.url).pathname.slice(1));
+			const hang = options.hang?.[uri];
+			if (hang === 'request') {
+				const signal = o.abortSignal as AbortSignal | undefined;
+				const stopped = new Promise<IN8nHttpFullResponse>((_resolve, reject) => {
+					const abort = (): void => reject(Object.assign(new Error('aborted'), { name: 'AbortError', code: 'ABORT_ERR' }));
+					if (signal?.aborted) abort();
+					signal?.addEventListener('abort', abort, { once: true });
+				});
+				options.onHang?.();
+				return stopped;
+			}
+			if (hang === 'body') {
+				const body = new Readable({ read() {} });
+				boundary.hungBodies.push(body);
+				options.onHang?.();
+				return fullResponse(200, body);
+			}
 			const status = options.storeStatus?.[uri];
 			if (status) return fullResponse(status.statusCode, Readable.from([Buffer.from(status.body)]));
 			const object = options.objects?.[uri];
@@ -145,6 +168,7 @@ function makeContext(opts: {
 	http: (o: RequestOptions) => Promise<IN8nHttpFullResponse>;
 	continueOnFail?: boolean;
 	params?: Record<string, unknown>;
+	cancelSignal?: AbortSignal;
 }): IExecuteFunctions {
 	const params: Record<string, unknown> = { runId: RUN_ID, maxWaitSeconds: 60, ...(opts.params ?? {}) };
 	return {
@@ -156,7 +180,7 @@ function makeContext(opts: {
 		},
 		getExecutionId: () => 'exec-1',
 		getWorkflowDataProxy: () => ({ $thisRunIndex: 0 }),
-		getExecutionCancelSignal: () => undefined,
+		getExecutionCancelSignal: () => opts.cancelSignal,
 		continueOnFail: () => opts.continueOnFail ?? false,
 		getNode: () => ({ id: 'node-1', name: 'Pipelex', type: 'pipelex', typeVersion: 1 }),
 		helpers: { httpRequest: vi.fn(opts.http) },
@@ -169,9 +193,12 @@ async function runGetResult(http: (o: RequestOptions) => Promise<IN8nHttpFullRes
 }
 
 /** The error an item fails with, as n8n reports it: its message and its description. */
-async function failureOf(http: (o: RequestOptions) => Promise<IN8nHttpFullResponse>): Promise<{ message: string; description: string }> {
+async function failureOf(
+	http: (o: RequestOptions) => Promise<IN8nHttpFullResponse>,
+	cancelSignal?: AbortSignal,
+): Promise<{ message: string; description: string }> {
 	try {
-		await Pipelex.prototype.execute.call(makeContext({ operation: 'getResult', http }));
+		await Pipelex.prototype.execute.call(makeContext({ operation: 'getResult', http, cancelSignal }));
 	} catch (error) {
 		const failure = error as { message: string; description?: string | null };
 		return { message: failure.message, description: failure.description ?? '' };
@@ -228,6 +255,33 @@ describe('stored texts — told by concept', () => {
 		const pages = { items: [{ text_and_images: { text: reference(storedUri('p0')), images: [] } }] };
 		const sites = findStoredTexts(pages, mainStuffNode(results('native.Page', pages))!);
 		expect(sites.map((site) => renderPath(site.segments))).toEqual(['$.items[0].text_and_images.text']);
+	});
+
+	it('walks a list content sent as a bare array, as it walks the plural envelope', () => {
+		const texts = [reference(storedUri('a')), { text: 'inline' }, reference(storedUri('b'))];
+		const sites = findStoredTexts(texts, mainStuffNode(results('native.Text', texts))!);
+		expect(sites.map((site) => [renderPath(site.segments), site.kind, site.url])).toEqual([
+			['$[0]', 'text', storedUri('a')],
+			['$[2]', 'text', storedUri('b')],
+		]);
+	});
+
+	it('walks a bare array of a structured concept by the fields of its concept', () => {
+		const output: FormNode = {
+			kind: 'list',
+			concept_ref: 'my.Report',
+			item: {
+				kind: 'object',
+				concept_ref: 'my.Report',
+				fields: [
+					{ kind: 'prose', name: 'summary', concept_ref: 'native.Text' },
+					{ kind: 'document', name: 'source', concept_ref: 'native.Document' },
+				],
+			},
+		};
+		const reports = [{ summary: reference(storedUri('s')), source: reference(storedUri('d')) }];
+		const sites = findStoredTexts(reports, mainStuffNode(results('my.Report', reports, output))!);
+		expect(sites.map((site) => renderPath(site.segments))).toEqual(['$[0].summary']);
 	});
 
 	it('ignores an inline value', () => {
@@ -339,6 +393,42 @@ describe('stored texts — the node hands them on loaded', () => {
 		expect(json.main_stuff).toEqual({ items: [{ text: 'first' }, { text: 'second' }, { text: 'first' }] });
 		expect(boundary.resolved).toEqual([[a, b]]);
 		expect(boundary.fetched).toHaveLength(2);
+	});
+
+	it('loads every item of a list sent as a bare array', async () => {
+		const a = storedUri('a');
+		const b = storedUri('b');
+		const { http } = mockBoundary({
+			body: results('native.Text', [reference(a), reference(b)]),
+			objects: { [a]: 'first', [b]: 'second' },
+		});
+
+		const json = await runGetResult(http);
+
+		expect(json.main_stuff).toEqual([{ text: 'first' }, { text: 'second' }]);
+	});
+
+	it('decodes a reference found under two kinds by the kind of each place, reading it once', async () => {
+		const uri = storedUri('shared', 'json');
+		const output: FormNode = {
+			kind: 'object',
+			concept_ref: 'my.Pair',
+			fields: [
+				{ kind: 'prose', name: 'raw', concept_ref: 'native.Text' },
+				{ kind: 'unknown', name: 'data', concept_ref: 'native.JSON' },
+			],
+		};
+		const mainStuff = { raw: reference(uri, 'application/json'), data: reference(uri, 'application/json') };
+		const { boundary, http } = mockBoundary({
+			body: results('my.Pair', mainStuff, output),
+			objects: { [uri]: '{"total": 3}' },
+		});
+
+		const json = await runGetResult(http);
+
+		expect(json.main_stuff).toEqual({ raw: { text: '{"total": 3}' }, data: { json_obj: { total: 3 } } });
+		expect(boundary.resolved).toEqual([[uri]]);
+		expect(boundary.fetched).toHaveLength(1);
 	});
 
 	it('resolves at most the route bound per request', async () => {
@@ -507,6 +597,72 @@ describe('stored texts — a text that cannot be loaded fails the item', () => {
 		});
 		const failure = await failureOf(http);
 		expect(failure.message).toContain('JSON object');
+	});
+
+	it('names the place whose kind its bytes do not fit, when one reference sits under two kinds', async () => {
+		const uri = storedUri('shared', 'json');
+		const output: FormNode = {
+			kind: 'object',
+			concept_ref: 'my.Pair',
+			fields: [
+				{ kind: 'prose', name: 'raw', concept_ref: 'native.Text' },
+				{ kind: 'unknown', name: 'data', concept_ref: 'native.JSON' },
+			],
+		};
+		const mainStuff = { raw: reference(uri), data: reference(uri) };
+		const { http } = mockBoundary({ body: results('my.Pair', mainStuff, output), objects: { [uri]: '[1, 2]' } });
+
+		const failure = await failureOf(http);
+
+		expect(failure.message).toContain('$.data');
+		expect(failure.message).toContain('JSON object');
+	});
+
+	it('stops the other requests in flight once one read fails', async () => {
+		const gone = storedUri('gone');
+		const slow = storedUri('slow');
+		const { boundary, http } = mockBoundary({
+			body: results('native.Text', { items: [reference(gone), reference(slow)] }),
+			hang: { [slow]: 'request' },
+		});
+
+		const failure = await failureOf(http);
+
+		expect(failure.message).toContain('no longer');
+		expect(failure.message).toContain('$.items[0]');
+		const slowRequest = boundary.fetched.find((request) => request.url === signedLink(slow))!;
+		expect((slowRequest.abortSignal as AbortSignal).aborted).toBe(true);
+	});
+
+	it('stops the other bodies being read once one read fails', async () => {
+		const gone = storedUri('gone');
+		const slow = storedUri('slow');
+		const { boundary, http } = mockBoundary({
+			body: results('native.Text', { items: [reference(slow), reference(gone)] }),
+			hang: { [slow]: 'body' },
+		});
+
+		const failure = await failureOf(http);
+
+		expect(failure.message).toContain('no longer');
+		expect(failure.message).toContain('$.items[1]');
+		expect(boundary.hungBodies).toHaveLength(1);
+		expect(boundary.hungBodies[0].destroyed).toBe(true);
+	});
+
+	it('stops every read when the execution is cancelled', async () => {
+		const slow = storedUri('slow');
+		const other = storedUri('other');
+		const controller = new AbortController();
+		const { http } = mockBoundary({
+			body: results('native.Text', { items: [reference(slow), reference(other)] }),
+			hang: { [slow]: 'request', [other]: 'body' },
+			onHang: () => setTimeout(() => controller.abort(), 0),
+		});
+
+		const failure = await failureOf(http, controller.signal);
+
+		expect(failure.message).toContain('cancelled');
 	});
 
 	it('lands the failure on the item under Continue On Fail', async () => {

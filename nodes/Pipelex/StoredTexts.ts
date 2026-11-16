@@ -33,8 +33,11 @@
  * under the node's own deadline (the upload's, a minute plus a second per started 128 KiB), plain
  * `http:` links are read as the node's uploads and downloads accept them (the local stack's store
  * hands them out), there is no opt-out (the node never hands on a reference), and a failure is an
- * item error naming the run, so the workflow can fetch it again with Get Run Result. The signed
- * link never appears in an item, an error or a log: it is a bearer capability.
+ * item error naming the run, so the workflow can fetch it again with Get Run Result. The first
+ * read that fails stops the item's other reads in flight, and a URL found under two kinds (a
+ * `Text` here, a `JSON` there) is read once and decoded at each place by that place's kind. The
+ * signed link never appears in an item, an error or a log: it is a bearer capability. The storage
+ * plumbing the read shares with the File resource's Download is in `StorageReads.ts`.
  */
 
 import {
@@ -47,7 +50,6 @@ import {
 	type JsonObject,
 } from 'n8n-workflow';
 
-import { bodyBytes, isBodyStream, type BodyStream } from './FileFunctions';
 import {
 	apiHeaders,
 	describeNetworkFailure,
@@ -60,6 +62,7 @@ import {
 	type ApiConnection,
 } from './GenericFunctions';
 import { PIPELEX_STORAGE_SCHEME, uploadTimeoutMs } from './PipelexApiShapes';
+import { bodyBytes, guardBody, readRefusalPrefix, storageReadDeadline, type BodyStream } from './StorageReads';
 
 // ── Constants ────────────────────────────────────────────────────────
 
@@ -92,8 +95,8 @@ export const STORED_TEXT_MAX_BYTES = 100 * 1024 * 1024;
 /** How many stored texts one item reads from storage at once. */
 const STORED_TEXT_CONCURRENCY = 4;
 
-/** How much of storage's error body is read — where S3 writes its `<Code>` and `<Message>`. */
-const STORAGE_ERROR_BODY_MAX_BYTES = 16 * 1024;
+/** The message a read's stream is destroyed with when its deadline passes or something else stops it. */
+const READ_STOPPED_MESSAGE = 'The read from storage was stopped.';
 
 const MAIN_STUFF_ALIAS = 'main_stuff';
 const LIST_ITEMS_FIELD = 'items';
@@ -171,8 +174,9 @@ export function storedTextKindOfNode(node: FormNode | undefined): StoredTextKind
 /**
  * The descriptor node of a run's main output, from the run's own artifacts: the main stuff's
  * concept, which the working memory names, and that concept's structure, which the first
- * `output_form` or `input_form` node naming it states. A `{ items: [...] }` content is the plural
- * envelope, unless the concept has a field called `items`.
+ * `output_form` or `input_form` node naming it states. A list content is walked item by item,
+ * whether it comes as the `{ items: [...] }` envelope the runtime writes (unless the concept has a
+ * field called `items`) or as a bare array.
  *
  * `null` when the result carries no working memory, or one naming no main stuff: nothing then
  * says what the output is, and the result is handed on as it is, as the SDK does.
@@ -196,8 +200,9 @@ export function mainStuffNode(result: IDataObject): FormNode | null {
 
 /**
  * The node describing the child at `key` of a value described by `node`, or `undefined` when
- * nothing describes it: a field of an object node, an item of a list node, and the `items` of the
- * plural envelope a list content is serialized to, which the list node itself goes on describing.
+ * nothing describes it: a field of an object node, an item of a list node (an entry of a bare
+ * array), and the `items` of the plural envelope a list content is serialized to, which the list
+ * node itself goes on describing.
  */
 function childNode(node: FormNode | undefined, parent: unknown, key: string | number): FormNode | undefined {
 	if (node === undefined) return undefined;
@@ -226,7 +231,7 @@ function conceptRefOf(concept: unknown): string | null {
 /** The node a content of `conceptRef` is walked with: the concept's node, wrapped when the content is plural. */
 function contentNode(conceptRef: string, content: unknown, source: IDataObject): FormNode {
 	const element = nodeForConcept(conceptRef, source);
-	if (!isPluralEnvelope(content, element)) return element;
+	if (!Array.isArray(content) && !isPluralEnvelope(content, element)) return element;
 	return {
 		kind: 'list',
 		concept_ref: conceptRef,
@@ -235,6 +240,11 @@ function contentNode(conceptRef: string, content: unknown, source: IDataObject):
 	};
 }
 
+/**
+ * Whether a content is the `{ items: [...] }` envelope a list content is serialized to — the shape
+ * the runtime writes for a list output (pipelex's `ListContent` renders its `items` field) — rather
+ * than an object of a concept that has a field called `items`.
+ */
 function isPluralEnvelope(content: unknown, element: FormNode): boolean {
 	if (typeof content !== 'object' || content === null || Array.isArray(content)) return false;
 	const keys = Object.keys(content);
@@ -560,11 +570,6 @@ function readResolution(item: unknown): Resolution {
 	return { link: url };
 }
 
-/** The error a read's stream is destroyed with when its deadline passes or the execution is cancelled. */
-function stoppedReadError(): Error {
-	return Object.assign(new Error('The read from storage was stopped.'), { name: 'AbortError', code: 'ABORT_ERR' });
-}
-
 /**
  * Read a stream to its end, refusing it once it crosses `maxBytes` (the stream is then destroyed,
  * never read further). Answers `undefined` on crossing the cap.
@@ -583,26 +588,6 @@ async function readCapped(stream: BodyStream, maxBytes: number): Promise<Buffer 
 		if (!stream.destroyed) stream.destroy();
 	}
 	return Buffer.concat(chunks);
-}
-
-/** The first bytes of a refused answer, where storage writes its error document. */
-async function readPrefix(body: unknown): Promise<string> {
-	if (!isBodyStream(body)) return bodyBytes(body).subarray(0, STORAGE_ERROR_BODY_MAX_BYTES).toString('utf8');
-	const chunks: Buffer[] = [];
-	let length = 0;
-	try {
-		for await (const chunk of body) {
-			const bytes = bodyBytes(chunk);
-			chunks.push(bytes);
-			length += bytes.length;
-			if (length >= STORAGE_ERROR_BODY_MAX_BYTES) break;
-		}
-	} catch {
-		// What arrived before the failure is all there is to read the refusal from.
-	} finally {
-		if (!body.destroyed) body.destroy();
-	}
-	return Buffer.concat(chunks).subarray(0, STORAGE_ERROR_BODY_MAX_BYTES).toString('utf8');
 }
 
 /** The verdict for storage's answer when it is not a `2xx`: never the link, nor its body past its code and message. */
@@ -626,15 +611,17 @@ function storageFailure(statusCode: number, body: string): LoadFailure {
 
 /**
  * The bytes of one stored text, read from its signed link under the node's own deadline (the
- * upload's, from the size the reference states) linked with the execution's cancel signal: no
- * `Authorization` (the signature in the link is the credential, and a second one makes S3 refuse
- * the request), no redirect followed, the body read as a stream and refused once it crosses
+ * upload's, from the size the reference states) linked with `stopSignal`, which fires when the
+ * execution is cancelled or another stored text of the item failed: no `Authorization` (the
+ * signature in the link is the credential, and a second one makes S3 refuse the request), no
+ * redirect followed, the body read as a stream and refused once it crosses
  * {@link STORED_TEXT_MAX_BYTES}. Every failure is described without the link.
  */
 async function readSignedLink(
 	load: LoadContext,
 	site: StoredTextSite,
 	link: string,
+	stopSignal: AbortSignal,
 ): Promise<Buffer> {
 	const { ctx } = load;
 	const origin = storageOrigin(link);
@@ -647,9 +634,7 @@ async function readSignedLink(
 	const declaredSize = typeof site.reference.size === 'number' && site.reference.size > 0 ? site.reference.size : 0;
 	const limitMs = uploadTimeoutMs(declaredSize);
 	const cancelSignal = ctx.getExecutionCancelSignal();
-	const deadline = AbortSignal.timeout(limitMs);
-	const linked = cancelSignal ? eitherSignal(cancelSignal, deadline) : undefined;
-	const signal = linked?.signal ?? deadline;
+	const { deadline, signal, release } = storageReadDeadline(limitMs, stopSignal);
 
 	const failed = (error: unknown): NodeOperationError => {
 		const description = `Network failure: ${describeNetworkFailure(error)}.`;
@@ -660,6 +645,9 @@ async function readSignedLink(
 		}
 		if (deadline.aborted || isTimeoutFailure(error)) {
 			return loadError(load, site, { reason: 'timeout', detail: `reading it from storage did not finish within ${Math.round(limitMs / 1000)} s.` }, description);
+		}
+		if (stopSignal.aborted) {
+			return loadError(load, site, { reason: 'stopped', detail: 'its read was stopped when another stored text failed to load.' });
 		}
 		return loadError(
 			load,
@@ -688,18 +676,13 @@ async function readSignedLink(
 		if (response === undefined) throw failed(failure);
 
 		const body: unknown = response.body;
-		const stream = isBodyStream(body) ? body : undefined;
-		const stop = (): void => {
-			if (stream && !stream.destroyed) stream.destroy(stoppedReadError());
-		};
-		// An unheard stream error is thrown, and axios logs it with its request, the link included.
-		stream?.on('error', () => {});
-		signal.addEventListener('abort', stop, { once: true });
-		if (signal.aborted) stop();
+		const guarded = guardBody(body, signal, { stoppedMessage: READ_STOPPED_MESSAGE });
+		const stream = guarded.stream;
 		try {
 			const statusCode = response.statusCode;
 			if (statusCode < 200 || statusCode >= 300) {
-				throw loadError(load, site, storageFailure(statusCode, await readPrefix(body)));
+				const prefix = await readRefusalPrefix(body);
+				throw loadError(load, site, storageFailure(statusCode, prefix.toString('utf8')));
 			}
 			const declared = Number((response.headers ?? {})['content-length']);
 			const tooLarge = (): NodeOperationError =>
@@ -707,10 +690,7 @@ async function readSignedLink(
 					reason: 'too_large',
 					detail: `it is over the ${formatMiB(STORED_TEXT_MAX_BYTES)} a stored text may hold.`,
 				});
-			if (Number.isFinite(declared) && declared > STORED_TEXT_MAX_BYTES) {
-				stop();
-				throw tooLarge();
-			}
+			if (Number.isFinite(declared) && declared > STORED_TEXT_MAX_BYTES) throw tooLarge();
 			let bytes: Buffer | undefined;
 			try {
 				bytes = stream ? await readCapped(stream, STORED_TEXT_MAX_BYTES) : bodyBytes(body);
@@ -720,11 +700,10 @@ async function readSignedLink(
 			if (bytes === undefined || bytes.length > STORED_TEXT_MAX_BYTES) throw tooLarge();
 			return bytes;
 		} finally {
-			signal.removeEventListener('abort', stop);
-			if (stream && !stream.destroyed) stream.destroy();
+			guarded.release();
 		}
 	} finally {
-		linked?.unlink();
+		release();
 	}
 }
 
@@ -777,10 +756,11 @@ export async function loadStoredTexts(
 	const references = urls.filter(isStorageReference);
 	const resolutions = references.length > 0 ? await resolveReferences(load, conn, references) : new Map();
 
-	const texts = new Map<string, unknown>();
-	const readOne = async (url: string): Promise<void> => {
+	// The bytes are kept per URL and decoded per place: one URL may sit where a Text is and where a
+	// JSON is, and each place holds the value its own concept makes of the bytes.
+	const bytesByUrl = new Map<string, Buffer>();
+	const readOne = async (url: string, stopSignal: AbortSignal): Promise<Buffer> => {
 		const site = firstSite.get(url)!;
-		let bytes: Buffer;
 		if (url.startsWith(DATA_URL_SCHEME)) {
 			const decoded = decodeDataUrl(url);
 			if (decoded === null) throw loadError(load, site, { reason: 'unsupported_url', detail: 'its data: URL does not decode.' });
@@ -790,38 +770,55 @@ export async function loadStoredTexts(
 					detail: `it is over the ${formatMiB(STORED_TEXT_MAX_BYTES)} a stored text may hold.`,
 				});
 			}
-			bytes = decoded;
-		} else {
-			const resolution = resolutions.get(url) as Resolution;
-			if (!('link' in resolution)) throw loadError(load, site, resolution);
-			bytes = await readSignedLink(load, site, resolution.link);
+			return decoded;
 		}
-		const decoded = decodeStoredValue(site.kind, bytes);
-		if (!('value' in decoded)) throw loadError(load, site, decoded);
-		texts.set(url, decoded.value);
+		const resolution = resolutions.get(url) as Resolution;
+		if (!('link' in resolution)) throw loadError(load, site, resolution);
+		return await readSignedLink(load, site, resolution.link, stopSignal);
 	};
 
-	// A few reads at a time; the first failure stops new reads from starting.
+	// A few reads at a time. The first failure stops new reads from starting and stops the reads in
+	// flight, through one signal linked with the execution's cancel signal; the item then fails with
+	// that first failure, once every read has settled.
+	const stopReads = new AbortController();
+	const cancelSignal = ctx.getExecutionCancelSignal();
+	const stopping = cancelSignal ? eitherSignal(cancelSignal, stopReads.signal) : undefined;
+	const stopSignal = stopping?.signal ?? stopReads.signal;
 	let next = 0;
 	let failed = false;
+	let firstFailure: unknown;
 	const worker = async (): Promise<void> => {
 		while (!failed && next < urls.length) {
 			const url = urls[next];
 			next += 1;
-			let read = false;
 			try {
-				await readOne(url);
-				read = true;
-			} finally {
-				if (!read) failed = true;
+				bytesByUrl.set(url, await readOne(url, stopSignal));
+			} catch (error) {
+				if (!failed) {
+					failed = true;
+					firstFailure = error;
+					stopReads.abort();
+				}
 			}
 		}
 	};
-	await Promise.all(Array.from({ length: Math.min(STORED_TEXT_CONCURRENCY, urls.length) }, worker));
+	try {
+		await Promise.all(Array.from({ length: Math.min(STORED_TEXT_CONCURRENCY, urls.length) }, worker));
+	} finally {
+		stopping?.unlink();
+	}
+	if (failed) throw firstFailure;
 
+	const values = new Map<string, unknown>();
 	let loaded: unknown = structuredClone(result.main_stuff);
 	for (const site of sites) {
-		loaded = replaceAt(loaded, site.segments, loadedForm(site, texts.get(site.url)));
+		const key = `${site.kind} ${site.url}`;
+		if (!values.has(key)) {
+			const decoded = decodeStoredValue(site.kind, bytesByUrl.get(site.url)!);
+			if (!('value' in decoded)) throw loadError(load, site, decoded);
+			values.set(key, decoded.value);
+		}
+		loaded = replaceAt(loaded, site.segments, loadedForm(site, values.get(key)));
 	}
 	return { ...result, main_stuff: loaded as IDataObject };
 }

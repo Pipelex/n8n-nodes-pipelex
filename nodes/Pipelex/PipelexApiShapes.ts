@@ -222,9 +222,11 @@ export interface RunResults {
 	 * The resolved main output content — **always present for a completed run**
 	 * (the pipelex >= 0.37 main-stuff invariant, enforced in
 	 * `GenericFunctions.mapResultResponse`; the SDK raises `MissingMainStuffError`
-	 * for the same case). Typed `unknown` because the content is polymorphic (a
-	 * list output renders to a top-level array, a structured output to an object)
-	 * and may be a valid falsy value (`[]`, `0`) — it is never absent.
+	 * for the same case). Typed `unknown` because the content is polymorphic: a
+	 * list output renders to the `{ "items": [...] }` envelope (pipelex's
+	 * `ListContent` JSON, which the platform relays as stored), a structured
+	 * output to an object of its fields. The stored-text walk also accepts a list
+	 * as a bare array. It is never absent.
 	 */
 	main_stuff: unknown;
 	/** Method graph spec (`graphspec.json`); null if missing mid-write. NOT

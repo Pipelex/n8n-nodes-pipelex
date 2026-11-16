@@ -24,7 +24,6 @@ import {
 	FILES_UNAVAILABLE_MESSAGE,
 	FALLBACK_BINARY_FILE_NAME,
 	binaryFileNameOf,
-	bodyBytes,
 	fileExtensionOf,
 	fileLinkErrorMessage,
 	fileListUrl,
@@ -32,12 +31,10 @@ import {
 	fileSearchText,
 	fileSummaryOf,
 	filesRefusalMessage,
-	isBodyStream,
 	namesMissingResource,
 	readFileLink,
 	readFileListFilters,
 	readFilePage,
-	readStreamPrefix,
 	sameFileName,
 	storageDownloadRefusalMessage,
 	toInstant,
@@ -45,6 +42,7 @@ import {
 import { FILE_SUMMARY_FIELDS, type FileSummary } from '../nodes/Pipelex/FilesApiShapes';
 import { ROLE_NOT_PERMITTED_MESSAGE } from '../nodes/Pipelex/GenericFunctions';
 import { Pipelex } from '../nodes/Pipelex/Pipelex.node';
+import { bodyBytes, isBodyStream, readStreamPrefix } from '../nodes/Pipelex/StorageReads';
 
 // The node's files operations against a faked hosted plane: every request goes
 // through `helpers.httpRequest`, answered here, and no test reaches a network.
