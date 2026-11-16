@@ -6,6 +6,7 @@ import {
 	MISSING_MAIN_STUFF_MESSAGE,
 	NOT_FOUND_MESSAGE,
 	RESULT_MID_WRITE_MESSAGE,
+	ROLE_NOT_PERMITTED_MESSAGE,
 	UPLOAD_UNAVAILABLE_MESSAGE,
 	assembleRunSources,
 	binaryByteSize,
@@ -25,6 +26,7 @@ import {
 	problemMessage,
 	readBinaryInputMappings,
 	readUploadGrant,
+	roleRefusalMessage,
 	runFailureData,
 	runFailureDescription,
 	runFailureMessage,
@@ -471,6 +473,72 @@ describe('mapResultResponse (mirrors mthds-js getRunResult)', () => {
 			statusCode: 418,
 			message: 'Unexpected response status 418',
 		});
+	});
+});
+
+describe("roleRefusalMessage (a 403 that refuses the caller's role, not the credential)", () => {
+	// The platform's refusal of a role, as an RFC 9457 problem: one code for every
+	// role gate, and a `detail` each gate writes, naming the caller's actual role.
+	const runnerRefused = {
+		type: 'https://pipelex.com/errors/role_not_permitted',
+		title: 'Role not permitted',
+		status: 403,
+		code: 'role_not_permitted',
+		error_domain: 'config',
+		retryable: false,
+		detail:
+			"Your role in this organization is runner: it runs the organization's published versions and changes no method.",
+	};
+
+	it('leads with the role-neutral headline, then the server detail as it is', () => {
+		expect(ROLE_NOT_PERMITTED_MESSAGE).toBe('Your role in this organization does not allow this.');
+		expect(roleRefusalMessage(runnerRefused)).toBe(
+			"Your role in this organization does not allow this. Your role in this organization is runner: it runs the organization's published versions and changes no method.",
+		);
+	});
+
+	it('shows a member refused an admin action the same way, assuming no role of its own', () => {
+		const memberRefused = {
+			...runnerRefused,
+			detail: 'Your role in this organization is member: this action needs the admin role.',
+		};
+		expect(roleRefusalMessage(memberRefused)).toBe(
+			`${ROLE_NOT_PERMITTED_MESSAGE} Your role in this organization is member: this action needs the admin role.`,
+		);
+	});
+
+	it('is the headline alone when the server sends no detail', () => {
+		expect(roleRefusalMessage({ code: 'role_not_permitted' })).toBe(ROLE_NOT_PERMITTED_MESSAGE);
+		expect(roleRefusalMessage({ code: 'role_not_permitted', detail: '   ' })).toBe(
+			ROLE_NOT_PERMITTED_MESSAGE,
+		);
+	});
+
+	it('reads only the role_not_permitted code', () => {
+		expect(roleRefusalMessage({ code: 'forbidden', detail: 'nope' })).toBeUndefined();
+		expect(roleRefusalMessage({ detail: 'nope' })).toBeUndefined();
+		expect(roleRefusalMessage({})).toBeUndefined();
+	});
+
+	it('never names a role, nor sends the person to Pipelex for access', () => {
+		expect(ROLE_NOT_PERMITTED_MESSAGE).not.toMatch(/runner|member|admin/i);
+		expect(ROLE_NOT_PERMITTED_MESSAGE).not.toMatch(/API access|discord|support/i);
+		expect(roleRefusalMessage(runnerRefused)).not.toContain(FORBIDDEN_MESSAGE);
+	});
+
+	it('comes before the generic 403 on a result read', () => {
+		expect(mapResultResponse(403, runnerRefused, {})).toEqual({
+			kind: 'forbidden',
+			message: roleRefusalMessage(runnerRefused),
+			body: runnerRefused,
+		});
+	});
+
+	it('comes before the generic 403 on an upload grant, keeping the file name', () => {
+		const file = { inputName: 'document', filename: 'scan.pdf', size: 1024 };
+		expect(uploadGrantRefusalMessage(403, runnerRefused, file)).toBe(
+			`Pipelex refused to store "scan.pdf" for input "document". ${roleRefusalMessage(runnerRefused)}`,
+		);
 	});
 });
 

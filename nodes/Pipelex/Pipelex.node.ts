@@ -11,6 +11,8 @@ import {
 	type JsonObject,
 } from 'n8n-workflow';
 
+import { FILE_RESOURCE, fileFields, fileOperations } from './FileDescription';
+import { executeFileOperation } from './FileFunctions';
 import {
 	MISSING_MAIN_STUFF_MESSAGE,
 	RESULT_MID_WRITE_MESSAGE,
@@ -42,8 +44,9 @@ import {
 	type BinaryInputMapping,
 	type ResultOutcome,
 } from './GenericFunctions';
-import type { HostedStartBody, StartAck, StoredFileInput } from './PipelexApiShapes';
+import { DEFAULT_DEGRADED_RETRY_SECONDS, type HostedStartBody, type StartAck, type StoredFileInput } from './PipelexApiShapes';
 import { storedUploadKey, storedUploads } from './StoredUploads';
+import { lacksStoredTextConcepts, loadStoredTexts } from './StoredTexts';
 
 // Polling defaults. Max Wait caps how long a polling operation blocks the n8n
 // execution — 300s covers the overwhelming majority of runs while staying
@@ -77,6 +80,9 @@ const START_OPERATIONS = ['startAndPoll', 'start', 'execute'];
 const RUN_ID_OPERATIONS = ['poll', 'getResult'];
 // Operations that poll internally (and therefore expose Max Wait).
 const POLLING_OPERATIONS = ['startAndPoll', 'poll', 'execute'];
+// The resource the run operations above belong to, and the default: a workflow
+// saved before the File resource existed has no `resource` and reads as this one.
+const RUN_RESOURCE = 'run';
 
 /**
  * Re-throw an error from an op helper. The helpers already raise
@@ -609,15 +615,26 @@ async function pollForResultLoop(
 
 	for (;;) {
 		const response = await requestResult(ctx, conn, runId);
-		const outcome = mapResultResponse(
+		const mapped = mapResultResponse(
 			response.statusCode,
 			(response.body ?? {}) as IDataObject,
 			response.headers ?? {},
 		);
 
-		if (outcome.kind === 'completed') {
-			return { ...outcome.body, status: 'COMPLETED' };
+		// The runtime writes `output_form` after `main_stuff`, so a completed result
+		// may not yet say which of its values are long texts. That is the mid-write
+		// window too: it is waited for, bounded like a missing main_stuff, and past
+		// the bound loadStoredTexts fails the item rather than hand on a reference.
+		if (
+			mapped.kind === 'completed' &&
+			(!lacksStoredTextConcepts(mapped.body) || consecutiveMidWrite >= MAX_CONSECUTIVE_MID_WRITE)
+		) {
+			return { ...(await loadStoredTexts(ctx, conn, mapped.body, itemIndex)), status: 'COMPLETED' };
 		}
+		const outcome: Exclude<ResultOutcome, { kind: 'completed' }> =
+			mapped.kind === 'completed'
+				? { kind: 'missingMainStuff', retryAfterSeconds: DEFAULT_DEGRADED_RETRY_SECONDS, body: mapped.body }
+				: mapped;
 
 		// Three non-terminal readings keep the loop going: a normal in-flight 202, a
 		// transient 503, and a 200 whose result is still mid-write. Anything else is
@@ -850,7 +867,7 @@ async function getRunResult(
 		response.headers ?? {},
 	);
 	if (outcome.kind === 'completed') {
-		return { ...outcome.body, status: 'COMPLETED' };
+		return { ...(await loadStoredTexts(ctx, conn, outcome.body, itemIndex)), status: 'COMPLETED' };
 	}
 	if (outcome.kind === 'running') {
 		return {
@@ -881,8 +898,8 @@ export class Pipelex implements INodeType {
 		version: 1,
 		usableAsTool: true,
 		subtitle:
-			'={{ ({ startAndPoll: "Start & Wait for Result", start: "Start Pipeline", poll: "Poll & Get Result", getResult: "Get Run Result", execute: "Start & Wait for Result" })[$parameter["operation"]] }}',
-		description: 'Execute Pipelex pipelines',
+			'={{ ({ startAndPoll: "Start & Wait for Result", start: "Start Pipeline", poll: "Poll & Get Result", getResult: "Get Run Result", execute: "Start & Wait for Result", download: "Download File", getAll: "Get Many Files" })[$parameter["operation"]] }}',
+		description: "Execute Pipelex pipelines and read your organization's files",
 		defaults: {
 			name: 'Pipelex',
 		},
@@ -895,6 +912,31 @@ export class Pipelex implements INodeType {
 			},
 		],
 		properties: [
+			// The resources: Run, the node's first surface and the default, and
+			// File, the organization's files (`FileDescription.ts`). Each has its
+			// own Operation selector, and the File operations' values are not the
+			// Run operations', so a field shown on an operation value belongs to
+			// one resource. A workflow saved before the resource existed carries
+			// none and reads as Run. Run comes first, in usage order rather than
+			// alphabetically, as its operations do.
+			{
+				displayName: 'Resource',
+				name: 'resource',
+				type: 'options',
+				noDataExpression: true,
+				options: [
+					{
+						name: 'Run',
+						value: RUN_RESOURCE,
+					},
+					{
+						name: 'File',
+						value: FILE_RESOURCE,
+					},
+				],
+				default: RUN_RESOURCE,
+			},
+			...fileOperations,
 			// Four operations mirroring the mthds-js client surface (start /
 			// waitForResult / getRunResult — SDK conveniences over the MTHDS
 			// Protocol routes). Ordered by typical usage, not alphabetically
@@ -905,6 +947,11 @@ export class Pipelex implements INodeType {
 				name: 'operation',
 				type: 'options',
 				noDataExpression: true,
+				displayOptions: {
+					show: {
+						resource: [RUN_RESOURCE],
+					},
+				},
 				options: [
 					{
 						name: 'Start & Wait for Result',
@@ -1228,6 +1275,9 @@ export class Pipelex implements INodeType {
 					},
 				},
 			},
+
+			// ── File resource fields (Download / Get Many) ────────────────────────
+			...fileFields,
 		],
 	};
 
@@ -1241,10 +1291,26 @@ export class Pipelex implements INodeType {
 		// entry into the Operation dropdown.
 		const credentials = await this.getCredentials('piplexApi');
 		const conn = buildApiConnection(credentials);
+		const resource = this.getNodeParameter('resource', 0, RUN_RESOURCE) as string;
 		const operation = this.getNodeParameter('operation', 0) as string;
 
 		for (let i = 0; i < items.length; i++) {
 			try {
+				// A File operation gives its own items: one per listed file, or one
+				// carrying the downloaded file as binary data. They are appended one
+				// by one, since spreading a Return All of a large organization's
+				// files into one call passes the engine's limit on arguments.
+				if (resource === FILE_RESOURCE) {
+					for (const row of await executeFileOperation(this, conn, operation, i)) {
+						returnData.push(row);
+					}
+					continue;
+				}
+				if (resource !== RUN_RESOURCE) {
+					throw new NodeOperationError(this.getNode(), `Unknown resource: ${resource}`, {
+						itemIndex: i,
+					});
+				}
 				let json: IDataObject;
 				switch (operation) {
 					// `execute` is the saved-operation value of the published 0.0.x
