@@ -22,6 +22,7 @@ vi.mock('../nodes/Pipelex/GenericFunctions', async (importOriginal) => {
 import { Pipelex } from '../nodes/Pipelex/Pipelex.node';
 import {
 	BULK_RESOLVE_MAX_URIS,
+	STORED_TEXTS_ITEM_MAX_BYTES,
 	STORED_TEXT_MAX_BYTES,
 	findStoredTexts,
 	mainStuffNode,
@@ -105,26 +106,53 @@ function mockBoundary(options: {
 	hang?: Record<string, 'request' | 'body'>;
 	/** Called once a hanging read has started. */
 	onHang?: () => void;
+	/** The results route's answers, one per poll, the last one repeated; `body` when absent. */
+	bodies?: IDataObject[];
+	/** Each reference's `expires_at` on the bulk route's `call`-th answer (0-based); fifteen minutes from now by default. */
+	expiresAt?: (uri: string, call: number) => string;
+	/** The bulk route's request fails with this error instead of answering. */
+	resolveError?: Error;
+	/** The bulk route never answers on its own; called once it is waiting. */
+	resolveHang?: () => void;
+	/** References whose body is this stream, read as storage sends it. */
+	streams?: Record<string, () => Readable>;
 }): { boundary: Boundary; http: (o: RequestOptions) => Promise<IN8nHttpFullResponse> } {
 	const boundary: Boundary = { resolved: [], fetched: [], urls: [], hungBodies: [] };
+	let polls = 0;
 	const http = async (o: RequestOptions): Promise<IN8nHttpFullResponse> => {
 		boundary.urls.push(o.url);
 		if (o.url === `${BASE_URL}/v1/start`) {
 			return fullResponse(202, { pipeline_run_id: RUN_ID, state: 'STARTED' });
 		}
 		if (o.url.startsWith(`${BASE_URL}/v1/runs/${RUN_ID}/results`)) {
-			return fullResponse(200, options.body);
+			const bodies = options.bodies;
+			if (bodies === undefined) return fullResponse(200, options.body);
+			const body = bodies[Math.min(polls, bodies.length - 1)];
+			polls += 1;
+			return fullResponse(200, body);
 		}
 		if (o.url === RESOLVE_URL) {
 			const { uris } = o.body as { uris: string[] };
+			const call = boundary.resolved.length;
 			boundary.resolved.push(uris);
+			if (options.resolveError) throw options.resolveError;
+			if (options.resolveHang) {
+				const signal = o.abortSignal as AbortSignal | undefined;
+				const stopped = new Promise<IN8nHttpFullResponse>((_resolve, reject) => {
+					const abort = (): void => reject(Object.assign(new Error('aborted'), { name: 'AbortError', code: 'ABORT_ERR' }));
+					if (signal?.aborted) abort();
+					signal?.addEventListener('abort', abort, { once: true });
+				});
+				options.resolveHang();
+				return stopped;
+			}
 			if (options.resolveStatus) return fullResponse(options.resolveStatus.statusCode, options.resolveStatus.body);
 			const items = uris.map(
 				(uri) =>
 					options.refusals?.[uri] ?? {
 						uri,
 						url: signedLink(uri),
-						expires_at: '2026-11-16T12:15:00Z',
+						expires_at: options.expiresAt?.(uri, call) ?? new Date(Date.now() + 15 * 60_000).toISOString(),
 						content_type: 'text/plain',
 						error: null,
 					},
@@ -149,6 +177,12 @@ function mockBoundary(options: {
 				const body = new Readable({ read() {} });
 				boundary.hungBodies.push(body);
 				options.onHang?.();
+				return fullResponse(200, body);
+			}
+			const stream = options.streams?.[uri];
+			if (stream) {
+				const body = stream();
+				boundary.hungBodies.push(body);
 				return fullResponse(200, body);
 			}
 			const status = options.storeStatus?.[uri];
@@ -196,9 +230,10 @@ async function runGetResult(http: (o: RequestOptions) => Promise<IN8nHttpFullRes
 async function failureOf(
 	http: (o: RequestOptions) => Promise<IN8nHttpFullResponse>,
 	cancelSignal?: AbortSignal,
+	operation = 'getResult',
 ): Promise<{ message: string; description: string }> {
 	try {
-		await Pipelex.prototype.execute.call(makeContext({ operation: 'getResult', http, cancelSignal }));
+		await Pipelex.prototype.execute.call(makeContext({ operation, http, cancelSignal }));
 	} catch (error) {
 		const failure = error as { message: string; description?: string | null };
 		return { message: failure.message, description: failure.description ?? '' };
@@ -479,12 +514,242 @@ describe('stored texts — the node hands them on loaded', () => {
 		expect(boundary.urls).toHaveLength(1);
 	});
 
-	it('hands a result without a working memory on as it is, as the SDK does', async () => {
+	it('hands a result without a working memory on as it is when nothing in it looks like a stored text', async () => {
+		const mainStuff = { title: 'Plain', link: { url: 'https://example.com/a' } };
+		const { boundary, http } = mockBoundary({ body: { pipeline_run_id: RUN_ID, main_stuff: mainStuff } });
+		const json = await runGetResult(http);
+		expect(json.main_stuff).toEqual(mainStuff);
+		expect(boundary.urls).toHaveLength(1);
+	});
+
+	it('hands a structured output without an output form on as it is when nothing in it looks like a stored text', async () => {
+		const mainStuff = { title: 'Plain', cover: { url: storedUri('img', 'png'), mime_type: 'image/png' } };
+		const body = { ...results('my.Report', mainStuff), output_form: null };
+		const { boundary, http } = mockBoundary({ body });
+		const json = await runGetResult(http);
+		expect(json.main_stuff).toEqual(mainStuff);
+		expect(boundary.urls).toHaveLength(1);
+	});
+});
+
+// ── A result that does not say which values are texts ─────────────────
+
+describe('stored texts — never handed on as references when the concepts are missing', () => {
+	it('fails a result without a working memory rather than handing on its reference', async () => {
 		const uri = storedUri('t');
 		const { boundary, http } = mockBoundary({ body: { pipeline_run_id: RUN_ID, main_stuff: reference(uri) } });
+
+		const failure = await failureOf(http);
+
+		expect(failure.message).toContain('working_memory');
+		expect(failure.message).toContain(RUN_ID);
+		expect(boundary.resolved).toEqual([]);
+	});
+
+	it('fails a structured output whose output form is not written rather than handing on its texts', async () => {
+		const uri = storedUri('s');
+		const body = { ...results('my.Report', { summary: reference(uri) }), output_form: null };
+		const { boundary, http } = mockBoundary({ body });
+
+		const failure = await failureOf(http);
+
+		expect(failure.message).toContain('output_form');
+		expect(failure.message).toContain('Get Run Result');
+		expect(failure.message).toContain(RUN_ID);
+		expect(boundary.resolved).toEqual([]);
+	});
+
+	it('waits on Poll & Get Result through the window where the output form is not yet written', async () => {
+		const uri = storedUri('s');
+		const output: FormNode = {
+			kind: 'object',
+			concept_ref: 'my.Report',
+			fields: [{ kind: 'prose', name: 'summary', concept_ref: 'native.Text' }],
+		};
+		const described = results('my.Report', { summary: reference(uri) }, output);
+		const { http } = mockBoundary({
+			body: described,
+			bodies: [{ ...described, output_form: null }, described],
+			objects: { [uri]: 'The summary.' },
+		});
+
+		const [[item]] = await Pipelex.prototype.execute.call(makeContext({ operation: 'poll', http }));
+
+		expect(item.json.status).toBe('COMPLETED');
+		expect(item.json.main_stuff).toEqual({ summary: { text: 'The summary.' } });
+	});
+
+	it('fails on Poll & Get Result once the output form never arrives', async () => {
+		const uri = storedUri('s');
+		const body = { ...results('my.Report', { summary: reference(uri) }), output_form: null };
+		const { boundary, http } = mockBoundary({ body });
+
+		const failure = await failureOf(http, undefined, 'poll');
+
+		expect(failure.message).toContain('output_form');
+		expect(boundary.resolved).toEqual([]);
+	});
+});
+
+// ── Bounds ────────────────────────────────────────────────────────────
+
+describe('stored texts — bounded', () => {
+	it('refuses texts whose declared sizes together cross the per-item cap, before anything is sent', async () => {
+		const uris = ['a', 'b', 'c'].map((hash) => storedUri(hash));
+		const { boundary, http } = mockBoundary({
+			body: results('native.Text', { items: uris.map((uri) => reference(uri, 'text/plain', STORED_TEXT_MAX_BYTES)) }),
+		});
+
+		const failure = await failureOf(http);
+
+		expect(failure.message).toContain(`${STORED_TEXTS_ITEM_MAX_BYTES / (1024 * 1024)} MiB`);
+		expect(failure.message).toContain('$.items[2]');
+		expect(boundary.resolved).toEqual([]);
+		expect(boundary.fetched).toEqual([]);
+	});
+
+	it('fails the item once the bytes read together cross the per-item cap, stopping every read', async () => {
+		const chunk = Buffer.alloc(1024 * 1024, 0x61);
+		const perTextMiB = Math.floor(STORED_TEXTS_ITEM_MAX_BYTES / (1024 * 1024) / 3) + 1;
+		const uris = ['a', 'b', 'c'].map((hash) => storedUri(hash));
+		// Sends its bytes, then nothing more, never ending on its own.
+		const endless = (): Readable => {
+			let sent = 0;
+			return new Readable({
+				objectMode: true,
+				read() {
+					if (sent < perTextMiB) {
+						sent += 1;
+						this.push(chunk);
+					}
+				},
+			});
+		};
+		const { boundary, http } = mockBoundary({
+			// Each reference understates its size: only the bytes read tell.
+			body: results('native.Text', { items: uris.map((uri) => reference(uri)) }),
+			streams: Object.fromEntries(uris.map((uri) => [uri, endless])),
+		});
+
+		const failure = await failureOf(http);
+
+		expect(failure.message).toContain(`${STORED_TEXTS_ITEM_MAX_BYTES / (1024 * 1024)} MiB`);
+		expect(failure.message).toContain('one item');
+		expect(boundary.hungBodies).toHaveLength(3);
+		expect(boundary.hungBodies.every((body) => body.destroyed)).toBe(true);
+	});
+
+	it('stops the other reads when a text read in full does not decode', async () => {
+		const bad = storedUri('bad');
+		const slow = storedUri('slow');
+		const { boundary, http } = mockBoundary({
+			body: results('native.Text', { items: [reference(bad), reference(slow)] }),
+			objects: { [bad]: Buffer.from([0xff, 0xfe]) },
+			hang: { [slow]: 'request' },
+		});
+
+		const failure = await failureOf(http);
+
+		expect(failure.message).toContain('UTF-8');
+		expect(failure.message).toContain('$.items[0]');
+		const slowRequest = boundary.fetched.find((request) => request.url === signedLink(slow))!;
+		expect((slowRequest.abortSignal as AbortSignal).aborted).toBe(true);
+	});
+});
+
+// ── The bulk resolve ──────────────────────────────────────────────────
+
+describe('stored texts — the bulk resolve', () => {
+	it('says the API could not be reached, naming the run, when the bulk resolve fails on the network', async () => {
+		const uri = storedUri('t');
+		const { http } = mockBoundary({
+			body: results('native.Text', reference(uri)),
+			resolveError: Object.assign(new Error('socket hang up'), { name: 'AxiosError', code: 'ECONNRESET' }),
+		});
+
+		const failure = await failureOf(http);
+
+		expect(failure.message).toContain('could not be reached');
+		expect(failure.message).toContain(RUN_ID);
+		expect(failure.description).toContain('ECONNRESET');
+		expect(`${failure.message} ${failure.description}`).not.toContain('secret-token');
+	});
+
+	it('gives the bulk resolve a deadline of its own', async () => {
+		const uri = storedUri('t');
+		const timer = new AbortController();
+		vi.spyOn(AbortSignal, 'timeout').mockReturnValue(timer.signal);
+		const { http } = mockBoundary({
+			body: results('native.Text', reference(uri)),
+			resolveHang: () => setTimeout(() => timer.abort(new DOMException('The operation timed out.', 'TimeoutError')), 0),
+		});
+
+		const failure = await failureOf(http);
+
+		expect(failure.message).toContain('did not answer within');
+		expect(failure.message).toContain(RUN_ID);
+	});
+
+	it('resolves a reference again when its link expires before its read starts', async () => {
+		const uri = storedUri('t');
+		const { boundary, http } = mockBoundary({
+			body: results('native.Text', reference(uri)),
+			objects: { [uri]: 'fresh' },
+			expiresAt: (_uri, call) => new Date(Date.now() + (call === 0 ? -1000 : 15 * 60_000)).toISOString(),
+		});
+
 		const json = await runGetResult(http);
-		expect(json.main_stuff).toEqual(reference(uri));
-		expect(boundary.urls).toHaveLength(1);
+
+		expect(json.main_stuff).toEqual({ text: 'fresh' });
+		expect(boundary.resolved).toEqual([[uri], [uri]]);
+		expect(boundary.fetched).toHaveLength(1);
+	});
+});
+
+// ── data: URLs ────────────────────────────────────────────────────────
+
+describe('stored texts — data: URLs', () => {
+	it('refuses a base64 payload a backtracking pattern would stall on, at once', async () => {
+		const url = `data:text/plain;base64,A${' '.repeat(200_000)}!`;
+		const { http } = mockBoundary({ body: results('native.Text', { url, size: 1, preview: 'A' }) });
+
+		const started = Date.now();
+		const failure = await failureOf(http);
+
+		expect(Date.now() - started).toBeLessThan(1000);
+		expect(failure.message).toContain('does not decode');
+	});
+
+	it('refuses malformed base64 rather than decoding it truncated, and accepts unpadded base64 as atob does', async () => {
+		const malformed = mockBoundary({ body: results('native.Text', { url: 'data:text/plain;base64,QUJDa', size: 4 }) });
+		expect((await failureOf(malformed.http)).message).toContain('does not decode');
+
+		const unpadded = mockBoundary({ body: results('native.Text', { url: 'data:text/plain;base64,QUI', size: 2 }) });
+		expect((await runGetResult(unpadded.http)).main_stuff).toEqual({ text: 'AB' });
+	});
+
+	it('refuses a data: URL over the cap without decoding it', async () => {
+		const payload = 'A'.repeat(4 * Math.ceil((STORED_TEXT_MAX_BYTES + 3) / 3));
+		const from = vi.spyOn(Buffer, 'from');
+		const { http } = mockBoundary({ body: results('native.Text', { url: `data:text/plain;base64,${payload}`, size: 1 }) });
+
+		const failure = await failureOf(http);
+
+		expect(failure.message).toContain('MiB');
+		expect(from.mock.calls.some((call) => (call as unknown[])[1] === 'base64')).toBe(false);
+	});
+
+	it('never writes a data: URL whole into the error', async () => {
+		const payload = Buffer.alloc(64 * 1024, 0xff).toString('base64');
+		const url = `data:text/plain;base64,${payload}`;
+		const { http } = mockBoundary({ body: results('native.Text', { url, size: 64 * 1024 }) });
+
+		const failure = await failureOf(http);
+
+		expect(failure.message).toContain('UTF-8');
+		expect(`${failure.message} ${failure.description}`).not.toContain(payload.slice(0, 64));
+		expect(failure.description).toContain('data:text/plain;base64,');
+		expect(failure.description.length).toBeLessThan(1000);
 	});
 });
 

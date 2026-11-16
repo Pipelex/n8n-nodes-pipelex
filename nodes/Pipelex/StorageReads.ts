@@ -106,7 +106,8 @@ export interface StorageReadDeadline {
 
 /**
  * The deadline of one read, `limitMs` from now, linked with `stop` when there is one (the
- * execution's cancel signal, or one that also fires when a sibling read fails).
+ * execution's cancel signal, or one that also fires when a sibling read fails). The stored texts'
+ * bulk resolve, a request to the Pipelex API, takes its deadline from here too.
  */
 export function storageReadDeadline(limitMs: number, stop: AbortSignal | undefined): StorageReadDeadline {
 	const deadline = AbortSignal.timeout(limitMs);

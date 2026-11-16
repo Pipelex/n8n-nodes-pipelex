@@ -20,7 +20,10 @@
  *   MTHDS standard rules (a `Document` may well be `text/plain`). The concept at each path comes
  *   from the run's own artifacts: the main stuff's concept from `working_memory`, and its
  *   structure from the first `output_form` / `input_form` node naming that concept, else the
- *   native's own shape. A result without a working memory is handed on as it is.
+ *   native's own shape. A result that does not say (no working memory, or a concept of the
+ *   method's own that no form describes) is handed on as it is only when nothing in `main_stuff`
+ *   is shaped like a stored text's reference; otherwise it fails the item, the poll waiting first
+ *   for the forms the runtime writes after `main_stuff` (see {@link lacksStoredTextConcepts}).
  * - **Only the platform's references and `data:` URLs are loaded.** A `pipelex-storage://`
  *   reference is resolved through `POST /v1/resolve-storage-url/bulk` (at most
  *   {@link BULK_RESOLVE_MAX_URIS} per request) and its signed link read from storage; a `data:`
@@ -33,11 +36,16 @@
  * under the node's own deadline (the upload's, a minute plus a second per started 128 KiB), plain
  * `http:` links are read as the node's uploads and downloads accept them (the local stack's store
  * hands them out), there is no opt-out (the node never hands on a reference), and a failure is an
- * item error naming the run, so the workflow can fetch it again with Get Run Result. The first
- * read that fails stops the item's other reads in flight, and a URL found under two kinds (a
- * `Text` here, a `JSON` there) is read once and decoded at each place by that place's kind. The
- * signed link never appears in an item, an error or a log: it is a bearer capability. The storage
- * plumbing the read shares with the File resource's Download is in `StorageReads.ts`.
+ * item error naming the run, so the workflow can fetch it again with Get Run Result. A text is
+ * decoded as soon as its read ends, its bytes then dropped, and the first read or decode that
+ * fails stops the item's other reads in flight; a URL found under two kinds (a `Text` here, a
+ * `JSON` there) is read once and decoded at each place by that place's kind. The item's texts
+ * together hold at most {@link STORED_TEXTS_ITEM_MAX_BYTES}, a bound the SDK does not set, so a
+ * long list of long texts fails the item rather than the n8n worker. The bulk resolve has its own
+ * deadline, and a link too close to its `expires_at` when its read is about to start is resolved
+ * again. The signed link never appears in an item, an error or a log: it is a bearer capability,
+ * and a `data:` URL is named in an error by its header and length alone. The storage plumbing the
+ * read shares with the File resource's Download is in `StorageReads.ts`.
  */
 
 import {
@@ -92,8 +100,26 @@ export const BULK_RESOLVE_MAX_URIS = 100;
 /** The cap on one stored text's bytes: the runtime's own cap on what it reads from storage, as the SDK's. */
 export const STORED_TEXT_MAX_BYTES = 100 * 1024 * 1024;
 
+/**
+ * The cap on the bytes of all the stored texts of one item together: a list of long texts fails
+ * the item past it rather than filling the n8n worker's memory.
+ */
+export const STORED_TEXTS_ITEM_MAX_BYTES = 256 * 1024 * 1024;
+
 /** How many stored texts one item reads from storage at once. */
 const STORED_TEXT_CONCURRENCY = 4;
+
+/** The deadline of one bulk resolve request: the route presigns locally, so a minute is generous. */
+const BULK_RESOLVE_TIMEOUT_MS = 60_000;
+
+/** A link this close to its `expires_at` when its read is about to start is resolved again, as the SDK's downloads do. */
+const LINK_EXPIRY_MARGIN_MS = 10_000;
+
+/** How much of a reference that is not a `data:` URL an error shows. */
+const REFERENCE_SHOWN_MAX_CHARS = 256;
+
+/** How much of a `data:` URL's header (its media type) an error shows. */
+const DATA_URL_HEADER_SHOWN_MAX_CHARS = 64;
 
 /** The message a read's stream is destroyed with when its deadline passes or something else stops it. */
 const READ_STOPPED_MESSAGE = 'The read from storage was stopped.';
@@ -182,6 +208,13 @@ export function storedTextKindOfNode(node: FormNode | undefined): StoredTextKind
  * says what the output is, and the result is handed on as it is, as the SDK does.
  */
 export function mainStuffNode(result: IDataObject): FormNode | null {
+	const conceptRef = mainStuffConcept(result);
+	if (conceptRef === null) return null;
+	return contentNode(conceptRef, result.main_stuff, result);
+}
+
+/** The main stuff's concept, as the working memory names it, or `null` when it names none. */
+function mainStuffConcept(result: IDataObject): string | null {
 	const memory = result.working_memory;
 	if (memory === null || typeof memory !== 'object' || Array.isArray(memory)) return null;
 	const aliases = (memory as { aliases?: unknown }).aliases;
@@ -193,9 +226,45 @@ export function mainStuffNode(result: IDataObject): FormNode | null {
 	const root = (memory as { root?: unknown }).root;
 	if (typeof root !== 'object' || root === null) return null;
 	const stuff = (root as Record<string, unknown>)[name];
-	const conceptRef = conceptRefOf((stuff as { concept?: unknown } | undefined)?.concept);
-	if (conceptRef === null) return null;
-	return contentNode(conceptRef, result.main_stuff, result);
+	return conceptRefOf((stuff as { concept?: unknown } | undefined)?.concept);
+}
+
+/**
+ * Whether a completed result cannot say which values of its `main_stuff` are stored texts while
+ * something there is shaped like one's reference ({@link mayHoldStoredTexts}): the working memory
+ * names no main stuff, or its concept is the method's own and no `output_form` / `input_form` node
+ * describes it, so a text in one of its fields could not be told from any other value. The runtime
+ * writes `output_form` after `main_stuff`, so a poll can land in between; the poll loop then waits
+ * as it waits for a `main_stuff` still being written, and {@link loadStoredTexts} fails the item
+ * rather than hand on a reference. A native concept needs no form: the walk knows its shape.
+ */
+export function lacksStoredTextConcepts(result: IDataObject): boolean {
+	if (result.main_stuff === undefined || result.main_stuff === null) return false;
+	if (!mayHoldStoredTexts(result.main_stuff)) return false;
+	const conceptRef = mainStuffConcept(result);
+	if (conceptRef === null) return true;
+	if (conceptRef.startsWith(NATIVE_PREFIX)) return false;
+	return formNodeForConcept(conceptRef, result) === undefined;
+}
+
+/**
+ * Whether a value holds anything shaped like a stored text's reference, as the SDK's
+ * `mayHoldStoredTexts` reads it: an object carrying a string `url`, no inline value field, and a
+ * `size` or a `preview`, which the runtime sets on every reference it stores and an image or a
+ * document content never carries.
+ */
+export function mayHoldStoredTexts(value: unknown): boolean {
+	if (Array.isArray(value)) return value.some(mayHoldStoredTexts);
+	if (typeof value !== 'object' || value === null) return false;
+	const fields = value as Record<string, unknown>;
+	if (
+		typeof fields.url === 'string' &&
+		Object.values(STORED_TEXT_VALUE_FIELD).every((field) => fields[field] === undefined || fields[field] === null) &&
+		('size' in fields || 'preview' in fields)
+	) {
+		return true;
+	}
+	return Object.values(fields).some(mayHoldStoredTexts);
 }
 
 /**
@@ -255,6 +324,11 @@ function isPluralEnvelope(content: unknown, element: FormNode): boolean {
 
 /** The node the forms state for a concept, else the native's own shape, else an opaque node. */
 function nodeForConcept(conceptRef: string, source: IDataObject): FormNode {
+	return formNodeForConcept(conceptRef, source) ?? nativeNode(conceptRef);
+}
+
+/** The first node of the `output_form`, then the `input_form`, that names a concept. */
+function formNodeForConcept(conceptRef: string, source: IDataObject): FormNode | undefined {
 	for (const form of [source.output_form, source.input_form]) {
 		if (form === null || typeof form !== 'object') continue;
 		for (const descriptor of Object.values(form as Record<string, unknown>)) {
@@ -264,7 +338,7 @@ function nodeForConcept(conceptRef: string, source: IDataObject): FormNode {
 			}
 		}
 	}
-	return nativeNode(conceptRef);
+	return undefined;
 }
 
 /** The top nodes of one form entry: an output's `field`, an input's `fields`. */
@@ -392,21 +466,36 @@ function isStorageReference(url: string): boolean {
 
 // ── Decoding ─────────────────────────────────────────────────────────
 
-/** A `data:` URL's bytes, base64 or percent-encoded, or `null` when it does not decode. */
-function decodeDataUrl(url: string): Buffer | null {
+/**
+ * A `data:` URL's bytes, base64 or percent-encoded; `'malformed'` when it does not decode, and
+ * `'too_large'` when its bytes would be over `maxBytes`, told before they are decoded.
+ *
+ * Base64 is read as the SDK's `atob` reads it (the WHATWG forgiving-base64 decode): ASCII
+ * whitespace dropped, at most two `=` of padding when the length is a multiple of four, then a
+ * length that is not one past a multiple of four and nothing outside the alphabet. Every test is
+ * one linear pass, never a pattern a method's payload could drive into backtracking.
+ */
+function decodeDataUrl(url: string, maxBytes: number): Buffer | 'malformed' | 'too_large' {
 	const comma = url.indexOf(',');
-	if (comma < 0) return null;
+	if (comma < 0) return 'malformed';
 	const header = url.slice(DATA_URL_SCHEME.length, comma);
 	const payload = url.slice(comma + 1);
 	if (/;base64$/i.test(header)) {
-		if (!/^[A-Za-z0-9+/\s]*={0,2}\s*$/.test(payload)) return null;
-		return Buffer.from(payload, 'base64');
+		let data = payload.replace(/[\t\n\f\r ]+/g, '');
+		if (data.length % 4 === 0 && data.endsWith('=')) data = data.slice(0, data.endsWith('==') ? -2 : -1);
+		if (data.length % 4 === 1 || /[^A-Za-z0-9+/]/.test(data)) return 'malformed';
+		if (Math.floor((data.length * 3) / 4) > maxBytes) return 'too_large';
+		return Buffer.from(data, 'base64');
 	}
+	// A decoded byte takes at most three characters (`%XX`), so this many characters hold more.
+	if (Math.ceil(payload.length / 3) > maxBytes) return 'too_large';
+	let bytes: Buffer;
 	try {
-		return Buffer.from(decodeURIComponent(payload), 'utf8');
+		bytes = Buffer.from(decodeURIComponent(payload), 'utf8');
 	} catch {
-		return null;
+		return 'malformed';
 	}
+	return bytes.length > maxBytes ? 'too_large' : bytes;
 }
 
 /** Why a stored text could not be loaded: a reason in the SDK's vocabulary, and the sentence a person reads. */
@@ -462,6 +551,37 @@ function formatMiB(bytes: number): string {
 	return `${Number.isInteger(mib) ? mib : mib.toFixed(1)} MiB`;
 }
 
+/** A stored text over the cap on one text; `size` when its reference states it. */
+function overTextCap(size?: number): LoadFailure {
+	const over = `over the ${formatMiB(STORED_TEXT_MAX_BYTES)} a stored text may hold.`;
+	return { reason: 'too_large', detail: size === undefined ? `it is ${over}` : `it is ${formatMiB(size)}, ${over}` };
+}
+
+/** A stored text that takes the item's texts together over {@link STORED_TEXTS_ITEM_MAX_BYTES}. */
+function overItemCap(): LoadFailure {
+	return {
+		reason: 'item_too_large',
+		detail: `with the texts loaded before it, it is over the ${formatMiB(STORED_TEXTS_ITEM_MAX_BYTES)} the node loads into one item.`,
+	};
+}
+
+/**
+ * A reference as an error names it: a `data:` URL by its header and length, never its payload,
+ * which is the text itself; any other by itself, cut past {@link REFERENCE_SHOWN_MAX_CHARS}.
+ */
+function shownReference(url: string): string {
+	if (url.startsWith(DATA_URL_SCHEME)) {
+		const comma = url.indexOf(',');
+		const header = comma < 0 ? DATA_URL_SCHEME : url.slice(0, comma + 1);
+		const shown =
+			header.length > DATA_URL_HEADER_SHOWN_MAX_CHARS + DATA_URL_SCHEME.length
+				? `${header.slice(0, DATA_URL_HEADER_SHOWN_MAX_CHARS + DATA_URL_SCHEME.length)}…`
+				: header;
+		return `${shown}… (an inline data: URL of ${url.length} characters)`;
+	}
+	return url.length > REFERENCE_SHOWN_MAX_CHARS ? `${url.slice(0, REFERENCE_SHOWN_MAX_CHARS)}… (${url.length} characters)` : url;
+}
+
 // ── Loading ──────────────────────────────────────────────────────────
 
 /** What a failed load is told by: the item, the run, and the text that failed. */
@@ -478,7 +598,7 @@ interface LoadContext {
  */
 function loadError(load: LoadContext, site: StoredTextSite, failure: LoadFailure, description?: string): NodeOperationError {
 	const path = renderPath(site.segments);
-	const facts = [`Reference: ${site.url}`, `Reason: ${failure.reason}`];
+	const facts = [`Reference: ${shownReference(site.url)}`, `Reason: ${failure.reason}`];
 	if (description) facts.push(description);
 	return new NodeOperationError(
 		load.ctx.getNode(),
@@ -487,35 +607,67 @@ function loadError(load: LoadContext, site: StoredTextSite, failure: LoadFailure
 	);
 }
 
-/** One reference's verdict from the bulk route: its signed link, or the route's refusal. */
-type Resolution = { link: string } | LoadFailure;
+/**
+ * One reference's verdict from the bulk route: its signed link and when the link expires (epoch
+ * milliseconds, when the route says), or the route's refusal.
+ */
+type Resolution = { link: string; expiresAt: number | undefined } | LoadFailure;
 
 /**
  * `POST /v1/resolve-storage-url/bulk` for every reference, at most {@link BULK_RESOLVE_MAX_URIS}
  * per request, answering one verdict per reference. A refusal of the whole request (no route on
  * the Base URL, the credential, an org-less caller, a signing failure) fails the item with the
  * platform's problem; a refusal of one reference is that reference's verdict. An answer that is
- * not one item per reference fails the item without its body, which may hold signed links.
+ * not one item per reference fails the item without its body, which may hold signed links. Each
+ * request has its own deadline, {@link BULK_RESOLVE_TIMEOUT_MS}, linked with `stop`, and a request
+ * that gets no answer fails the item naming the run, never with the HTTP client's own error.
  */
 async function resolveReferences(
 	load: LoadContext,
 	conn: ApiConnection,
 	uris: string[],
+	stop: AbortSignal | undefined,
 ): Promise<Map<string, Resolution>> {
 	const { ctx, itemIndex, runId } = load;
 	const verdicts = new Map<string, Resolution>();
 	for (let start = 0; start < uris.length; start += BULK_RESOLVE_MAX_URIS) {
 		const chunk = uris.slice(start, start + BULK_RESOLVE_MAX_URIS);
-		const response = (await ctx.helpers.httpRequest({
-			method: 'POST' as IHttpRequestMethods,
-			url: `${conn.baseUrl}/v1/resolve-storage-url/bulk`,
-			headers: apiHeaders(conn),
-			body: { uris: chunk },
-			json: true,
-			returnFullResponse: true,
-			ignoreHttpStatusErrors: true,
-			abortSignal: ctx.getExecutionCancelSignal(),
-		})) as IN8nHttpFullResponse;
+		const { deadline, signal, release } = storageReadDeadline(BULK_RESOLVE_TIMEOUT_MS, stop);
+		let response: IN8nHttpFullResponse | undefined;
+		let failure: unknown;
+		try {
+			response = (await ctx.helpers.httpRequest({
+				method: 'POST' as IHttpRequestMethods,
+				url: `${conn.baseUrl}/v1/resolve-storage-url/bulk`,
+				headers: apiHeaders(conn),
+				body: { uris: chunk },
+				json: true,
+				returnFullResponse: true,
+				ignoreHttpStatusErrors: true,
+				abortSignal: signal,
+			})) as IN8nHttpFullResponse;
+		} catch (error) {
+			failure = error;
+		} finally {
+			release();
+		}
+		// Classified outside the catch: the HTTP client's error carries the request, the API key included.
+		if (response === undefined) {
+			if (ctx.getExecutionCancelSignal()?.aborted) {
+				throw new NodeOperationError(ctx.getNode(), 'The stored texts were being loaded when the execution was cancelled.', {
+					itemIndex,
+				});
+			}
+			const lead = 'The run completed, but its long texts, which Pipelex stores apart from the result, could not be located:';
+			const retry = `Fetch it again with the "Get Run Result" operation and pipeline_run_id "${runId}".`;
+			throw new NodeOperationError(
+				ctx.getNode(),
+				deadline.aborted || isTimeoutFailure(failure)
+					? `${lead} the Pipelex API did not answer within ${Math.round(BULK_RESOLVE_TIMEOUT_MS / 1000)} s. ${retry}`
+					: `${lead} the Pipelex API at ${conn.baseUrl} could not be reached. ${retry}`,
+				{ itemIndex, description: `Network failure: ${describeNetworkFailure(failure)}.` },
+			);
+		}
 
 		const statusCode = response.statusCode;
 		if (statusCode < 200 || statusCode >= 300) {
@@ -555,7 +707,7 @@ function readResolution(item: unknown): Resolution {
 	if (item === null || typeof item !== 'object') {
 		return { reason: 'unknown', detail: 'Pipelex gave no verdict for its reference.' };
 	}
-	const { url, error } = item as { url?: unknown; error?: unknown };
+	const { url, error, expires_at: expiresAt } = item as { url?: unknown; error?: unknown; expires_at?: unknown };
 	if (error !== null && error !== undefined) {
 		const { code, detail } = (typeof error === 'object' ? error : {}) as { code?: unknown; detail?: unknown };
 		const text = typeof detail === 'string' && detail.trim().length > 0 ? detail.trim() : 'Pipelex refused its reference.';
@@ -567,21 +719,38 @@ function readResolution(item: unknown): Resolution {
 	if (typeof url !== 'string' || url.length === 0) {
 		return { reason: 'unknown', detail: 'Pipelex resolved its reference to no link.' };
 	}
-	return { link: url };
+	const expiry = typeof expiresAt === 'string' ? Date.parse(expiresAt) : Number.NaN;
+	return { link: url, expiresAt: Number.isFinite(expiry) ? expiry : undefined };
+}
+
+/** Whether a link expires too soon to start its read: within {@link LINK_EXPIRY_MARGIN_MS}. */
+function expiresSoon(resolution: { expiresAt: number | undefined }): boolean {
+	return resolution.expiresAt !== undefined && resolution.expiresAt - LINK_EXPIRY_MARGIN_MS <= Date.now();
 }
 
 /**
- * Read a stream to its end, refusing it once it crosses `maxBytes` (the stream is then destroyed,
- * never read further). Answers `undefined` on crossing the cap.
+ * Takes `bytes` from the item's budget of {@link STORED_TEXTS_ITEM_MAX_BYTES}, answering whether
+ * the item's texts together are still within it.
  */
-async function readCapped(stream: BodyStream, maxBytes: number): Promise<Buffer | undefined> {
+type TakeBytes = (bytes: number) => boolean;
+
+/**
+ * Read a stream to its end, refusing it once it crosses `maxBytes` (`'too_large'`) or the item's
+ * budget (`'item_too_large'`); the stream is then destroyed, never read further.
+ */
+async function readCapped(
+	stream: BodyStream,
+	maxBytes: number,
+	take: TakeBytes,
+): Promise<Buffer | 'too_large' | 'item_too_large'> {
 	const chunks: Buffer[] = [];
 	let total = 0;
 	try {
 		for await (const chunk of stream) {
 			const bytes = bodyBytes(chunk);
 			total += bytes.length;
-			if (total > maxBytes) return undefined;
+			if (total > maxBytes) return 'too_large';
+			if (!take(bytes.length)) return 'item_too_large';
 			chunks.push(bytes);
 		}
 	} finally {
@@ -615,13 +784,15 @@ function storageFailure(statusCode: number, body: string): LoadFailure {
  * execution is cancelled or another stored text of the item failed: no `Authorization` (the
  * signature in the link is the credential, and a second one makes S3 refuse the request), no
  * redirect followed, the body read as a stream and refused once it crosses
- * {@link STORED_TEXT_MAX_BYTES}. Every failure is described without the link.
+ * {@link STORED_TEXT_MAX_BYTES} or the item's budget, which `take` keeps. Every failure is
+ * described without the link.
  */
 async function readSignedLink(
 	load: LoadContext,
 	site: StoredTextSite,
 	link: string,
 	stopSignal: AbortSignal,
+	take: TakeBytes,
 ): Promise<Buffer> {
 	const { ctx } = load;
 	const origin = storageOrigin(link);
@@ -685,19 +856,20 @@ async function readSignedLink(
 				throw loadError(load, site, storageFailure(statusCode, prefix.toString('utf8')));
 			}
 			const declared = Number((response.headers ?? {})['content-length']);
-			const tooLarge = (): NodeOperationError =>
-				loadError(load, site, {
-					reason: 'too_large',
-					detail: `it is over the ${formatMiB(STORED_TEXT_MAX_BYTES)} a stored text may hold.`,
-				});
-			if (Number.isFinite(declared) && declared > STORED_TEXT_MAX_BYTES) throw tooLarge();
-			let bytes: Buffer | undefined;
+			if (Number.isFinite(declared) && declared > STORED_TEXT_MAX_BYTES) throw loadError(load, site, overTextCap());
+			let bytes: Buffer | 'too_large' | 'item_too_large';
 			try {
-				bytes = stream ? await readCapped(stream, STORED_TEXT_MAX_BYTES) : bodyBytes(body);
+				if (stream) {
+					bytes = await readCapped(stream, STORED_TEXT_MAX_BYTES, take);
+				} else {
+					const whole = bodyBytes(body);
+					bytes = whole.length > STORED_TEXT_MAX_BYTES ? 'too_large' : take(whole.length) ? whole : 'item_too_large';
+				}
 			} catch (error) {
 				throw failed(error);
 			}
-			if (bytes === undefined || bytes.length > STORED_TEXT_MAX_BYTES) throw tooLarge();
+			if (bytes === 'too_large') throw loadError(load, site, overTextCap());
+			if (bytes === 'item_too_large') throw loadError(load, site, overItemCap());
 			return bytes;
 		} finally {
 			guarded.release();
@@ -714,7 +886,8 @@ async function readSignedLink(
  * changed: a new one is returned, or the same one when there is nothing to load. Only
  * `main_stuff` is loaded, as the SDK loads it; `working_memory` is handed on as the run wrote it.
  *
- * A text that cannot be loaded fails the item, naming where it sits, its reference and why.
+ * A text that cannot be loaded fails the item, naming where it sits, its reference and why; so
+ * does a result that cannot say which of its values are texts ({@link lacksStoredTextConcepts}).
  */
 export async function loadStoredTexts(
 	ctx: IExecuteFunctions,
@@ -723,15 +896,23 @@ export async function loadStoredTexts(
 	itemIndex: number,
 ): Promise<IDataObject> {
 	if (result.main_stuff === undefined || result.main_stuff === null) return result;
+	const runId = typeof result.pipeline_run_id === 'string' ? result.pipeline_run_id : '';
+	if (lacksStoredTextConcepts(result)) {
+		throw new NodeOperationError(
+			ctx.getNode(),
+			`The run completed, but its result does not say which of its values are long texts Pipelex stores apart (its working_memory or its output_form is missing), so they could not be loaded. Fetch it again in a moment with the "Get Run Result" operation and pipeline_run_id "${runId}"; if this persists, report the run to Pipelex support.`,
+			{ itemIndex },
+		);
+	}
 	const node = mainStuffNode(result);
 	if (node === null) return result;
 	const sites = findStoredTexts(result.main_stuff, node);
 	if (sites.length === 0) return result;
 
-	const runId = typeof result.pipeline_run_id === 'string' ? result.pipeline_run_id : '';
 	const load: LoadContext = { ctx, itemIndex, runId };
 
-	// Refused before anything is sent: a stored text under a URL the node never reads.
+	// Refused before anything is sent: a stored text under a URL the node never reads, one over
+	// the cap on a text, and texts whose stated sizes together are over the item's cap.
 	for (const site of sites) {
 		if (!isStorageReference(site.url) && !site.url.startsWith(DATA_URL_SCHEME)) {
 			throw loadError(load, site, {
@@ -741,49 +922,72 @@ export async function loadStoredTexts(
 			});
 		}
 		const size = site.reference.size;
-		if (typeof size === 'number' && size > STORED_TEXT_MAX_BYTES) {
-			throw loadError(load, site, {
-				reason: 'too_large',
-				detail: `it is ${formatMiB(size)}, over the ${formatMiB(STORED_TEXT_MAX_BYTES)} a stored text may hold.`,
-			});
-		}
+		if (typeof size === 'number' && size > STORED_TEXT_MAX_BYTES) throw loadError(load, site, overTextCap(size));
 	}
 
-	// One read per distinct URL, named by the first place it was found.
+	// One read per distinct URL, named by the first place it was found, and decoded once per kind
+	// it is found under, a decode failure named by the first place of that kind.
 	const firstSite = new Map<string, StoredTextSite>();
-	for (const site of sites) if (!firstSite.has(site.url)) firstSite.set(site.url, site);
+	const sitesByKind = new Map<string, Map<StoredTextKind, StoredTextSite>>();
+	for (const site of sites) {
+		if (!firstSite.has(site.url)) firstSite.set(site.url, site);
+		const kinds = sitesByKind.get(site.url) ?? new Map<StoredTextKind, StoredTextSite>();
+		if (!kinds.has(site.kind)) kinds.set(site.kind, site);
+		sitesByKind.set(site.url, kinds);
+	}
 	const urls = [...firstSite.keys()];
-	const references = urls.filter(isStorageReference);
-	const resolutions = references.length > 0 ? await resolveReferences(load, conn, references) : new Map();
-
-	// The bytes are kept per URL and decoded per place: one URL may sit where a Text is and where a
-	// JSON is, and each place holds the value its own concept makes of the bytes.
-	const bytesByUrl = new Map<string, Buffer>();
-	const readOne = async (url: string, stopSignal: AbortSignal): Promise<Buffer> => {
+	let declaredTotal = 0;
+	for (const url of urls) {
 		const site = firstSite.get(url)!;
-		if (url.startsWith(DATA_URL_SCHEME)) {
-			const decoded = decodeDataUrl(url);
-			if (decoded === null) throw loadError(load, site, { reason: 'unsupported_url', detail: 'its data: URL does not decode.' });
-			if (decoded.length > STORED_TEXT_MAX_BYTES) {
-				throw loadError(load, site, {
-					reason: 'too_large',
-					detail: `it is over the ${formatMiB(STORED_TEXT_MAX_BYTES)} a stored text may hold.`,
-				});
-			}
-			return decoded;
-		}
-		const resolution = resolutions.get(url) as Resolution;
-		if (!('link' in resolution)) throw loadError(load, site, resolution);
-		return await readSignedLink(load, site, resolution.link, stopSignal);
-	};
+		const size = site.reference.size;
+		if (typeof size === 'number' && size > 0) declaredTotal += size;
+		if (declaredTotal > STORED_TEXTS_ITEM_MAX_BYTES) throw loadError(load, site, overItemCap());
+	}
 
-	// A few reads at a time. The first failure stops new reads from starting and stops the reads in
-	// flight, through one signal linked with the execution's cancel signal; the item then fails with
-	// that first failure, once every read has settled.
+	// The first failure stops new reads from starting and stops the reads in flight, through one
+	// signal linked with the execution's cancel signal; the item then fails with that first
+	// failure, once every read has settled.
 	const stopReads = new AbortController();
 	const cancelSignal = ctx.getExecutionCancelSignal();
 	const stopping = cancelSignal ? eitherSignal(cancelSignal, stopReads.signal) : undefined;
 	const stopSignal = stopping?.signal ?? stopReads.signal;
+
+	// Every byte read counts against the item's budget, whatever the references state.
+	let held = 0;
+	const take: TakeBytes = (bytes) => {
+		held += bytes;
+		return held <= STORED_TEXTS_ITEM_MAX_BYTES;
+	};
+
+	// Each text is decoded as soon as its bytes are in, and its bytes dropped: only the values stay.
+	const values = new Map<string, unknown>();
+	const valueKey = (kind: StoredTextKind, url: string): string => `${kind} ${url}`;
+	let resolutions = new Map<string, Resolution>();
+	const readOne = async (url: string): Promise<void> => {
+		const site = firstSite.get(url)!;
+		let bytes: Buffer;
+		if (url.startsWith(DATA_URL_SCHEME)) {
+			const decoded = decodeDataUrl(url, STORED_TEXT_MAX_BYTES);
+			if (decoded === 'malformed') throw loadError(load, site, { reason: 'unsupported_url', detail: 'its data: URL does not decode.' });
+			if (decoded === 'too_large') throw loadError(load, site, overTextCap());
+			if (!take(decoded.length)) throw loadError(load, site, overItemCap());
+			bytes = decoded;
+		} else {
+			let resolution = resolutions.get(url) as Resolution;
+			// A link resolved long ago, while earlier texts were read, is resolved again just before its read.
+			if ('link' in resolution && expiresSoon(resolution)) {
+				resolution = (await resolveReferences(load, conn, [url], stopSignal)).get(url) as Resolution;
+			}
+			if (!('link' in resolution)) throw loadError(load, site, resolution);
+			bytes = await readSignedLink(load, site, resolution.link, stopSignal, take);
+		}
+		for (const [kind, kindSite] of sitesByKind.get(url)!) {
+			const decoded = decodeStoredValue(kind, bytes);
+			if (!('value' in decoded)) throw loadError(load, kindSite, decoded);
+			values.set(valueKey(kind, url), decoded.value);
+		}
+	};
+
 	let next = 0;
 	let failed = false;
 	let firstFailure: unknown;
@@ -792,7 +996,7 @@ export async function loadStoredTexts(
 			const url = urls[next];
 			next += 1;
 			try {
-				bytesByUrl.set(url, await readOne(url, stopSignal));
+				await readOne(url);
 			} catch (error) {
 				if (!failed) {
 					failed = true;
@@ -803,22 +1007,17 @@ export async function loadStoredTexts(
 		}
 	};
 	try {
+		const references = urls.filter(isStorageReference);
+		if (references.length > 0) resolutions = await resolveReferences(load, conn, references, cancelSignal);
 		await Promise.all(Array.from({ length: Math.min(STORED_TEXT_CONCURRENCY, urls.length) }, worker));
 	} finally {
 		stopping?.unlink();
 	}
 	if (failed) throw firstFailure;
 
-	const values = new Map<string, unknown>();
 	let loaded: unknown = structuredClone(result.main_stuff);
 	for (const site of sites) {
-		const key = `${site.kind} ${site.url}`;
-		if (!values.has(key)) {
-			const decoded = decodeStoredValue(site.kind, bytesByUrl.get(site.url)!);
-			if (!('value' in decoded)) throw loadError(load, site, decoded);
-			values.set(key, decoded.value);
-		}
-		loaded = replaceAt(loaded, site.segments, loadedForm(site, values.get(key)));
+		loaded = replaceAt(loaded, site.segments, loadedForm(site, values.get(valueKey(site.kind, site.url))));
 	}
 	return { ...result, main_stuff: loaded as IDataObject };
 }
